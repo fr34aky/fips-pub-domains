@@ -33,9 +33,9 @@ Non-goals:
 ```
 client resolver                         Nostr relays        legacy DNS        npubxyz (domain's fips DNS server)
       │  1. claim for example.org? ───────────▶│
-      │◀──────── claim: npubxyz, port 53 ──────│
+      │◀──────── claim: npubxyz, port 5355 ────│
       │  2. _fips-dns._udp.example.org SRV? ───────────────────────▶│     (optional; skipped when unreachable)
-      │◀──────────────────── npubxyz.fips:53 ────────────────────────│
+      │◀─────────────────── npubxyz.fips:5355 ───────────────────────│
       │  3. www.example.org? (DNS over UDP, over the mesh) ─────────────────────────────▶│
       │◀────────────────────────────── CNAME npub1234.fips. ─────────────────────────────│
       ▼
@@ -63,7 +63,7 @@ Published by the server that serves a domain.
   "pubkey": "<npubxyz hex>",
   "tags": [
     ["d", "example.org"],
-    ["port", "53"],
+    ["port", "5355"],
     ["dnssec", "<base64 RFC 9102-style chain for the _fips-dns SRV RRset>"]   // optional
   ],
   "content": ""
@@ -122,7 +122,7 @@ characters, no label starting with `npub1`).
 ## 4. Legacy DNS records (optional verifier)
 
 ```
-_fips-dns._udp.example.org.  SRV  0 0 53  npub1xyz…(63 chars).fips.
+_fips-dns._udp.example.org.  SRV  0 0 5355  npub1xyz…(63 chars).fips.
 ```
 
 - An npub is exactly 63 characters, the maximum length of one DNS label, so
@@ -186,7 +186,7 @@ claim for a public suffix (`ch`, `co.uk`) — use a bundled Public Suffix List.
 
 ## 6. Step 3 wire protocol
 
-- Plain DNS over **UDP** to `[fd… of npubxyz]:<port>` (default 53), over the
+- Plain DNS over **UDP** to `[fd… of npubxyz]:<port>` (default 5355), over the
   mesh. UDP is sufficient: fips authenticates the source address, so the
   spoofing problem that motivates TCP on the Internet does not exist, and UDP
   saves a round trip. Answers are small — far below the mesh's effective IPv6
@@ -200,13 +200,30 @@ claim for a public suffix (`ch`, `co.uk`) — use a bundled Public Suffix List.
 - Unknown name → NXDOMAIN. `*` in the zone → the server's own npub.
 - Server offline → fall back to the zone record (§3.3).
 
+### 6.1 The server
+
+"The domain's fips DNS server" is a dedicated program (`fips-names-server`,
+see [plan-phase1.md](plan-phase1.md) §3.3), **not** fips's own `.fips`
+responder: that responder binds loopback, answers only `.fips`, and
+deliberately drops queries arriving on the mesh interface (it protects the
+hosts file from enumeration). The domain server listens on the node's own
+fips address, UDP and TCP, default port **5355** (53 needs privileges; the
+port travels in the claim and the SRV anyway), and answers from a small
+per-domain zone file. The same program signs and publishes the claim with
+the node key, and re-publishes it periodically.
+
 ## 7. OS integration
 
 Browsers never ask for SRV and are never changed. The machine's resolver is:
 
 - **Phone (fips2go):** the shim already intercepts all DNS from captured
   apps; the hook is the non-`.fips` branch of `DnsProxy::serve`
-  (`shim/src/dns.rs`), which forwards to upstreams today.
+  (`shim/src/dns.rs`), which forwards to upstreams today. The step 3 query
+  cannot use a kernel socket (the app's UID is outside its own tunnel); it
+  goes through the shim's in-process smoltcp stack like the "Mesh names"
+  HTTP fetch (`shim/src/meshhttp.rs`), with a UDP socket added. The
+  `CNAME npub….fips.` answer is then re-asked to the in-process responder,
+  which is what registers the identity with the node.
 - **Linux/macOS:** a local forwarding resolver for *all* names (standalone, or
   inside the fips daemon), wired in via systemd-resolved (`~.` routing domain
   on the fips link) or as dnsmasq/unbound upstream.
@@ -265,8 +282,15 @@ Known holes:
 
 ## 10. Open questions
 
-- Final kind numbers (registration with the Nostr NIP process).
-- Where the desktop resolver lives: standalone daemon vs. inside fips.
-- Whether witnesses should be the user's fips-ui-synced trusted nodes by
-  default.
-- Relay selection for claims: fips's relay pool, or a dedicated set.
+Proposed answers in [plan-phase1.md](plan-phase1.md) §9; confirmed ones move
+here as decisions.
+
+- Final kind numbers: keep 37197–37199 until the format has survived the
+  phase 1 demo, then register with the Nostr NIP process.
+- Desktop resolver: standalone daemon in this repo, not inside fips (keeps
+  the repo independent of the fips fork; fips's responder has the mesh
+  filter, see §6.1).
+- Witnesses (phase 2): the user's synced trusted nodes, opt-in.
+- Relays: the node's own relay list, fetched by the resolver's own small
+  relay client — fips exposes no generic event fetch; sharing its pool is a
+  later optimisation.

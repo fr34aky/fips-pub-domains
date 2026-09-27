@@ -70,10 +70,21 @@ move it into one of those repos.
 - fips's mesh effective IPv6 MTU is ~1200 bytes.
 - In fips2go the integration point is the non-`.fips` branch of
   `DnsProxy::serve` in `shim/src/dns.rs` (forwards to upstreams today).
+- fips's own DNS responder (`src/upper/dns.rs`) binds `[::1]:5354`, answers
+  only `.fips`, and drops queries arriving on the mesh interface — so the
+  step 3 server is a separate program (spec §6.1), default port 5355.
+- The fips2go shim cannot open kernel sockets to `fd…` addresses; mesh
+  traffic goes through its in-process smoltcp stack (`shim/src/meshhttp.rs`,
+  TCP only today). Step 3 on the phone needs a UDP flavour of that.
+- fips's Nostr runtime has no generic "fetch events by filter" API; the
+  resolver brings its own relay client (nostr-sdk) using the node's relay
+  list.
 
-## Next steps (not started)
+## Next steps
 
-Phase 1 MVP per spec §9: claim + SRV verification + pinning + step 3 over UDP
-with CNAME, unverified refused, phone integration in the fips2go shim. Open
-questions are listed in spec §10 (kind numbers, where the desktop resolver
-lives, default witnesses, relay selection).
+Phase 1 is planned in `docs/plan-phase1.md` (2026-09-28): a Rust workspace
+in this repo — `names-core` (policy, no I/O), `names-resolve` (relay/SRV/mesh
+adapters behind a `MeshDns` trait), `names-server` (step 3 server + claim
+publisher), `names-cli`. Milestones: core+tests → server + desktop lookup
+over the mesh → fips2go integration → kind registration. Nothing is coded
+yet.

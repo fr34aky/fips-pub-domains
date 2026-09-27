@@ -51,7 +51,12 @@ by the mesh: only `npubxyz` can send from `npubxyz`'s fips address.
 All events are signed with the node's identity key — in fips the Nostr key
 *is* the mesh identity, so an event authored by `npubX` is authentic for mesh
 node `npubX`. Kind numbers sit next to fips's own (`37195` overlay advert,
-`21059` signal); they are placeholders until registered.
+`21059` signal). Checked 2026-09-28: 37195–37199 are unregistered in both
+the NIPs README kind table and `nostr-protocol/registry-of-kinds` (nearest
+neighbours 37515–37517, geocaching), and no existing NIP covers domain →
+pubkey service bindings (NIP-05 is the reverse direction over HTTPS). A new
+NIP is needed; the draft is [nip-draft.md](nip-draft.md), and the tag names
+below follow it (`service` replaces the earlier bare `port` tag).
 
 ### 3.1 Claim — kind 37197 (addressable)
 
@@ -63,7 +68,7 @@ Published by the server that serves a domain.
   "pubkey": "<npubxyz hex>",
   "tags": [
     ["d", "example.org"],
-    ["port", "5355"],
+    ["service", "fips-dns", "5355"],
     ["dnssec", "<base64 RFC 9102-style chain for the _fips-dns SRV RRset>"]   // optional
   ],
   "content": ""
@@ -174,7 +179,35 @@ claim for a public suffix (`ch`, `co.uk`) — use a bundled Public Suffix List.
   equal or stronger method (DNSSEC ≥ multi-resolver DNS ≥ attestation). A
   pinned binding is never replaced by an unverified claim.
 
-### 5.5 Caching
+### 5.5 No public Internet: the claim *is* the SRV record
+
+When no legacy upstream is reachable — the daemon's online flag is off, or
+every upstream times out or SERVFAILs on the SRV query — the resolver skips
+step 2 and fetches the claim (kind 37197) from relays **directly**: the
+claim carries the same information as the SRV record (server npub, port),
+so it replaces it. Relays consulted offline are whatever is reachable:
+
+- **mesh relays** — Nostr relays running on fips nodes, addressed as
+  `ws://[fd…]:<port>`, reachable through the node's TUN like any mesh
+  service. They are configured, or synced from trusted nodes alongside the
+  mesh names. The node serving a domain is the natural place to run one
+  (it then hosts its own claim), and community nodes can mirror claims.
+- the node's public relays, in case they happen to be reachable through
+  some other path (e.g. the mesh has a gateway).
+
+Verification offline follows §5.1 without step 2's DNS: pinned > DNSSEC
+proof in the claim > attestations > unverified. In phase 1 only pins exist,
+so a domain **never seen online is refused offline** unless the user
+enabled `allow_unverified_offline`, which resolves it with a visible
+"unverified" marker (§5.1 step 5, never silent). Because this is the path
+the mesh-only use case depends on, DNSSEC proofs in claims (the only
+trustless offline verification) move ahead of attestations in §9.
+
+Privacy differs offline: the relays asked do see the domain. Mesh relays
+are run by nodes the user chose, and no public relay is reachable anyway,
+so this is accepted; the online rule (SRV first, §8) is unchanged.
+
+### 5.6 Caching
 
 | Item | TTL |
 |---|---|
@@ -273,29 +306,35 @@ Known holes:
   when online, **always** ask the legacy upstream for `_fips-dns._udp.<domain>`
   first (that upstream is about to resolve the name anyway; the negative
   cache keeps it to one query per domain per 6 h) and query relays only for
-  domains with an SRV hit. Offline, only pinned domains and names the user
-  added by hand are looked up; relays are never asked about an unknown
-  domain. Step 3 reveals the name only to the domain's own server.
+  domains with an SRV hit. Offline (§5.5), the claim is fetched from relays
+  directly — those are mesh relays the user chose, or public ones that
+  happen to be reachable; the domain is disclosed to them, accepted as the
+  price of resolving at all. Step 3 reveals the name only to the domain's
+  own server.
 - **Limits:** event size, tag counts, label rules and a public-suffix check
   are enforced before anything is cached.
 
 ## 9. Phasing
 
 1. **MVP:** claim (§3.1) + SRV verification + pinning + step 3 over UDP with
-   CNAME; unverified refused; phone integration in the fips2go shim.
-2. **Attestations** (§3.2) and the trust setting *k*; zone records (§3.3) for
-   offline servers.
-3. **DNSSEC proofs** in claims — fully trustless offline verification.
-4. Desktop resolver daemon: Linux first, then macOS and Windows, then
-   routers (plan-platforms.md).
+   CNAME; offline claim fetch via mesh relays (§5.5); unverified refused
+   (opt-in marker); phone integration in the fips2go shim; Linux daemon.
+2. **DNSSEC proofs** in claims — trustless offline verification of domains
+   never seen online; zone records (§3.3) for offline servers.
+3. **Attestations** (§3.2) and the trust setting *k*.
+4. Desktop resolver daemon on macOS and Windows, then routers
+   (plan-platforms.md).
 
 ## 10. Open questions
 
 Proposed answers in [plan-phase1.md](plan-phase1.md) §9; confirmed ones move
 here as decisions.
 
-- Final kind numbers: keep 37197–37199 until the format has survived the
-  phase 1 demo, then register with the Nostr NIP process.
+- Kind numbers: 37197–37199 are free (checked 2026-09-28). Register them
+  in `registry-of-kinds` early (a YAML PR, cheap, prevents collisions) and
+  submit [nip-draft.md](nip-draft.md) to `nostr-protocol/nips` once two
+  implementations exist (the daemon and fips2go), as the NIP process
+  expects running code.
 - Desktop resolver: standalone daemon in this repo, not inside fips (keeps
   the repo independent of the fips fork; fips's responder has the mesh
   filter, see §6.1).

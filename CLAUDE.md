@@ -61,7 +61,10 @@ move it into one of those repos.
   `nostr::Keys` from the node keypair) — events authored by `npubX` are
   authentic for mesh node `npubX`.
 - Kinds in use by fips: `37195` overlay advert (`d=fips-overlay-v1`), `21059`
-  signal (`src/nostr/types.rs`). This spec uses 37197–37199 as placeholders.
+  signal (`src/nostr/types.rs`) — neither registered. This spec uses
+  37197–37199; checked free on 2026-09-28 in the NIPs README and
+  `nostr-protocol/registry-of-kinds`. No NIP covers domain → pubkey
+  bindings; `docs/nip-draft.md` is ours.
 - fips fetches per-author addressable events with
   `Filter::new().author(pk).kind(..).identifier(..)` and a 2 s timeout.
 - A node can only route to an `fd…` address whose npub it knows; resolving
@@ -95,5 +98,8 @@ daemon** on every desktop/server OS and **embedded in fips2go** on Android;
 no `cfg(target_os)` in `names-core`/`names-resolve`. Default on every
 platform: the resolver is in the path for **all names** and discovers
 domains by asking public DNS for the `_fips-dns` SRV first (user decision
-2026-09-28); relays are only asked after an SRV hit. Opt-in restricted mode
-routes only known domains via per-domain OS routing and gives up discovery.
+2026-09-28); relays are only asked after an SRV hit. With no upstream
+reachable, the claim is fetched from relays directly (mesh relays on fips
+nodes first) — the claim replaces the SRV record (spec §5.5). Opt-in
+restricted mode routes only known domains via per-domain OS routing and
+gives up discovery.

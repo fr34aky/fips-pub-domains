@@ -61,20 +61,23 @@ become its upstreams. For every name it does, in order:
 1. local hosts, pins, caches (spec §5.1 steps 1–2);
 2. **online, domain not pinned and not in the negative cache:** ask the
    upstream for `_fips-dns._udp.<domain> SRV` **before** anything else. This
-   costs one query per new domain per 6 h (negative cache, spec §5.5) and
+   costs one query per new domain per 6 h (negative cache, spec §5.6) and
    reveals nothing new: the same upstream is about to resolve `<domain>`
    itself. Only the fact that this machine runs fips-names is visible to it.
 3. SRV hit → fetch the claim from relays, verify author == SRV target, pin,
    step 3, synthesise (spec §5–§7). SRV miss → passthrough, remember the
    miss.
-4. **offline:** pinned domains resolve over the mesh; everything else
-   passes through to whatever upstream is reachable, without asking relays
-   (spec §8 privacy rule: relays are never asked for a domain that has not
-   shown an SRV hint, except for names the user added by hand).
+4. **offline** (no upstream reachable): pinned domains resolve over the
+   mesh; for an unpinned domain the claim is fetched from relays directly —
+   the claim replaces the SRV record (spec §5.5) — over whatever relays are
+   reachable, which offline means **mesh relays** (`ws://[fd…]:port` on
+   fips nodes, configured or synced). Verified by pin, DNSSEC proof or
+   attestation; otherwise refused unless the user opted into the visible
+   "unverified" marker.
 
-Relays therefore only ever learn about domains that already opted in via
-DNS — the SRV hint is the gate. Android has always worked this way (the VPN
-captures all DNS); desktops now match it.
+Online, relays therefore only learn about domains that already opted in
+via DNS — the SRV hint is the gate. Android has always worked this way (the
+VPN captures all DNS); desktops now match it.
 
 Caveats: captive portals and per-network resolver changes must be followed
 (the daemon re-reads upstreams on network change, §3), and any bug in the

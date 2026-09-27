@@ -65,12 +65,16 @@ in [plan-platforms.md](plan-platforms.md).
   `CNAME npub.fips` + AAAA `fd…`; A → NODATA; drop public AAAA; 30 s TTL (§7).
   Uses `simple-dns` (what fips uses) so the shim does not add a second DNS
   library.
-- `cache`: TTL table for the five items in §5.5.
+- `cache`: TTL table for the five items in §5.6.
 
 ### 3.2 `names-resolve` (client I/O)
 
 - `RelayClient`: fetch `{"kinds":[37197],"#d":[domain]}` from a relay list,
-  2 s timeout (fips's own figure), returns raw events → `names-core`.
+  2 s timeout (fips's own figure), returns raw events → `names-core`. The
+  list has two halves — public relays (the node's) and **mesh relays**
+  (`ws://[fd…]:port`, reached through the TUN; on the phone through the
+  smoltcp `MeshLink`, so this is a second use of the TCP flavour that
+  already exists) — and the online flag selects which half is tried first.
 - `SrvVerifier`: `_fips-dns._udp.<domain> SRV` via `hickory-resolver` against
   the system's or a configured upstream set; phase 1 = unsigned DNS, at least
   **two** resolvers agreeing when more than one is configured (§4). DNSSEC
@@ -82,8 +86,9 @@ in [plan-platforms.md](plan-platforms.md).
   - the phone impl lives in fips2go (`MeshLink` UDP), *not* here — the trait
     is the seam.
 - `Resolver::lookup(name, qtype) -> Outcome` orchestrating: local → pins →
-  (online? SRV first, then relays only on a hint or when offline — the §8
-  privacy rule) → verify → pin → step 3 → synthesise.
+  online: SRV first, relays only on a hit (§8 privacy rule); offline:
+  relays directly, mesh relays first (§5.5) → verify → pin → step 3 →
+  synthesise.
 
 ### 3.3 `names-server` (server side, new in this plan)
 
@@ -190,13 +195,14 @@ phase 3 enabler and costs nothing now.
    over the mesh.
 3. **fips2go**: `MeshLink` UDP, resolver in the proxy, pin store, setting.
    Demo of §1.
-4. Write-up of what changed versus the spec; open the kind-number
-   registration.
+4. Write-up of what changed versus the spec; `registry-of-kinds` PR for
+   37197–37199 and the NIP submission from `docs/nip-draft.md`.
 
 ## 9. Decisions on spec §10 (proposed)
 
-- **Kind numbers:** keep 37197–37199 during phase 1; register in the NIP
-  process once the wire format has survived milestone 3.
+- **Kind numbers:** 37197–37199 are unregistered (checked 2026-09-28 in the
+  NIPs README and `registry-of-kinds`). Register in `registry-of-kinds`
+  now; submit `docs/nip-draft.md` as a NIP after milestone 3.
 - **Desktop resolver:** standalone `fips-namesd` daemon, every OS fips
   runs on (plan-platforms.md). Not inside fips — keeps this repo
   independent of the fips fork and avoids the mesh-filter tangle.

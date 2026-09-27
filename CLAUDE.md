@@ -85,6 +85,14 @@ move it into one of those repos.
 Phase 1 is planned in `docs/plan-phase1.md` (2026-09-28): a Rust workspace
 in this repo — `names-core` (policy, no I/O), `names-resolve` (relay/SRV/mesh
 adapters behind a `MeshDns` trait), `names-server` (step 3 server + claim
-publisher), `names-cli`. Milestones: core+tests → server + desktop lookup
-over the mesh → fips2go integration → kind registration. Nothing is coded
-yet.
+publisher), `names-daemon` (`fips-namesd`), `names-cli`. Milestones:
+core+tests → server + Linux daemon over the mesh → fips2go integration →
+kind registration → macOS/Windows → full-resolver mode and routers.
+Nothing is coded yet.
+
+Platform rule (`docs/plan-platforms.md`): the resolver is a **separate
+daemon** on every desktop/server OS and **embedded in fips2go** on Android;
+no `cfg(target_os)` in `names-core`/`names-resolve`. Desktop default is
+"bound domains only" via each OS's per-domain DNS routing (systemd-resolved
+routing domains, dnsmasq `server=/d/`, macOS `/etc/resolver/<d>`, Windows
+NRPT); the daemon never becomes the default resolver unless asked.

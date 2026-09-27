@@ -40,8 +40,13 @@ fips-names/
     names-core/       policy, no I/O          — events, verification, pins, precedence, DNS synthesis
     names-resolve/    client I/O adapters     — relay fetch, legacy SRV lookup, step-3 query (via trait)
     names-server/     step-3 authoritative server + claim publisher (binary `fips-names-server`)
+    names-daemon/     `fips-namesd` forwarding resolver for desktops/servers (see plan-platforms.md)
     names-cli/        `fips-names` tool: claim publish, verify, pin inspect (binary)
 ```
+
+Platform independence — which crates run where, how each OS is told to
+route DNS to the daemon, and how Android embeds the libraries instead — is
+in [plan-platforms.md](plan-platforms.md).
 
 ### 3.1 `names-core` (no I/O)
 
@@ -192,9 +197,9 @@ phase 3 enabler and costs nothing now.
 
 - **Kind numbers:** keep 37197–37199 during phase 1; register in the NIP
   process once the wire format has survived milestone 3.
-- **Desktop resolver:** standalone (`names-cli lookup` grows into a
-  `fips-namesd` forwarding resolver in phase 4). Not inside fips — keeps
-  this repo independent of the fips fork and avoids the mesh-filter tangle.
+- **Desktop resolver:** standalone `fips-namesd` daemon, every OS fips
+  runs on (plan-platforms.md). Not inside fips — keeps this repo
+  independent of the fips fork and avoids the mesh-filter tangle.
 - **Default witnesses (phase 2):** the user's synced trusted nodes, opt-in.
 - **Relays:** the node's own relay list; no dedicated set.
 

@@ -224,9 +224,13 @@ Browsers never ask for SRV and are never changed. The machine's resolver is:
   HTTP fetch (`shim/src/meshhttp.rs`), with a UDP socket added. The
   `CNAME npub….fips.` answer is then re-asked to the in-process responder,
   which is what registers the identity with the node.
-- **Linux/macOS:** a local forwarding resolver for *all* names (standalone, or
-  inside the fips daemon), wired in via systemd-resolved (`~.` routing domain
-  on the fips link) or as dnsmasq/unbound upstream.
+- **Desktops and servers (Linux, BSD, macOS, Windows):** a standalone
+  forwarding resolver daemon (`fips-namesd`), wired in either for *all*
+  names (systemd-resolved `~.`, dnsmasq/unbound upstream, Windows adapter
+  DNS) or — the default — only for **bound domains**, using the OS's
+  per-domain routing (systemd-resolved routing domains, dnsmasq
+  `server=/domain/`, macOS `/etc/resolver/<domain>`, Windows NRPT). See
+  [plan-platforms.md](plan-platforms.md).
 
 For a name with a binding and a reachable npub, the resolver:
 
@@ -278,7 +282,8 @@ Known holes:
 2. **Attestations** (§3.2) and the trust setting *k*; zone records (§3.3) for
    offline servers.
 3. **DNSSEC proofs** in claims — fully trustless offline verification.
-4. Desktop resolver (Linux first).
+4. Desktop resolver daemon: Linux first, then macOS and Windows, then
+   routers (plan-platforms.md).
 
 ## 10. Open questions
 

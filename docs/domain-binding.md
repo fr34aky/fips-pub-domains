@@ -225,12 +225,13 @@ Browsers never ask for SRV and are never changed. The machine's resolver is:
   `CNAME npub….fips.` answer is then re-asked to the in-process responder,
   which is what registers the identity with the node.
 - **Desktops and servers (Linux, BSD, macOS, Windows):** a standalone
-  forwarding resolver daemon (`fips-namesd`), wired in either for *all*
-  names (systemd-resolved `~.`, dnsmasq/unbound upstream, Windows adapter
-  DNS) or — the default — only for **bound domains**, using the OS's
-  per-domain routing (systemd-resolved routing domains, dnsmasq
-  `server=/domain/`, macOS `/etc/resolver/<domain>`, Windows NRPT). See
-  [plan-platforms.md](plan-platforms.md).
+  forwarding resolver daemon (`fips-namesd`) in the path for **all names**
+  (systemd-resolved `~.`, dnsmasq/unbound upstream, macOS `networksetup`,
+  Windows adapter DNS) — it must see every query to do the SRV-first
+  discovery of §8. An opt-in restricted mode routes only known domains via
+  the OS's per-domain routing (resolved routing domains, dnsmasq
+  `server=/domain/`, `/etc/resolver/<domain>`, NRPT) and gives up
+  discovery. See [plan-platforms.md](plan-platforms.md).
 
 For a name with a binding and a reachable npub, the resolver:
 
@@ -268,10 +269,13 @@ Known holes:
   one. Keep and persist the highest `created_at` seen per (kind, author, d);
   ignore timestamps more than 10 minutes in the future.
 - **Privacy — browsing history:** asking relays about every visited domain
-  gives relay operators the browsing history. When online, check the legacy
-  `_fips-dns` SRV first (that upstream already sees the name) and query relays
-  only for domains with an SRV hint, when offline, or against a locally synced
-  claim set. Step 3 reveals the name only to the domain's own server.
+  gives relay operators the browsing history. So the SRV hint is the gate:
+  when online, **always** ask the legacy upstream for `_fips-dns._udp.<domain>`
+  first (that upstream is about to resolve the name anyway; the negative
+  cache keeps it to one query per domain per 6 h) and query relays only for
+  domains with an SRV hit. Offline, only pinned domains and names the user
+  added by hand are looked up; relays are never asked about an unknown
+  domain. Step 3 reveals the name only to the domain's own server.
 - **Limits:** event size, tag counts, label rules and a public-suffix check
   are enforced before anything is cached.
 

@@ -92,7 +92,8 @@ Nothing is coded yet.
 
 Platform rule (`docs/plan-platforms.md`): the resolver is a **separate
 daemon** on every desktop/server OS and **embedded in fips2go** on Android;
-no `cfg(target_os)` in `names-core`/`names-resolve`. Desktop default is
-"bound domains only" via each OS's per-domain DNS routing (systemd-resolved
-routing domains, dnsmasq `server=/d/`, macOS `/etc/resolver/<d>`, Windows
-NRPT); the daemon never becomes the default resolver unless asked.
+no `cfg(target_os)` in `names-core`/`names-resolve`. Default on every
+platform: the resolver is in the path for **all names** and discovers
+domains by asking public DNS for the `_fips-dns` SRV first (user decision
+2026-09-28); relays are only asked after an SRV hit. Opt-in restricted mode
+routes only known domains via per-domain OS routing and gives up discovery.

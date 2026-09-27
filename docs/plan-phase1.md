@@ -63,6 +63,9 @@ in [plan-platforms.md](plan-platforms.md).
 - `domain_of(name)`: right-to-left walk with PSL (§5.2).
 - `synth`: build the application-facing answer from a step-3 reply:
   `CNAME npub.fips` + AAAA `fd…`; A → NODATA; drop public AAAA; 30 s TTL (§7).
+  Step-3 NXDOMAIN, a refused binding and any error all map to
+  `Decision::Passthrough` — the legacy path — never to an NXDOMAIN for the
+  application.
   Uses `simple-dns` (what fips uses) so the shim does not add a second DNS
   library.
 - `cache`: TTL table for the five items in §5.6.
@@ -107,8 +110,10 @@ It is this binary, run on the node that serves the domain:
     git: npub5678…
     "*": self
   ```
-  Answers `CNAME <npub>.fips.` for known names, NXDOMAIN otherwise, `self`
-  → the server's own npub. Hot-reloaded on mtime like fips's hosts file.
+  Answers `CNAME <npub>.fips.` for known names, NXDOMAIN otherwise (which
+  the resolver treats as "not over fips" → legacy), `self` → the server's
+  own npub, `legacy` → NXDOMAIN even under a wildcard. Hot-reloaded on
+  mtime like fips's hosts file.
 - `fips-names-server publish` signs and publishes the kind 37197 claim for
   each configured domain with the node key (`--key-file`, same format as
   fips), to the configured relays, and re-publishes on start and every 24 h
@@ -175,7 +180,8 @@ phase 3 enabler and costs nothing now.
 
 - `names-core`: table tests for precedence (§5.1), conflict rules (§5.3),
   pin-change rules (§5.4), PSL edge cases, anti-rollback, answer synthesis
-  (A → NODATA, AAAA suppression, TTL cap).
+  (A → NODATA, AAAA suppression, TTL cap), and the "not over fips" cases:
+  step-3 NXDOMAIN, refused binding, `legacy` zone entry → passthrough.
 - `names-resolve`: fake relay (loopback websocket, as fips2go's engine test
   does), fake SRV upstream (`hickory` in-process authority), fake step-3
   server on loopback → end-to-end `lookup("www.example.org")` produces

@@ -152,11 +152,15 @@ For a name `N` asked by an application:
 3. **DNSSEC proof in the claim**, verified locally against the root key.
 4. **Attested** by at least *k* witnesses the user trusts (k configurable,
    default 2).
-5. **Unverified** — refused (NXDOMAIN) by default; optionally resolved with an
-   explicit "unverified" marker in logs/UI. Never silently.
+5. **Unverified** — the *binding* is refused by default; optionally used
+   with an explicit "unverified" marker in logs/UI. Never silently.
 
-If no binding exists at all, the name is forwarded to the legacy upstream as
-today — non-participating domains behave exactly as before.
+"Refused" applies to the binding, never to the name: a refused or missing
+binding means the name is **forwarded to the legacy upstream** exactly as
+today (§7, "not over fips"). Only offline, with no upstream to forward to,
+does the application see a failure — and that is the same failure any
+offline machine sees. Non-participating domains therefore behave exactly
+as before.
 
 ### 5.2 Which domain is "the domain of N"
 
@@ -212,6 +216,7 @@ so this is accepted; the online rule (SRV first, §8) is unchanged.
 | Item | TTL |
 |---|---|
 | Legacy SRV miss (no binding) | 6 h — most domains have none |
+| Relay miss offline (no claim) | 1 h — so background queries of an offline browser reach mesh relays once per domain, not per query |
 | Legacy SRV hit | min(SRV TTL, 1 h) |
 | Claim / attestation fetched from relays | 1 h, stale-while-revalidate |
 | Step 3 answer | its TTL, capped at 1 h |
@@ -230,7 +235,12 @@ so this is accepted; the online rule (SRV first, §8) is unchanged.
   AAAA). The npub must travel, not just an address: a fips node can only route
   to an `fd…` address whose identity it knows, and resolving `npub….fips`
   locally is what registers it.
-- Unknown name → NXDOMAIN. `*` in the zone → the server's own npub.
+- Unknown name → NXDOMAIN, meaning **"not over fips"**: the resolver then
+  forwards the name to the legacy upstream (§7); it never passes that
+  NXDOMAIN to the application. `*` in the zone → the server's own npub; a
+  zone entry with the value `legacy` excludes a name from the wildcard
+  (the server answers NXDOMAIN for it), for sites that keep `www` on the
+  public Internet but put `git` on the mesh.
 - Server offline → fall back to the zone record (§3.3).
 
 ### 6.1 The server
@@ -273,7 +283,16 @@ For a name with a binding and a reachable npub, the resolver:
   (RFC 6724, used by bionic, glibc and Chromium) ranks `fd00::/8` below both
   IPv4 and global IPv6, so returning both would almost never use the mesh,
 - falls back to the legacy answer on any failure (timeout, parse error, no
-  route). A bug must never make a public domain unreachable.
+  route) and whenever the name is **not over fips**: no binding, binding
+  refused (§5.1), or NXDOMAIN from step 3 (§6). A bug must never make a
+  public domain unreachable.
+- checks reachability before committing: step 3 succeeding proves the
+  domain's server `npubxyz` is reachable, which covers `www → self`; when
+  the answer names a different node (`npub1234 ≠ npubxyz`), the resolver
+  spends up to ~300 ms confirming the local fips node can reach it (route
+  or echo) and otherwise falls back to legacy. Once the `fd…` address is
+  handed out, DNS is out of the path — a failed connect cannot be
+  recovered at this layer, only re-decided at the next lookup (30 s TTL).
 
 Known holes:
 

@@ -8,7 +8,10 @@
 //! upstreams_from: /run/systemd/resolve/resolv.conf   # re-read periodically
 //! dnssec: true
 //! public_relays: ["wss://relay.damus.io", "wss://nos.lol"]
-//! mesh_relays: ["ws://[fdd9:e5a:a4d9:2fb4:4bf8:b66b:4b1d:8f4d]:7777"]
+//! mesh_relays: ["ws://npub1….fips:80"]   # by .fips name, never an [fd…] literal:
+//!                                        # nostr-sdk mangles bracketed IPv6, and
+//!                                        # resolving the name is what registers
+//!                                        # the relay's identity with the node
 //! responder: "[::1]:5354"                      # fips's .fips responder
 //! mesh_bind: "fdd9:…"                          # this node's fips address
 //! pins: /var/lib/fips-names/pins.json

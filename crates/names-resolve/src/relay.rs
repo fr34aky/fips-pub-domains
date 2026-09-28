@@ -24,34 +24,46 @@ impl RelayClient {
         Self { public: make(public).await, mesh: make(mesh).await, timeout }
     }
 
-    /// Claims for `domain` (kind 37197, `d=<domain>`), from the public relays
-    /// when `online`, from the mesh relays (then the public ones, in case a
-    /// path exists) when not. Signatures are verified by the pool.
+    /// Claims for `domain` (kind 37197, `d=<domain>`). Online, both relay
+    /// sets are asked at once — a domain's claim may live only on a relay
+    /// inside the mesh, and the privacy gate is about *when* relays are
+    /// asked (after a TXT hit), not which. Offline, the mesh relays first;
+    /// the public ones are tried afterwards in case a path exists.
+    /// Signatures are verified by the pool.
     pub async fn fetch_claims(&self, domain: &str, online: bool) -> Vec<CoreEvent> {
         let filter = Filter::new().kind(Kind::from(KIND_CLAIM)).identifier(domain).limit(32);
-        let order: Vec<&Client> = if online {
-            self.public.iter().collect()
-        } else {
-            self.mesh.iter().chain(self.public.iter()).collect()
-        };
-        let mut out = Vec::new();
-        for client in order {
-            match client.fetch_events(filter.clone(), self.timeout).await {
-                Ok(events) => {
-                    out.extend(events.into_iter().map(convert));
-                    if !out.is_empty() {
-                        break;
-                    }
-                }
-                Err(e) => tracing::debug!(domain, error = %e, "relay fetch failed"),
+        if online {
+            let (a, b) = futures::join!(
+                fetch_one(self.public.as_ref(), &filter, self.timeout),
+                fetch_one(self.mesh.as_ref(), &filter, self.timeout),
+            );
+            let mut out = a;
+            out.extend(b);
+            return out;
+        }
+        for client in self.mesh.iter().chain(self.public.iter()) {
+            let out = fetch_one(Some(client), &filter, self.timeout).await;
+            if !out.is_empty() {
+                return out;
             }
         }
-        out
+        Vec::new()
     }
 
     pub async fn shutdown(&self) {
         for c in self.public.iter().chain(self.mesh.iter()) {
             c.disconnect().await;
+        }
+    }
+}
+
+async fn fetch_one(client: Option<&Client>, filter: &Filter, timeout: Duration) -> Vec<CoreEvent> {
+    let Some(client) = client else { return Vec::new() };
+    match client.fetch_events(filter.clone(), timeout).await {
+        Ok(events) => events.into_iter().map(convert).collect(),
+        Err(e) => {
+            tracing::debug!(error = %e, "relay fetch failed");
+            Vec::new()
         }
     }
 }

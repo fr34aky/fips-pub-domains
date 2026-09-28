@@ -199,9 +199,10 @@ step 2 and fetches the claim (kind 37197) from relays **directly**: the
 claim carries the same information as the TXT record (server npub, port),
 so it replaces it. Relays consulted offline are whatever is reachable:
 
-- **mesh relays** — Nostr relays running on fips nodes, addressed as
-  `ws://[fd…]:<port>`, reachable through the node's TUN like any mesh
-  service. They are configured, or synced from trusted nodes alongside the
+- **mesh relays** — Nostr relays running on fips nodes, configured as
+  `ws://<npub>.fips:<port>` (resolving the name through fips's responder is
+  what registers the relay's identity; an `[fd…]` literal is not usable
+  with nostr-sdk), reachable through the node's TUN like any mesh service. They are configured, or synced from trusted nodes alongside the
   mesh names. The node serving a domain is the natural place to run one
   (it then hosts its own claim), and community nodes can mirror claims.
 - the node's public relays, in case they happen to be reachable through

@@ -57,13 +57,14 @@ pub struct SeenKey {
 
 pub trait PinStore: Send + Sync {
     fn get(&self, domain: &str) -> Option<Binding>;
-    fn put(&self, binding: Binding);
-    fn forget(&self, domain: &str);
+    /// Returns whether anything changed (a file store saves only then).
+    fn put(&self, binding: Binding) -> bool;
+    fn forget(&self, domain: &str) -> bool;
     fn list(&self) -> Vec<Binding>;
     /// Newest `created_at` seen for this (kind, author, domain).
     fn newest_seen(&self, key: &SeenKey) -> Option<u64>;
-    /// Record `created_at` if newer than what was seen.
-    fn note_seen(&self, key: SeenKey, created_at: u64);
+    /// Record `created_at` if newer than what was seen; whether it was.
+    fn note_seen(&self, key: SeenKey, created_at: u64) -> bool;
 }
 
 /// Serializable snapshot of a store — the on-disk shape shared by every
@@ -116,12 +117,17 @@ impl PinStore for MemoryPinStore {
         self.inner.lock().unwrap().pins.get(domain).cloned()
     }
 
-    fn put(&self, binding: Binding) {
-        self.inner.lock().unwrap().pins.insert(binding.domain.clone(), binding);
+    fn put(&self, binding: Binding) -> bool {
+        let mut g = self.inner.lock().unwrap();
+        if g.pins.get(&binding.domain) == Some(&binding) {
+            return false;
+        }
+        g.pins.insert(binding.domain.clone(), binding);
+        true
     }
 
-    fn forget(&self, domain: &str) {
-        self.inner.lock().unwrap().pins.remove(domain);
+    fn forget(&self, domain: &str) -> bool {
+        self.inner.lock().unwrap().pins.remove(domain).is_some()
     }
 
     fn list(&self) -> Vec<Binding> {
@@ -132,12 +138,14 @@ impl PinStore for MemoryPinStore {
         self.inner.lock().unwrap().seen.get(key).copied()
     }
 
-    fn note_seen(&self, key: SeenKey, created_at: u64) {
+    fn note_seen(&self, key: SeenKey, created_at: u64) -> bool {
         let mut g = self.inner.lock().unwrap();
         let e = g.seen.entry(key).or_insert(0);
         if created_at > *e {
             *e = created_at;
+            return true;
         }
+        false
     }
 }
 
@@ -162,9 +170,10 @@ mod tests {
         let s = MemoryPinStore::new();
         s.put(b("example.org", Method::Dnssec));
         let key = SeenKey { kind: 37197, author: Npub::from_bytes([1; 32]), domain: "example.org".into() };
-        s.note_seen(key.clone(), 5);
-        s.note_seen(key.clone(), 3);
-        assert_eq!(s.newest_seen(&key), Some(5), "only moves forward");
+        assert!(s.note_seen(key.clone(), 5));
+        assert!(!s.note_seen(key.clone(), 3), "only moves forward");
+        assert_eq!(s.newest_seen(&key), Some(5));
+        assert!(!s.put(b("example.org", Method::Dnssec)), "unchanged pin reports no change");
         let snap = s.snapshot();
         let json = serde_json::to_string(&snap).unwrap();
         let back: PinSnapshot = serde_json::from_str(&json).unwrap();

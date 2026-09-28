@@ -12,6 +12,7 @@
 //! none answered the lookup is `Unreachable` — the offline path.
 
 use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
+use hickory_resolver::net::{DnsError, NetError};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::proto::dnssec::Proof;
 use hickory_resolver::proto::rr::{RData, RecordType};
@@ -28,11 +29,12 @@ pub struct TxtVerifier {
     timeout: Duration,
 }
 
-/// One upstream's answer.
+/// One upstream's answer. `secure` on a miss: the denial (NSEC/NSEC3)
+/// validated under DNSSEC.
 #[derive(Debug)]
 enum One {
     Hit { records: Vec<TxtRecord>, secure: bool, ttl: u32 },
-    Miss,
+    Miss { secure: bool },
     Failed,
 }
 
@@ -43,8 +45,7 @@ impl TxtVerifier {
     pub fn new(upstreams: &[IpAddr], dnssec: bool, timeout: Duration) -> Result<Self, String> {
         let ips: Vec<IpAddr> = if upstreams.is_empty() {
             let (conf, _) = hickory_resolver::system_conf::read_system_conf().map_err(|e| e.to_string())?;
-            let mut ips: Vec<IpAddr> = conf.name_servers().iter().map(|ns| ns.ip).collect();
-            ips.dedup();
+            let ips: Vec<IpAddr> = conf.name_servers().iter().map(|ns| ns.ip).collect();
             if ips.is_empty() {
                 return Err("no upstream resolvers configured".into());
             }
@@ -52,6 +53,8 @@ impl TxtVerifier {
         } else {
             upstreams.to_vec()
         };
+        // The same server twice must not count as two agreeing resolvers.
+        let ips = unique(ips);
         let mut resolvers = Vec::new();
         for ip in ips {
             let conf = ResolverConfig::from_parts(None, Vec::new(), vec![NameServerConfig::udp_and_tcp(ip)]);
@@ -107,13 +110,20 @@ impl TxtVerifier {
                     }
                 }
                 if records.is_empty() {
-                    // TXT records exist, none is ours: same as no record.
-                    One::Miss
+                    // TXT records exist, none is ours: same as no record. The
+                    // records themselves may be validated even so.
+                    let secure = lookup.answers().iter().any(|r| r.proof == Proof::Secure);
+                    One::Miss { secure }
                 } else {
                     One::Hit { records, secure, ttl }
                 }
             }
-            Err(e) if e.is_no_records_found() || e.is_nx_domain() => One::Miss,
+            Err(NetError::Dns(DnsError::NoRecordsFound(nr))) => {
+                // A validated SOA in the authority section means the denial
+                // itself was proven (NSEC/NSEC3 checked by the validator).
+                let secure = nr.soa.as_ref().is_some_and(|soa| soa.proof == Proof::Secure);
+                One::Miss { secure }
+            }
             Err(e) => {
                 tracing::debug!(error = %e, "TXT upstream failed");
                 One::Failed
@@ -141,7 +151,16 @@ fn combine(answers: Vec<One>) -> (TxtLookup, Option<u32>) {
         }
     }
     let Some((_, best)) = groups.iter().max_by_key(|(_, v)| v.len()) else {
-        return (TxtLookup::Miss, None);
+        let misses = answers.iter().filter(|a| matches!(a, One::Miss { .. })).count();
+        let secure = answers.iter().any(|a| matches!(a, One::Miss { secure: true }));
+        let method = if secure {
+            Method::Dnssec
+        } else if misses >= 2 {
+            Method::Dns
+        } else {
+            Method::DnsSingle
+        };
+        return (TxtLookup::Miss { method }, None);
     };
     let secure = best.iter().any(|a| matches!(a, One::Hit { secure: true, .. }));
     let method = if secure {
@@ -156,6 +175,17 @@ fn combine(answers: Vec<One>) -> (TxtLookup, Option<u32>) {
         _ => unreachable!(),
     };
     (TxtLookup::Hit { records, method }, Some(ttl))
+}
+
+/// Order-preserving dedup (a resolver listed twice is one resolver).
+fn unique(ips: Vec<IpAddr>) -> Vec<IpAddr> {
+    let mut out: Vec<IpAddr> = Vec::with_capacity(ips.len());
+    for ip in ips {
+        if !out.contains(&ip) {
+            out.push(ip);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -173,12 +203,18 @@ mod tests {
     #[test]
     fn combine_counts_agreement() {
         assert_eq!(combine(vec![One::Failed, One::Failed]).0, TxtLookup::Unreachable);
-        assert_eq!(combine(vec![One::Miss, One::Failed]).0, TxtLookup::Miss);
+        assert_eq!(combine(vec![One::Miss { secure: false }, One::Failed]).0, TxtLookup::Miss { method: Method::DnsSingle });
+        assert_eq!(
+            combine(vec![One::Miss { secure: false }, One::Miss { secure: false }]).0,
+            TxtLookup::Miss { method: Method::Dns }
+        );
+        assert_eq!(combine(vec![One::Miss { secure: true }]).0, TxtLookup::Miss { method: Method::Dnssec });
+        assert_eq!(unique(vec!["1.1.1.1".parse().unwrap(), "8.8.8.8".parse().unwrap(), "1.1.1.1".parse().unwrap()]).len(), 2);
         match combine(vec![hit(&[1], false), One::Failed]).0 {
             TxtLookup::Hit { method, .. } => assert_eq!(method, Method::DnsSingle),
             other => panic!("{other:?}"),
         }
-        match combine(vec![hit(&[1], false), hit(&[1], false), One::Miss]).0 {
+        match combine(vec![hit(&[1], false), hit(&[1], false), One::Miss { secure: false }]).0 {
             TxtLookup::Hit { method, records } => {
                 assert_eq!(method, Method::Dns);
                 assert_eq!(records.len(), 1);
@@ -199,6 +235,9 @@ mod tests {
         }
         // Hits outrank misses even when misses are more numerous: a stale
         // negative cache somewhere must not hide a fresh record.
-        assert!(matches!(combine(vec![One::Miss, One::Miss, hit(&[1], false)]).0, TxtLookup::Hit { .. }));
+        assert!(matches!(
+            combine(vec![One::Miss { secure: false }, One::Miss { secure: false }, hit(&[1], false)]).0,
+            TxtLookup::Hit { .. }
+        ));
     }
 }

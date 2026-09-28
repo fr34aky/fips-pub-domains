@@ -71,13 +71,23 @@ impl State {
         let mut g = self.upstreams.write().unwrap();
         if *g != now {
             tracing::info!(upstreams = ?now, "upstreams changed");
+            // The verifier must follow, or every TXT lookup keeps going to
+            // the old network's resolvers and times out into "unreachable".
+            if let Err(e) = self.resolver.txt().set_upstreams(&now) {
+                tracing::error!(error = %e, "could not rebuild the TXT verifier; keeping the old upstreams");
+                return;
+            }
             *g = now;
             self.resolver.set_online(!g.is_empty());
+            self.resolver.flush_caches();
         }
     }
 }
 
 async fn handle(state: &State, query: Vec<u8>) -> Option<Vec<u8>> {
+    if query.len() < 12 {
+        return None; // not a DNS message; nothing to answer
+    }
     // fips's own names go to its responder: in full mode we are the only
     // global server systemd-resolved knows, so `.fips` arrives here too.
     if forward::is_fips_name(&query) {

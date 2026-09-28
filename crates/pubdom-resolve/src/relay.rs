@@ -11,6 +11,19 @@ use pubdom_core::{Claim, KIND_CLAIM};
 use nostr_sdk::prelude::*;
 use std::time::Duration;
 
+/// Which relays a claim fetch may touch (spec §8, the privacy gate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayScope {
+    /// After a TXT hit: the domain already opted in via DNS, so both sets.
+    AfterHit,
+    /// Offline: mesh relays first, then the public ones in case a path exists.
+    Offline,
+    /// Online but the legacy DNS did not answer: only relays the user runs
+    /// or chose on the mesh — a public relay must never learn of a domain
+    /// that DNS has not vouched for.
+    MeshOnly,
+}
+
 pub struct RelayClient {
     public: Option<Client>,
     mesh: Option<Client>,
@@ -30,24 +43,29 @@ impl RelayClient {
     /// asked (after a TXT hit), not which. Offline, the mesh relays first;
     /// the public ones are tried afterwards in case a path exists.
     /// Signatures are verified by the pool.
-    pub async fn fetch_claims(&self, domain: &str, online: bool) -> Vec<CoreEvent> {
+    pub async fn fetch_claims(&self, domain: &str, scope: RelayScope) -> Vec<CoreEvent> {
         let filter = Filter::new().kind(Kind::from(KIND_CLAIM)).identifier(domain).limit(32);
-        if online {
-            let (a, b) = futures::join!(
-                fetch_one(self.public.as_ref(), &filter, self.timeout),
-                fetch_one(self.mesh.as_ref(), &filter, self.timeout),
-            );
-            let mut out = a;
-            out.extend(b);
-            return out;
-        }
-        for client in self.mesh.iter().chain(self.public.iter()) {
-            let out = fetch_one(Some(client), &filter, self.timeout).await;
-            if !out.is_empty() {
-                return out;
+        match scope {
+            RelayScope::AfterHit => {
+                let (a, b) = futures::join!(
+                    fetch_one(self.public.as_ref(), &filter, self.timeout),
+                    fetch_one(self.mesh.as_ref(), &filter, self.timeout),
+                );
+                let mut out = a;
+                out.extend(b);
+                out
+            }
+            RelayScope::MeshOnly => fetch_one(self.mesh.as_ref(), &filter, self.timeout).await,
+            RelayScope::Offline => {
+                for client in self.mesh.iter().chain(self.public.iter()) {
+                    let out = fetch_one(Some(client), &filter, self.timeout).await;
+                    if !out.is_empty() {
+                        return out;
+                    }
+                }
+                Vec::new()
             }
         }
-        Vec::new()
     }
 
     pub async fn shutdown(&self) {

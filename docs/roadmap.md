@@ -22,7 +22,16 @@
 3. **DNSSEC proofs in claims** (spec §3.1 `dnssec` tag, §5.5): the RFC 9102
    chain for the TXT RRset, verified locally against the root trust anchor
    — the only trustless verification of a domain never seen online. Moved
-   ahead of attestations because the mesh-only case depends on it.
+   ahead of attestations because the mesh-only case depends on it. Design
+   points settled in advance: the chain is only valid for its RRSIGs'
+   lifetime (typically 2–4 weeks) and goes stale at every key rollover, so
+   the server must re-publish the claim with a fresh chain well inside that
+   window (the 24 h re-publish loop is the place); verifiers must refuse
+   expired signatures, which means a node off the relays longer than one
+   signature lifetime can no longer verify a *new* domain offline (pinned
+   ones keep working); and the root trust anchor rollover (KSK-2024) needs
+   current software — RFC 5011 automatic updates are not implemented, and
+   `dnssec: false` is the emergency switch back to multi-resolver DNS.
 4. **Zone records** (kind 37199) so a client can resolve while the domain's
    server is unreachable.
 5. **Attestations** (kind 37198) and the trust setting *k*; default
@@ -48,6 +57,11 @@
 - On systemd-resolved, a link search domain equal to a bound domain shadows
   the daemon ([daemon.md](daemon.md), Troubleshooting).
 - Mesh relays are desktop-only; on Android offline means pinned domains.
+- Online verification is unaffected by DNSSEC key rollovers done properly
+  (every lookup validates the live chain; the pin stores no key). A broken
+  rollover makes validation *bogus*, which counts as an unreachable
+  upstream — pins keep working, nothing is downgraded to unsigned `dns`,
+  nothing is unpinned.
 - Two independent upstream resolvers are not always available (one
   DHCP-provided resolver is common on phones); the verification is then
   `dns-single`, and a later two-resolver or DNSSEC verification upgrades the

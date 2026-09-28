@@ -187,8 +187,17 @@ claim for a public suffix (`ch`, `co.uk`) — use a bundled Public Suffix List.
 
 - A binding verified once is pinned (domain → npub, verified_at, method).
 - A **changed** binding is accepted only through a fresh verification of
-  equal or stronger method (DNSSEC ≥ multi-resolver DNS ≥ attestation). A
-  pinned binding is never replaced by an unverified claim.
+  equal or stronger method (DNSSEC ≥ multi-resolver DNS ≥ single-resolver
+  DNS ≥ attestation). A pinned binding is never replaced by an unverified
+  claim.
+- The **same** binding re-verified with a weaker method keeps the pin's
+  method: an unsigned replay of the real record must not lower the bar for
+  the change that follows.
+- **Forgetting** a pin (the TXT record is gone) is a binding change too and
+  takes a denial at least as strong as the pin: a DNSSEC-validated denial,
+  or as many agreeing resolvers as verified the pin. A weaker denial — a
+  captive portal's NXDOMAIN — leaves the pin in place but unused while DNS
+  says no; it resolves again offline or once DNS answers properly.
 
 ### 5.5 No public Internet: the claim *is* the TXT record
 
@@ -332,7 +341,10 @@ Known holes:
   when online, **always** ask the legacy upstream for `_fips-dns.<domain>`
   first (that upstream is about to resolve the name anyway; the negative
   cache keeps it to one query per domain per 6 h) and query relays only for
-  domains with a TXT hit. Offline (§5.5), the claim is fetched from relays
+  domains with a TXT hit. When the machine believes it is online but the
+  upstreams do not answer (filtered port 53, stale resolvers), only relays
+  on the mesh are asked — a public relay never learns of a domain that DNS
+  has not vouched for. Offline (§5.5), the claim is fetched from relays
   directly — those are mesh relays the user chose, or public ones that
   happen to be reachable; the domain is disclosed to them, accepted as the
   price of resolving at all. Step 3 reveals the name only to the domain's

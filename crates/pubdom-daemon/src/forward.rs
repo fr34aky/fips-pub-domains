@@ -50,7 +50,7 @@ async fn udp(query: &[u8], addr: SocketAddr) -> std::io::Result<Vec<u8>> {
     loop {
         let n = sock.recv(&mut buf).await?;
         // Match the transaction id; anything else is a stray datagram.
-        if n >= 2 && buf[..2] == query[..2] {
+        if n >= 2 && query.len() >= 2 && buf[..2] == query[..2] {
             buf.truncate(n);
             return Ok(buf);
         }

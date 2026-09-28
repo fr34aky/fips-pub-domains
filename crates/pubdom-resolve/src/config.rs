@@ -94,14 +94,18 @@ impl Config {
             return Vec::new();
         };
         let own: Vec<IpAddr> = self.listen.iter().map(|a| a.ip()).collect();
-        let mut out: Vec<IpAddr> = text
+        let mut out: Vec<IpAddr> = Vec::new();
+        for ip in text
             .lines()
             .filter_map(|l| l.strip_prefix("nameserver"))
             .filter_map(|rest| rest.split_whitespace().next())
             .filter_map(|s| s.split('%').next().unwrap_or(s).parse::<IpAddr>().ok())
             .filter(|ip| !own.contains(ip) && !ip.is_loopback())
-            .collect();
-        out.dedup();
+        {
+            if !out.contains(&ip) {
+                out.push(ip);
+            }
+        }
         out
     }
 
@@ -139,17 +143,11 @@ impl Config {
     /// pin file. `upstreams` empty means "no legacy DNS": mesh-only node.
     pub async fn build_resolver(&self, upstreams: Vec<IpAddr>) -> Result<ProdResolver, String> {
         let rc = self.resolver_config(upstreams.clone());
-        let txt = if upstreams.is_empty() && self.upstreams_from.is_some() {
-            // Configured to follow the system, and the system has none right
-            // now: behave as offline rather than failing to start.
-            None
-        } else {
-            Some(TxtVerifier::new(&upstreams, self.dnssec, rc.txt_timeout)?)
-        };
+        let txt = MaybeTxt::new(&upstreams, self.dnssec, rc.txt_timeout)?;
         let relays = RelayClient::new(&self.public_relays, &self.mesh_relays, rc.relay_timeout).await;
         let pins = FilePinStore::open(&self.pins).map_err(|e| e.to_string())?;
         let mesh = KernelMeshDns::new(self.responder, self.mesh_bind);
-        let r = Resolver::new(rc, Arc::new(pins), MaybeTxt(txt), relays, Arc::new(mesh));
+        let r = Resolver::new(rc, Arc::new(pins), txt, relays, Arc::new(mesh));
         r.set_online(!upstreams.is_empty());
         Ok(r)
     }
@@ -157,12 +155,43 @@ impl Config {
 
 pub type ProdResolver = Resolver<MaybeTxt, RelayClient>;
 
-/// A TXT source that may be absent (mesh-only node).
-pub struct MaybeTxt(pub Option<TxtVerifier>);
+/// A TXT source that may be absent (mesh-only node, or the system has no
+/// resolvers right now) and can be swapped when the upstreams change — a
+/// laptop that moves networks must verify against the new resolvers, not
+/// keep asking the old ones until they time out.
+pub struct MaybeTxt {
+    inner: std::sync::Mutex<Option<Arc<TxtVerifier>>>,
+    dnssec: bool,
+    timeout: Duration,
+}
+
+impl MaybeTxt {
+    pub fn new(upstreams: &[IpAddr], dnssec: bool, timeout: Duration) -> Result<Self, String> {
+        let me = Self { inner: std::sync::Mutex::new(None), dnssec, timeout };
+        me.set_upstreams(upstreams)?;
+        Ok(me)
+    }
+
+    /// Replace the verifier; an empty list means "no legacy DNS" and every
+    /// lookup is `Unreachable`.
+    pub fn set_upstreams(&self, upstreams: &[IpAddr]) -> Result<(), String> {
+        let v = if upstreams.is_empty() {
+            None
+        } else {
+            Some(Arc::new(TxtVerifier::new(upstreams, self.dnssec, self.timeout)?))
+        };
+        *self.inner.lock().unwrap() = v;
+        Ok(())
+    }
+
+    fn current(&self) -> Option<Arc<TxtVerifier>> {
+        self.inner.lock().unwrap().clone()
+    }
+}
 
 impl crate::resolver::TxtSource for MaybeTxt {
     async fn lookup(&self, domain: &str) -> (pubdom_core::policy::TxtLookup, Option<u32>) {
-        match &self.0 {
+        match self.current() {
             Some(t) => t.lookup(domain).await,
             None => (pubdom_core::policy::TxtLookup::Unreachable, None),
         }

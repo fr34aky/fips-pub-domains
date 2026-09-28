@@ -19,8 +19,11 @@ pub enum TxtLookup {
     /// Records found; `method` is how strongly the answer was authenticated.
     Hit { records: Vec<TxtRecord>, method: Method },
     /// DNS answered and there is no such record: the domain does not
-    /// participate (any more).
-    Miss,
+    /// participate (any more). `method` is how strongly the *denial* was
+    /// authenticated — a validated NSEC/NSEC3 denial is `Dnssec`, two
+    /// agreeing upstreams `Dns`, one `DnsSingle` — because forgetting a pin
+    /// is a binding change and must not be cheaper than making one.
+    Miss { method: Method },
     /// No upstream could be asked: offline, or every upstream failed.
     Unreachable,
 }
@@ -123,21 +126,27 @@ pub fn decide(input: Input<'_>) -> Outcome {
                 verified_at: input.now,
             };
             if let Some(pin) = &input.pin
-                && pin.npub != fresh.npub
                 && *method < pin.method
             {
-                // A changed binding needs a verification at least as strong
-                // as the one the pin rests on (spec §5.4).
+                // Weaker than what the pin rests on (spec §5.4): a changed
+                // binding is not accepted, and the same binding is not
+                // downgraded either — else an unsigned replay of the real
+                // record would lower the bar for the change that follows.
                 return keep(Decision::Bound(pin.clone()));
             }
             Outcome { decision: Decision::Bound(fresh.clone()), pin_update: PinUpdate::Put(fresh) }
         }
 
-        TxtLookup::Miss => {
+        TxtLookup::Miss { method } => {
             // The operator withdrew (or never had) the record: the domain is
-            // legacy-only now, and staying pinned would resurrect the mesh
-            // path the next time we are offline.
-            let pin_update = if input.pin.is_some() { PinUpdate::Forget } else { PinUpdate::Keep };
+            // legacy-only now. Forgetting the pin is a binding change, so it
+            // takes a denial at least as strong as the pin (a captive
+            // portal's NXDOMAIN must not unpin a DNSSEC binding). A weaker
+            // denial keeps the pin but does not use it while DNS says no.
+            let pin_update = match &input.pin {
+                Some(pin) if *method >= pin.method => PinUpdate::Forget,
+                _ => PinUpdate::Keep,
+            };
             Outcome { decision: Decision::NotOverFips(Reason::NoTxt), pin_update }
         }
 
@@ -286,6 +295,15 @@ mod tests {
     }
 
     #[test]
+    fn same_author_is_never_downgraded() {
+        // An unsigned replay of the real record must not lower the pin's
+        // method, or the next unsigned answer could move the binding.
+        let o = run(Some(pin(1, Method::Dnssec)), txt(&[1], Method::DnsSingle), &[claim(1, 5)], false);
+        assert_eq!(bound(&o).method, Method::Dnssec);
+        assert_eq!(o.pin_update, PinUpdate::Keep);
+    }
+
+    #[test]
     fn several_named_servers_prefer_pinned_then_newest() {
         let claims = [claim(1, 5), claim(2, 9)];
         let o = run(None, txt(&[1, 2], Method::Dns), &claims, false);
@@ -295,11 +313,18 @@ mod tests {
     }
 
     #[test]
-    fn txt_miss_forgets_the_pin() {
-        let o = run(Some(pin(1, Method::Dnssec)), TxtLookup::Miss, &[claim(1, 5)], false);
+    fn txt_miss_forgets_the_pin_only_with_a_denial_as_strong_as_the_pin() {
+        let miss = |m| TxtLookup::Miss { method: m };
+        let o = run(Some(pin(1, Method::Dnssec)), miss(Method::Dnssec), &[claim(1, 5)], false);
         assert_eq!(o.decision, Decision::NotOverFips(Reason::NoTxt));
         assert_eq!(o.pin_update, PinUpdate::Forget);
-        let o = run(None, TxtLookup::Miss, &[], false);
+        // A captive portal's unsigned NXDOMAIN: not used, but not forgotten.
+        let o = run(Some(pin(1, Method::Dnssec)), miss(Method::DnsSingle), &[claim(1, 5)], false);
+        assert_eq!(o.decision, Decision::NotOverFips(Reason::NoTxt));
+        assert_eq!(o.pin_update, PinUpdate::Keep);
+        let o = run(Some(pin(1, Method::Dns)), miss(Method::Dns), &[], false);
+        assert_eq!(o.pin_update, PinUpdate::Forget);
+        let o = run(None, miss(Method::DnsSingle), &[], false);
         assert_eq!(o.pin_update, PinUpdate::Keep);
     }
 

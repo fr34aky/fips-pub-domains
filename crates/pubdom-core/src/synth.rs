@@ -111,17 +111,6 @@ pub fn build_rcode(q: &Query, rcode: RCODE) -> Option<Vec<u8>> {
     reply_for(q, rcode)?.build_bytes_vec().ok()
 }
 
-/// Rewrite a legacy upstream's reply for a bound name so that only the mesh
-/// path remains visible: drop public AAAA records (spec §7). Returns the
-/// input untouched if it cannot be parsed.
-pub fn strip_public_aaaa(reply: &[u8]) -> Vec<u8> {
-    let Ok(mut p) = Packet::parse(reply) else {
-        return reply.to_vec();
-    };
-    p.answers.retain(|rr| !matches!(rr.rdata, RData::AAAA(_)));
-    p.build_bytes_vec().unwrap_or_else(|_| reply.to_vec())
-}
-
 /// The domain server's reply (spec §6.1): authoritative `CNAME <npub>.fips.`
 /// for a served name, NXDOMAIN otherwise. `qname` is the raw query name.
 pub fn server_reply(query: &[u8], target: Option<Npub>, ttl: u32) -> Option<Vec<u8>> {
@@ -204,20 +193,6 @@ mod tests {
         let mut p = Packet::new_reply(9);
         p.set_flags(PacketFlag::TRUNCATION);
         assert_eq!(parse_step3_reply(&p.build_bytes_vec().unwrap(), 9), Step3Outcome::Truncated);
-    }
-
-    #[test]
-    fn strips_public_aaaa_but_keeps_the_rest() {
-        let q = parse_query(&build_query(1, "www.example.org", QTYPE_AAAA).unwrap()).unwrap();
-        let mut p = reply_for(&q, RCODE::NoError).unwrap();
-        let name = Name::new("www.example.org").unwrap();
-        p.answers.push(ResourceRecord::new(name.clone(), CLASS::IN, 60, RData::AAAA(AAAA { address: 1 })));
-        p.answers.push(ResourceRecord::new(name, CLASS::IN, 60, RData::A(simple_dns::rdata::A { address: 1 })));
-        let out = strip_public_aaaa(&p.build_bytes_vec().unwrap());
-        let back = Packet::parse(&out).unwrap();
-        assert_eq!(back.answers.len(), 1);
-        assert!(matches!(back.answers[0].rdata, RData::A(_)));
-        assert_eq!(strip_public_aaaa(b"nope"), b"nope");
     }
 
     #[test]

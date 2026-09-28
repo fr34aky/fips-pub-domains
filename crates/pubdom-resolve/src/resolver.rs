@@ -8,17 +8,18 @@
 //! and never an error of our making.
 
 use crate::mesh::MeshDns;
-use crate::relay::RelayClient;
+use crate::relay::{RelayClient, RelayScope};
 use crate::txt::TxtVerifier;
 use pubdom_core::cache::{self, TtlCache};
 use pubdom_core::claim::Event;
 use pubdom_core::policy::{self, Decision, Input, NoProofs, PinUpdate, Reason, TxtLookup};
 use pubdom_core::synth::{self, Query, Step3Outcome};
 use pubdom_core::{ANSWER_TTL_SECS, Binding, Npub, PinStore, domain};
+use std::collections::HashMap;
 use std::future::Future;
 use std::net::IpAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Where the TXT record comes from — hickory in production, a table in tests.
@@ -28,7 +29,7 @@ pub trait TxtSource: Send + Sync {
 
 /// Where claims come from — relays in production, a table in tests.
 pub trait ClaimSource: Send + Sync {
-    fn fetch_claims(&self, domain: &str, online: bool) -> impl Future<Output = Vec<Event>> + Send;
+    fn fetch_claims(&self, domain: &str, scope: RelayScope) -> impl Future<Output = Vec<Event>> + Send;
 }
 
 impl TxtSource for TxtVerifier {
@@ -38,8 +39,8 @@ impl TxtSource for TxtVerifier {
 }
 
 impl ClaimSource for RelayClient {
-    async fn fetch_claims(&self, domain: &str, online: bool) -> Vec<Event> {
-        RelayClient::fetch_claims(self, domain, online).await
+    async fn fetch_claims(&self, domain: &str, scope: RelayScope) -> Vec<Event> {
+        RelayClient::fetch_claims(self, domain, scope).await
     }
 }
 
@@ -113,6 +114,10 @@ pub struct Resolver<T: TxtSource, C: ClaimSource> {
     decisions: TtlCache<String, CachedDecision>,
     step3: TtlCache<String, CachedStep3>,
     registered: TtlCache<Npub, ()>,
+    /// Single-flight per domain: a browser's first visit fires A, AAAA and
+    /// HTTPS queries at once, and only one of them should pay for the TXT
+    /// and relay round trips (and write the pin).
+    inflight: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
@@ -127,7 +132,13 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             decisions: TtlCache::new(4096),
             step3: TtlCache::new(4096),
             registered: TtlCache::new(1024),
+            inflight: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The TXT source, for the host to swap upstreams at run time.
+    pub fn txt(&self) -> &T {
+        &self.txt
     }
 
     /// The network watcher's view: is a legacy upstream expected to answer?
@@ -213,21 +224,38 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
     }
 
     async fn decision(&self, d: &str) -> CachedDecision {
-        let now = crate::now();
-        if let Some(c) = self.decisions.get(&d.to_string(), now) {
+        if let Some(c) = self.decisions.get(&d.to_string(), crate::now()) {
             return c;
         }
+        let lock = self.flight(d);
+        let _flight = lock.lock().await;
+        let result = match self.decisions.get(&d.to_string(), crate::now()) {
+            Some(c) => c, // a concurrent caller already decided
+            None => self.decide_uncached(d).await,
+        };
+        drop(_flight);
+        if Arc::strong_count(&lock) == 2 {
+            self.inflight.lock().unwrap().remove(d);
+        }
+        result
+    }
+
+    async fn decide_uncached(&self, d: &str) -> CachedDecision {
+        let now = crate::now();
         let pin = self.pins.get(d);
         let online = self.is_online();
         let (txt, txt_ttl) = if online { self.txt.lookup(d).await } else { (TxtLookup::Unreachable, None) };
         let events = match &txt {
             // The privacy gate (spec §8): relays only after a TXT hit …
-            TxtLookup::Hit { .. } => self.claims.fetch_claims(d, true).await,
-            TxtLookup::Miss => Vec::new(),
+            TxtLookup::Hit { .. } => self.claims.fetch_claims(d, RelayScope::AfterHit).await,
+            TxtLookup::Miss { .. } => Vec::new(),
             // … or offline, where the claim stands in for the record (§5.5) —
             // unless a pin already answers, which needs no relay at all.
             TxtLookup::Unreachable if pin.is_some() => Vec::new(),
-            TxtLookup::Unreachable => self.claims.fetch_claims(d, false).await,
+            // Believed online but DNS did not answer: a public relay must not
+            // learn the domain; relays on the mesh may.
+            TxtLookup::Unreachable if online => self.claims.fetch_claims(d, RelayScope::MeshOnly).await,
+            TxtLookup::Unreachable => self.claims.fetch_claims(d, RelayScope::Offline).await,
         };
         let claims = policy::ingest_claims(self.pins.as_ref(), d, &events, now);
         let is_unreachable = matches!(txt, TxtLookup::Unreachable);
@@ -274,6 +302,28 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
     /// Step 3 (spec §6) plus the reachability rule (spec §7). `None` means
     /// "not over fips" or failure — the caller passes through either way.
     async fn step3(&self, q: &Query, binding: &Binding) -> Option<Npub> {
+        // Same single-flight as `decision`: one mesh query per name, however
+        // many record types the application asks for at once.
+        let lock = self.flight(&format!("step3:{}", q.name));
+        let _flight = lock.lock().await;
+        let result = self.step3_uncached(q, binding).await;
+        drop(_flight);
+        if Arc::strong_count(&lock) == 2 {
+            self.inflight.lock().unwrap().remove(&format!("step3:{}", q.name));
+        }
+        result
+    }
+
+    fn flight(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.inflight
+            .lock()
+            .unwrap()
+            .entry(key.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    async fn step3_uncached(&self, q: &Query, binding: &Binding) -> Option<Npub> {
         let now = crate::now();
         let cached = match self.step3.get(&q.name, now) {
             Some(CachedStep3::Node(n)) => Some(n),
@@ -374,14 +424,15 @@ mod tests {
     struct FakeTxt(Mutex<HashMap<String, TxtLookup>>);
     impl TxtSource for FakeTxt {
         async fn lookup(&self, domain: &str) -> (TxtLookup, Option<u32>) {
-            (self.0.lock().unwrap().get(domain).cloned().unwrap_or(TxtLookup::Miss), Some(300))
+            let r = self.0.lock().unwrap().get(domain).cloned();
+            (r.unwrap_or(TxtLookup::Miss { method: Method::DnsSingle }), Some(300))
         }
     }
 
-    struct FakeClaims(Vec<Event>, Mutex<Vec<(String, bool)>>);
+    struct FakeClaims(Vec<Event>, Mutex<Vec<(String, RelayScope)>>);
     impl ClaimSource for FakeClaims {
-        async fn fetch_claims(&self, domain: &str, online: bool) -> Vec<Event> {
-            self.1.lock().unwrap().push((domain.into(), online));
+        async fn fetch_claims(&self, domain: &str, scope: RelayScope) -> Vec<Event> {
+            self.1.lock().unwrap().push((domain.into(), scope));
             self.0.iter().filter(|e| e.tags[0][1] == domain).cloned().collect()
         }
     }
@@ -456,7 +507,54 @@ mod tests {
         assert!(matches!(r.lookup(&q).await, LookupResult::Answer(_)));
         assert_eq!(mesh.queries.lock().unwrap().len(), 1);
         // Relays were asked only after the TXT hit, and only online.
-        assert_eq!(r.claims.1.lock().unwrap().as_slice(), &[("example.org".to_string(), true)]);
+        assert_eq!(r.claims.1.lock().unwrap().as_slice(), &[("example.org".to_string(), RelayScope::AfterHit)]);
+    }
+
+    #[tokio::test]
+    async fn dns_unreachable_while_online_asks_mesh_relays_only() {
+        struct Dead;
+        impl TxtSource for Dead {
+            async fn lookup(&self, _: &str) -> (TxtLookup, Option<u32>) {
+                (TxtLookup::Unreachable, None)
+            }
+        }
+        let mesh = Arc::new(FakeMesh { queries: Mutex::new(vec![]), registered: Mutex::new(vec![]), unreachable: vec![] });
+        let r = Resolver::new(
+            ResolverConfig::default(),
+            Arc::new(MemoryPinStore::new()),
+            Dead,
+            FakeClaims(vec![], Mutex::new(vec![])),
+            mesh,
+        );
+        let q = build_query(1, "www.example.org", QTYPE_AAAA).unwrap();
+        assert_eq!(r.lookup(&q).await, LookupResult::Passthrough);
+        let asked = r.claims.1.lock().unwrap().clone();
+        assert!(!asked.is_empty());
+        assert!(asked.iter().all(|(_, s)| *s == RelayScope::MeshOnly), "{asked:?}");
+    }
+
+    #[tokio::test]
+    async fn concurrent_first_lookups_decide_once() {
+        let pins: Arc<MemoryPinStore> = Arc::new(MemoryPinStore::new());
+        let (r, mesh) = resolver(
+            HashMap::from([("example.org".to_string(), hit(npub(1)))]),
+            vec![claim_event(npub(1), "example.org")],
+            pins,
+            vec![],
+            false,
+        );
+        let r = Arc::new(r);
+        let mut tasks = Vec::new();
+        for (i, qt) in [QTYPE_A, QTYPE_AAAA, 65u16].iter().enumerate() {
+            let r = r.clone();
+            let q = build_query(i as u16 + 1, "www.example.org", *qt).unwrap();
+            tasks.push(tokio::spawn(async move { r.lookup(&q).await }));
+        }
+        for t in tasks {
+            assert!(matches!(t.await.unwrap(), LookupResult::Answer(_)));
+        }
+        assert_eq!(r.claims.1.lock().unwrap().len(), 1, "one relay fetch for three concurrent queries");
+        assert_eq!(mesh.queries.lock().unwrap().len(), 1, "one step 3 query");
     }
 
     #[tokio::test]
@@ -517,7 +615,7 @@ mod tests {
         let q = build_query(1, "www.example.org", QTYPE_AAAA).unwrap();
         assert_eq!(r.lookup(&q).await, LookupResult::Passthrough);
         let asked = r.claims.1.lock().unwrap().clone();
-        assert!(asked.iter().all(|(_, online)| !online), "mesh relays asked, offline mode");
+        assert!(asked.iter().all(|(_, s)| *s == RelayScope::Offline), "offline scope");
         assert!(asked.iter().any(|(d, _)| d == "example.org"));
 
         let (r, _) = resolver(HashMap::new(), claims, Arc::new(MemoryPinStore::new()), vec![], true);

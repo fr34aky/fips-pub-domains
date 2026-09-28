@@ -6,10 +6,17 @@
 use pubdom_core::pins::{Binding, MemoryPinStore, PinSnapshot, PinStore, SeenKey};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct FilePinStore {
     path: PathBuf,
     mem: MemoryPinStore,
+    /// Saves are serialized: two concurrent lookups pinning different
+    /// domains would otherwise race on the temp file and could leave a
+    /// truncated pin file behind, which refuses to load.
+    saving: Mutex<()>,
+    seq: AtomicU64,
 }
 
 impl FilePinStore {
@@ -23,7 +30,7 @@ impl FilePinStore {
             Err(e) if e.kind() == io::ErrorKind::NotFound => PinSnapshot::default(),
             Err(e) => return Err(e),
         };
-        Ok(Self { path, mem: MemoryPinStore::from_snapshot(snap) })
+        Ok(Self { path, mem: MemoryPinStore::from_snapshot(snap), saving: Mutex::new(()), seq: AtomicU64::new(0) })
     }
 
     pub fn path(&self) -> &Path {
@@ -37,13 +44,18 @@ impl FilePinStore {
     }
 
     fn try_save(&self) -> io::Result<()> {
+        let _serialized = self.saving.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let tmp = self.path.with_extension("json.tmp");
+        let n = self.seq.fetch_add(1, Ordering::Relaxed);
+        let tmp = self.path.with_extension(format!("json.{}.{n}.tmp", std::process::id()));
         let bytes = serde_json::to_vec_pretty(&self.mem.snapshot()).map_err(io::Error::other)?;
-        std::fs::write(&tmp, bytes)?;
-        std::fs::rename(&tmp, &self.path)
+        let result = std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, &self.path));
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result
     }
 }
 
@@ -51,13 +63,19 @@ impl PinStore for FilePinStore {
     fn get(&self, domain: &str) -> Option<Binding> {
         self.mem.get(domain)
     }
-    fn put(&self, binding: Binding) {
-        self.mem.put(binding);
-        self.save();
+    fn put(&self, binding: Binding) -> bool {
+        let changed = self.mem.put(binding);
+        if changed {
+            self.save();
+        }
+        changed
     }
-    fn forget(&self, domain: &str) {
-        self.mem.forget(domain);
-        self.save();
+    fn forget(&self, domain: &str) -> bool {
+        let changed = self.mem.forget(domain);
+        if changed {
+            self.save();
+        }
+        changed
     }
     fn list(&self) -> Vec<Binding> {
         self.mem.list()
@@ -65,9 +83,12 @@ impl PinStore for FilePinStore {
     fn newest_seen(&self, key: &SeenKey) -> Option<u64> {
         self.mem.newest_seen(key)
     }
-    fn note_seen(&self, key: SeenKey, created_at: u64) {
-        self.mem.note_seen(key, created_at);
-        self.save();
+    fn note_seen(&self, key: SeenKey, created_at: u64) -> bool {
+        let changed = self.mem.note_seen(key, created_at);
+        if changed {
+            self.save();
+        }
+        changed
     }
 }
 

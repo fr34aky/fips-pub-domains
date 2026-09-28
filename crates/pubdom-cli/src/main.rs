@@ -6,6 +6,7 @@ use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
 use pubdom_core::policy::{self, Input, NoProofs, TxtLookup};
 use pubdom_core::{PinStore, synth};
+use pubdom_resolve::relay::RelayScope;
 use pubdom_resolve::{Config, FilePinStore, LookupResult, RelayClient, TxtVerifier};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -99,9 +100,14 @@ async fn main() -> Result<()> {
                 v.lookup(&domain).await
             };
             println!("txt: {txt:?} (ttl {ttl:?})");
-            let online = !matches!(txt, TxtLookup::Unreachable);
+            let scope = match txt {
+                TxtLookup::Hit { .. } => RelayScope::AfterHit,
+                TxtLookup::Miss { .. } => RelayScope::AfterHit, // verify shows everything it can
+                TxtLookup::Unreachable if cli.offline => RelayScope::Offline,
+                TxtLookup::Unreachable => RelayScope::MeshOnly,
+            };
             let relays = RelayClient::new(&cfg.public_relays, &cfg.mesh_relays, Duration::from_secs(3)).await;
-            let events = relays.fetch_claims(&domain, online).await;
+            let events = relays.fetch_claims(&domain, scope).await;
             println!("claim events: {}", events.len());
             let claims = policy::ingest_claims(&pins, &domain, &events, pubdom_resolve::now());
             for c in &claims {
@@ -122,7 +128,8 @@ async fn main() -> Result<()> {
         }
         Cmd::Claims { domain } => {
             let relays = RelayClient::new(&cfg.public_relays, &cfg.mesh_relays, Duration::from_secs(3)).await;
-            for ev in relays.fetch_claims(&domain, !cli.offline).await {
+            let scope = if cli.offline { RelayScope::Offline } else { RelayScope::AfterHit };
+            for ev in relays.fetch_claims(&domain, scope).await {
                 println!("{}", serde_json::to_string_pretty(&ev)?);
             }
             relays.shutdown().await;

@@ -1,4 +1,4 @@
-NIP-XX
+NIP-DB
 ======
 
 Domain Service Bindings
@@ -14,11 +14,13 @@ IPv6 address) with or without access to the legacy DNS. The events replace
 the DNS `TXT` record described below when DNS is unreachable and are
 verified against it when it is.
 
-Kind numbers below are **placeholders** pending registration in
-[registry-of-kinds](https://github.com/nostr-protocol/registry-of-kinds);
-they are chosen next to fips's overlay advert (`37195`), which is likewise
-unregistered today. Reference implementation: this repository (desktop
-daemon and server) and fips2go (Android).
+Submitted as [nostr-protocol/nips #2487](https://github.com/nostr-protocol/nips/pull/2487);
+kind numbers proposed in
+[registry-of-kinds #16](https://github.com/nostr-protocol/registry-of-kinds/pull/16),
+next to fips's overlay advert (`37195`). Reference implementation: this
+repository (desktop daemon and server) and fips2go (Android). Until both
+are merged the numbers are provisional and the implementations will follow
+whatever is assigned.
 
 ## Kind 37197: Domain Claim
 

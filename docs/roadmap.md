@@ -16,10 +16,11 @@
 1. **fips2go PR review and merge** (#55). Every path is device-verified;
    what the phone lacks is discovery through relays inside the mesh (item
    7).
-2. **Registration and the NIP.** Kinds 37197–37199 into
-   `nostr-protocol/registry-of-kinds`, then [nip.md](nip.md) to
-   `nostr-protocol/nips` with the two implementations as reference. Not
-   started, by decision.
+2. **Registration and the NIP** — submitted 2026-09-28:
+   [registry-of-kinds #16](https://github.com/nostr-protocol/registry-of-kinds/pull/16)
+   and [nips #2487](https://github.com/nostr-protocol/nips/pull/2487)
+   (NIP-DB). Until merged, the kind numbers are provisional; if others are
+   assigned, `pubdom-core::KIND_*` and the docs follow.
 3. **DNSSEC proofs in claims** (spec §3.1 `dnssec` tag, §5.5): the RFC 9102
    chain for the TXT RRset, verified locally against the root trust anchor
    — the only trustless verification of a domain never seen online. Moved

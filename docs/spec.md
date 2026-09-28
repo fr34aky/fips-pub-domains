@@ -369,10 +369,10 @@ Known holes:
 
 ## 10. Decisions and open questions
 
-- Kind numbers: 37197–37199 are free. Register them in `registry-of-kinds`
-  (a YAML PR, cheap, prevents collisions) and submit [nip.md](nip.md) to
-  `nostr-protocol/nips` once two implementations exist (the daemon and
-  fips2go), as the NIP process expects running code. Not done yet.
+- Kind numbers: proposed in
+  [registry-of-kinds #16](https://github.com/nostr-protocol/registry-of-kinds/pull/16);
+  the NIP is [nips #2487](https://github.com/nostr-protocol/nips/pull/2487)
+  (NIP-DB). Provisional until merged.
 - Desktop resolver: standalone daemon in this repo, not inside fips (keeps
   the repo independent of the fips fork; fips's responder has the mesh
   filter, see §6.1).

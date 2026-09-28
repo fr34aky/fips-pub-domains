@@ -7,6 +7,11 @@
 //! - `Dns` when two or more upstreams returned the same set of npubs;
 //! - `DnsSingle` when only one upstream was available or answered.
 //!
+//! Upstreams naming different npubs: the largest group wins; a tie is no
+//! answer (`Unreachable`, so pins decide) unless exactly one side validated
+//! under DNSSEC — else list order alone would pick between an honest and a
+//! poisoned resolver.
+//!
 //! A miss is a miss only if every upstream that answered said so; an
 //! upstream that failed (timeout, SERVFAIL) is simply not counted, and if
 //! none answered the lookup is `Unreachable` — the offline path.
@@ -171,7 +176,24 @@ fn combine(answers: Vec<One>) -> (TxtLookup, Option<u32>) {
             }
         }
     }
-    let Some((_, best)) = groups.iter().max_by_key(|(_, v)| v.len()) else {
+    let top = groups.iter().map(|(_, v)| v.len()).max().unwrap_or(0);
+    let tied: Vec<&(Vec<Npub>, Vec<&One>)> =
+        groups.iter().filter(|(_, v)| v.len() == top).collect();
+    let is_secure = |v: &Vec<&One>| v.iter().any(|a| matches!(a, One::Hit { secure: true, .. }));
+    let best = match tied.as_slice() {
+        [] => None,
+        [one] => Some(*one),
+        many => {
+            let secure: Vec<_> = many.iter().filter(|(_, v)| is_secure(v)).collect();
+            if let [one] = secure.as_slice() {
+                Some(**one)
+            } else {
+                tracing::warn!("upstream resolvers disagree on the _fips-dns record; not using it");
+                return (TxtLookup::Unreachable, None);
+            }
+        }
+    };
+    let Some((_, best)) = best else {
         let misses = answers
             .iter()
             .filter(|a| matches!(a, One::Miss { .. }))
@@ -297,6 +319,21 @@ mod tests {
             TxtLookup::Hit { records, method } => {
                 assert_eq!(records[0].npub, Npub::from_bytes([2; 32]));
                 assert_eq!(method, Method::Dns);
+            }
+            other => panic!("{other:?}"),
+        }
+        // A tie between different answers is no answer, whatever the order…
+        for order in [
+            vec![hit(&[1], false), hit(&[2], false)],
+            vec![hit(&[2], false), hit(&[1], false)],
+        ] {
+            assert_eq!(combine(order).0, TxtLookup::Unreachable);
+        }
+        // …unless one side validated.
+        match combine(vec![hit(&[2], true), hit(&[1], false)]).0 {
+            TxtLookup::Hit { records, method } => {
+                assert_eq!(records[0].npub, Npub::from_bytes([2; 32]));
+                assert_eq!(method, Method::Dnssec);
             }
             other => panic!("{other:?}"),
         }

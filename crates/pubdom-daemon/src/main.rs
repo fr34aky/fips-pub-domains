@@ -149,8 +149,15 @@ async fn run(cfg: Config) -> Result<()> {
         tasks.push(tokio::spawn(async move {
             let mut buf = vec![0u8; 4096];
             loop {
-                let Ok((n, from)) = udp.recv_from(&mut buf).await else {
-                    continue;
+                let (n, from) = match udp.recv_from(&mut buf).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        // A persistent error (EMFILE, a vanished interface) must
+                        // not turn this loop into a busy spin.
+                        tracing::warn!(error = %e, "receive failed");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
                 };
                 let (st, udp, q) = (st.clone(), udp.clone(), buf[..n].to_vec());
                 tokio::spawn(async move {
@@ -163,8 +170,15 @@ async fn run(cfg: Config) -> Result<()> {
         let st = state.clone();
         tasks.push(tokio::spawn(async move {
             loop {
-                let Ok((mut s, _)) = tcp.accept().await else {
-                    continue;
+                let (mut s, _) = match tcp.accept().await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        // A persistent error (EMFILE, a vanished interface) must
+                        // not turn this loop into a busy spin.
+                        tracing::warn!(error = %e, "accept failed");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
                 };
                 let st = st.clone();
                 tokio::spawn(async move {

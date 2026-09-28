@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A pinned server that the TXT record no longer names is now unpinned even
+  when the claim of the server it names instead did not reach us (with a
+  record as strong as the pin, as before). It used to stay pinned and
+  answer the next offline lookup.
+- The failover backoff now actually grows (5 min, 15, 45, … up to 3 h); a
+  server that stayed down was retried every 5 minutes.
+- A name answered by its domain server itself no longer needs an ICMPv6
+  echo for the record types that follow from the cache; where echo is
+  blocked, A went to the public address while AAAA went to the mesh.
+- Only address types (A, AAAA, ANY, CNAME) of a bound name go over fips,
+  and HTTPS/SVCB get NODATA; MX, TXT, SRV and every other type stay legacy
+  DNS. Under a wildcard zone they were answered empty, which broke mail
+  and SPF lookups from machines running the daemon.
+- Upstream resolvers that give different `_fips-dns` answers in equal
+  numbers no longer have the tie broken by list order: it counts as no
+  answer unless exactly one side validated under DNSSEC.
+- Re-verifying an unchanged binding no longer rewrites the pin file and
+  logs "binding verified and pinned" each time.
+- The reachability echo could panic on a scheduling delay; the daemon's
+  and server's socket loops spun at full CPU on a persistent error.
+- `ResolverConfig.upstreams` is gone: it was never read. (fips2go sets it
+  and drops the line at its next pin bump.)
+
 - `fips-pubdom-server` said "Invalid secret key" when the key file merely
   could not be read (a `fips.key` with mode 600 and a user outside the
   `fips` group); it now says so, and also accepts a 32-byte raw key file.

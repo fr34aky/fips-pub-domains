@@ -17,7 +17,6 @@ use pubdom_core::synth::{self, Query, Step3Outcome};
 use pubdom_core::{ANSWER_TTL_SECS, Binding, Npub, PinStore, domain};
 use std::collections::HashMap;
 use std::future::Future;
-use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -72,8 +71,6 @@ impl TxtSource for NoTxt {
 pub struct ResolverConfig {
     pub public_relays: Vec<String>,
     pub mesh_relays: Vec<String>,
-    /// Empty: the system's resolvers.
-    pub upstreams: Vec<IpAddr>,
     pub dnssec: bool,
     pub allow_unverified_offline: bool,
     pub txt_timeout: Duration,
@@ -84,8 +81,8 @@ pub struct ResolverConfig {
     /// Budget for the echo to a node other than the domain's server.
     pub reach_timeout: Duration,
     /// A server that did not answer step 3 is skipped for this long after
-    /// the first failure, three times as long after the next, up to
-    /// `server_backoff_max`; then it is tried again.
+    /// the first failure, three times as long after each further failure in
+    /// a row, up to `server_backoff_max`; then it is tried again.
     pub server_backoff: Duration,
     pub server_backoff_max: Duration,
 }
@@ -102,7 +99,6 @@ impl Default for ResolverConfig {
                 "wss://relay.nostr.band".into(),
             ],
             mesh_relays: Vec::new(),
-            upstreams: Vec::new(),
             dnssec: true,
             allow_unverified_offline: false,
             txt_timeout: Duration::from_millis(1500),
@@ -135,8 +131,20 @@ enum CachedDecision {
 
 #[derive(Clone)]
 enum CachedStep3 {
-    Node(Npub),
+    /// The node, and whether it was the server that gave the answer — its
+    /// reply proved it reachable, so no echo is needed for the other
+    /// record types of the same name.
+    Node(Npub, bool),
     NotOverFips,
+}
+
+/// A server that did not answer step 3.
+#[derive(Clone, Copy)]
+struct Down {
+    /// Failures in a row.
+    failures: u32,
+    /// Skipped until then (unix seconds).
+    retry_at: u64,
 }
 
 pub struct Resolver<T: TxtSource, C: ClaimSource> {
@@ -156,10 +164,11 @@ pub struct Resolver<T: TxtSource, C: ClaimSource> {
     /// Zone records by domain, for names asked while the domain's servers
     /// are unreachable (spec §3.3, §6). `None` = no server published one.
     zones: TtlCache<String, Option<ZoneRecord>>,
-    /// Servers that did not answer step 3, with how many times in a row:
-    /// skipped until the entry expires (a backoff that grows with the
-    /// count), then tried again — the periodic re-check of a failed server.
-    down: TtlCache<Npub, u32>,
+    /// Servers that did not answer step 3: skipped until `retry_at` (a
+    /// backoff that grows with the failures in a row), then tried again —
+    /// the periodic re-check of a failed server. The entry outlives its
+    /// window so the next failure knows the streak; an answer clears it.
+    down: TtlCache<Npub, Down>,
     /// Single-flight per domain: a browser's first visit fires A, AAAA and
     /// HTTPS queries at once, and only one of them should pay for the TXT
     /// and relay round trips (and write the pin).
@@ -228,6 +237,21 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         let Some(q) = synth::parse_query(query) else {
             return LookupResult::Passthrough;
         };
+        // Only the address types go over fips; HTTPS/SVCB are suppressed for
+        // bound names (below). Everything else — MX, TXT, SRV, NS … — stays
+        // legacy DNS even under a wildcard zone, and costs no TXT or relay
+        // round trip.
+        if !matches!(
+            q.qtype,
+            synth::QTYPE_A
+                | synth::QTYPE_AAAA
+                | synth::QTYPE_ANY
+                | synth::QTYPE_CNAME
+                | synth::QTYPE_SVCB
+                | synth::QTYPE_HTTPS
+        ) {
+            return LookupResult::Passthrough;
+        }
         let candidates = domain::candidates(&q.name);
         if candidates.is_empty() {
             return LookupResult::Passthrough;
@@ -279,8 +303,8 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             synth::QTYPE_A | synth::QTYPE_AAAA | synth::QTYPE_ANY | synth::QTYPE_CNAME => {
                 synth::build_answer(q, npub, ttl)
             }
-            // HTTPS/SVCB and the like: a public record could carry address
-            // hints for the legacy path. NODATA keeps the mesh the only path.
+            // HTTPS/SVCB: a public record could carry address hints for the
+            // legacy path. NODATA keeps the mesh the only path.
             _ => synth::build_rcode(q, simple_dns::RCODE::NoError),
         };
         match bytes {
@@ -406,9 +430,9 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         let now = crate::now();
         if let Some(cached) = self.step3.get(&q.name, now) {
             return match cached {
-                // A cached answer names a node; the server that gave it may
-                // not be the primary any more, so the echo rule applies.
-                CachedStep3::Node(n) => self.deliverable(q, n, false).await,
+                // A node that answered step 3 itself was proven reachable
+                // then; any other target needs its echo.
+                CachedStep3::Node(n, proven) => self.deliverable(q, n, proven).await,
                 CachedStep3::NotOverFips => None,
             };
         }
@@ -417,7 +441,11 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         // answers, and a failed server is retried once its window expires.
         let mut all_skipped = true;
         for (i, server) in servers.iter().enumerate() {
-            if self.down.get(&server.npub, now).is_some() {
+            if self
+                .down
+                .get(&server.npub, now)
+                .is_some_and(|d| now < d.retry_at)
+            {
                 continue;
             }
             let then = if i + 1 < servers.len() {
@@ -433,12 +461,15 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             }
             match self.ask_server(q, server, now).await {
                 Ok(Step3Outcome::Node { npub, ttl }) => {
+                    self.down.remove(&server.npub);
                     let ttl = Duration::from_secs(ttl.into()).min(cache::STEP3_MAX_TTL);
+                    let proven = npub == server.npub;
                     self.step3
-                        .put(q.name.clone(), CachedStep3::Node(npub), ttl, now);
-                    return self.deliverable(q, npub, npub == server.npub).await;
+                        .put(q.name.clone(), CachedStep3::Node(npub, proven), ttl, now);
+                    return self.deliverable(q, npub, proven).await;
                 }
                 Ok(Step3Outcome::NotOverFips) => {
+                    self.down.remove(&server.npub);
                     self.step3.put(
                         q.name.clone(),
                         CachedStep3::NotOverFips,
@@ -501,14 +532,20 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
 
     /// Remember a failed server with a growing backoff.
     fn mark_down(&self, npub: Npub, now: u64) {
-        // `get` only sees live entries; an expired one starts over at 0.
-        let failures = self.down.get(&npub, now).unwrap_or(0) + 1;
+        // The streak is forgotten once the entry expires: a server that has
+        // not failed for a whole maximum window starts over.
+        let failures = self.down.get(&npub, now).map_or(0, |d| d.failures) + 1;
         let window = self
             .cfg
             .server_backoff
             .saturating_mul(3u32.saturating_pow(failures - 1))
             .min(self.cfg.server_backoff_max);
-        self.down.put(npub, failures, window, now);
+        let down = Down {
+            failures,
+            retry_at: now + window.as_secs(),
+        };
+        self.down
+            .put(npub, down, window + self.cfg.server_backoff_max, now);
     }
 
     /// No domain server answered: resolve `q` from a published zone record
@@ -1233,5 +1270,82 @@ mod tests {
             to_primary, 4,
             "the primary is tried again (udp + retry) on the second lookup"
         );
+    }
+
+    #[test]
+    fn backoff_grows_with_failures_in_a_row_and_is_capped() {
+        let (r, _) = resolver(
+            HashMap::new(),
+            vec![],
+            Arc::new(MemoryPinStore::new()),
+            vec![],
+            false,
+        );
+        // Defaults: 5 min, then three times as long, up to 3 h.
+        let mut now = 1_000;
+        let mut windows = Vec::new();
+        for _ in 0..6 {
+            r.mark_down(npub(1), now);
+            let d = r.down.get(&npub(1), now).unwrap();
+            windows.push(d.retry_at - now);
+            // The failed retry happens once the window has passed.
+            now = d.retry_at;
+        }
+        assert_eq!(windows, vec![300, 900, 2700, 8100, 10800, 10800]);
+        // An answer clears the streak.
+        r.down.remove(&npub(1));
+        r.mark_down(npub(1), now);
+        assert_eq!(r.down.get(&npub(1), now).unwrap().retry_at - now, 300);
+    }
+
+    #[tokio::test]
+    async fn the_server_answering_for_itself_needs_no_echo_for_other_types() {
+        // The server (npub 1) filters ICMPv6 echo. Its step 3 answer proves
+        // it reachable, for the AAAA query and for the A query that follows
+        // from the cache — else A would fall back to the public address
+        // while AAAA went to the mesh.
+        let (r, mesh) = resolver(
+            HashMap::from([("example.org".to_string(), hit(npub(1)))]),
+            vec![claim_event(npub(1), "example.org")],
+            Arc::new(MemoryPinStore::new()),
+            vec![npub(1)],
+            false,
+        );
+        for (id, qtype) in [(1, QTYPE_AAAA), (2, QTYPE_A)] {
+            let q = build_query(id, "www.example.org", qtype).unwrap();
+            assert!(
+                matches!(r.lookup(&q).await, LookupResult::Answer(_)),
+                "qtype {qtype}"
+            );
+        }
+        assert!(mesh.echoes.lock().unwrap().is_empty());
+        assert_eq!(
+            mesh.queries.lock().unwrap().len(),
+            1,
+            "A came from the cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_address_types_stay_legacy_even_under_a_wildcard() {
+        // MX, TXT (SPF/DMARC), SRV … of a bound name go to the public DNS
+        // untouched and cost no TXT, relay or mesh round trip.
+        let (r, mesh) = resolver(
+            HashMap::from([("example.org".to_string(), hit(npub(1)))]),
+            vec![claim_event(npub(1), "example.org")],
+            Arc::new(MemoryPinStore::new()),
+            vec![],
+            false,
+        );
+        for qtype in [15u16, 16, 33, 2, 6] {
+            let q = build_query(1, "www.example.org", qtype).unwrap();
+            assert_eq!(
+                r.lookup(&q).await,
+                LookupResult::Passthrough,
+                "qtype {qtype}"
+            );
+        }
+        assert!(r.claims.1.lock().unwrap().is_empty());
+        assert!(mesh.queries.lock().unwrap().is_empty());
     }
 }

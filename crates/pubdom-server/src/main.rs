@@ -718,6 +718,32 @@ mod tests {
         assert_eq!(own_chain(&claims, me, "example.org", |_| None), None);
     }
 
+    /// systemd expands `%` specifiers and `$` variables in `ExecStart`
+    /// before any shell sees the line; 0.2.0 shipped a unit whose `%s`
+    /// became `/bin/sh`. Everything meant for the shell must be doubled.
+    #[test]
+    fn shipped_units_escape_what_systemd_would_expand() {
+        for (name, unit) in [
+            (
+                "fips-pubdom-server.service",
+                include_str!("../../../packaging/systemd/fips-pubdom-server.service"),
+            ),
+            (
+                "fips-pubdom.service",
+                include_str!("../../../packaging/systemd/fips-pubdom.service"),
+            ),
+        ] {
+            for line in unit.lines().filter(|l| l.starts_with("ExecStart=")) {
+                let mut chars = line.chars().peekable();
+                while let Some(c) = chars.next() {
+                    if c == '%' || c == '$' {
+                        assert_eq!(chars.next(), Some(c), "{name}: a single {c} in {line}");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn key_file_formats_and_errors() {
         let dir = std::env::temp_dir().join(format!("fips-pubdom-key-{}", std::process::id()));

@@ -149,6 +149,17 @@ that Internet-only subdomain — the operators guide now says when a wildcard
 is appropriate — and the search-domain warning listed fips's own `fips`
 routing domain, which it no longer does.
 
+## The packaged server unit
+
+The unit is part of the install path and has to be started, not just
+read: `systemd-analyze verify` accepts a unit whose `ExecStart` systemd
+itself rewrites (0.2.0 shipped one that passed `--zone /bin/sh`). With a
+zone in `/etc/fips-pubdom/zones/` and `server.env` set, `systemctl start
+fips-pubdom-server` must log `serving` and `claim published`; with the
+directory empty it must stop once with "no zone files". `cargo test`
+guards the escaping: every `%` and `$` in the shipped units' `ExecStart`
+lines must be doubled.
+
 ## Level 3c — a name pointing at a node that does not exist
 
 Zone entry `ghost: <npub of nobody>`. The server answers the CNAME (the

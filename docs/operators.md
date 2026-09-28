@@ -38,7 +38,7 @@ will then send that name to your node and fail. A site with a few mesh
 services lists them and leaves the wildcard out; a site that wants the
 wildcard carves the Internet-only names out with `legacy`. `legacy` is how a site keeps `www` on the public Internet while
 putting `git` on the mesh: the server answers NXDOMAIN, and the client
-turns that into an ordinary legacy lookup. The file is re-read whenever its
+turns that into an ordinary legacy lookup. (A new file under the unit needs a restart.) The file is re-read whenever its
 mtime changes; a broken edit keeps the last good zone.
 
 ## 2. The DNS record

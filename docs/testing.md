@@ -177,8 +177,18 @@ servers both claiming → both pinned; the primary's DNS silent → the second
 answers after the primary's UDP attempt and retry; the next name goes to
 the second server directly while the primary is in its backoff window; with
 the window expired the primary is asked again. An existing single-entry
-pin file loads and resolves unchanged. A live run needs a second node
-serving the same zone and a second TXT record — pending.
+pin file loads and resolves unchanged.
+
+Live, with a second node serving the same zone file and a second TXT
+record: a fresh client pinned both servers; with the primary's process
+stopped, the query logged `domain server did not answer; trying the next`
+and was answered by the second server (not the zone record); with the
+primary back, lookups returned to it. Two things this level found: a
+client configured with only a mesh relay never sees the second server's
+claim unless that relay accepts the second key too (its allow-list), so
+it pins one server and reaches the other only through the zone record;
+and the failover log said "trying the next" with nothing left to try —
+it now says which.
 
 ## Level 5 — the phone
 

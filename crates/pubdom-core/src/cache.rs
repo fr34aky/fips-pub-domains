@@ -59,7 +59,8 @@ impl<K: Eq + Hash + Clone, V: Clone> TtlCache<K, V> {
     }
 
     /// Remove the entry only if it is live and `pred` holds for its value,
-    /// atomically.
+    /// atomically. An expired entry is left for the next pressure sweep;
+    /// `get` already ignores it.
     pub fn remove_if(&self, key: &K, now: u64, pred: impl FnOnce(&V) -> bool) {
         let mut g = self.inner.lock().unwrap();
         if g.get(key).is_some_and(|(exp, v)| *exp > now && pred(v)) {
@@ -74,6 +75,21 @@ impl<K: Eq + Hash + Clone, V: Clone> TtlCache<K, V> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn remove_if_only_removes_live_matching_entries() {
+        let c: TtlCache<u8, bool> = TtlCache::new(8);
+        c.put(1, true, Duration::from_secs(10), 100);
+        c.put(2, false, Duration::from_secs(10), 100);
+        c.remove_if(&1, 105, |v| *v);
+        c.remove_if(&2, 105, |v| *v);
+        assert_eq!(c.get(&1, 105), None);
+        assert_eq!(c.get(&2, 105), Some(false));
+        // Expired: left alone, and still invisible.
+        c.put(3, true, Duration::from_secs(1), 100);
+        c.remove_if(&3, 200, |_| true);
+        assert_eq!(c.get(&3, 200), None);
+    }
+
     use super::*;
 
     #[test]

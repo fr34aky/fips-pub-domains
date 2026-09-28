@@ -23,6 +23,7 @@
 //! none answered the lookup is `Unreachable` — the offline path.
 
 use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
+use hickory_resolver::lookup::Lookup;
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::net::{DnsError, NetError};
 use hickory_resolver::proto::dnssec::Proof;
@@ -120,17 +121,16 @@ impl TxtVerifier {
     }
 
     async fn one(r: &TokioResolver, name: &str) -> One {
-        match r.lookup(name, RecordType::TXT).await {
-            // An answer that failed validation counts like no answer. It is
-            // not evidence of tampering — hickory also reports a lost
-            // sub-query or a DNSSEC-stripping router as bogus — and treating
-            // it as more would give an attacker nothing: one who can forge an
-            // answer can also drop it. (hickory reports it as an error, which
-            // the arm below covers; a bogus record inside Ok is rare.)
-            Ok(lookup) if lookup.answers().iter().any(|r| r.proof == Proof::Bogus) => {
-                tracing::debug!(%name, "TXT answer failed DNSSEC validation");
-                One::Failed
-            }
+        Self::classify(name, r.lookup(name, RecordType::TXT).await)
+    }
+
+    /// One upstream's result as evidence. An answer that failed DNSSEC
+    /// validation counts like no answer: it is not evidence of tampering —
+    /// hickory also reports a lost sub-query or a DNSSEC-stripping router as
+    /// bogus — and treating it as more would give an attacker nothing, since
+    /// one who can forge an answer can also drop it.
+    fn classify(name: &str, result: Result<Lookup, NetError>) -> One {
+        match result {
             Ok(lookup) => {
                 let mut records = Vec::new();
                 let mut secure = false;
@@ -157,6 +157,12 @@ impl TxtVerifier {
                     }
                 }
             }
+            Err(NetError::Dns(DnsError::NoRecordsFound(nr)))
+                if nr.soa.as_ref().is_some_and(|soa| soa.proof == Proof::Bogus) =>
+            {
+                tracing::debug!(%name, "TXT denial failed DNSSEC validation");
+                One::Failed
+            }
             Err(NetError::Dns(DnsError::NoRecordsFound(nr))) => {
                 // A validated SOA in the authority section means the denial
                 // itself was proven (NSEC/NSEC3 checked by the validator).
@@ -166,8 +172,17 @@ impl TxtVerifier {
                     .is_some_and(|soa| soa.proof == Proof::Secure);
                 One::Miss { secure }
             }
+            // hickory reports a bogus answer, record or denial, as an error.
+            Err(NetError::Dns(DnsError::DnssecBogus))
+            | Err(NetError::Dns(DnsError::Nsec {
+                proof: Proof::Bogus,
+                ..
+            })) => {
+                tracing::debug!(%name, "TXT answer failed DNSSEC validation");
+                One::Failed
+            }
             Err(e) => {
-                tracing::debug!(error = %e, "TXT upstream failed");
+                tracing::debug!(%name, error = %e, "TXT upstream failed");
                 One::Failed
             }
         }
@@ -302,6 +317,35 @@ mod tests {
             secure,
             ttl: 300,
         }
+    }
+
+    #[test]
+    fn bogus_answers_count_like_no_answer() {
+        use hickory_resolver::net::NoRecords;
+        use hickory_resolver::proto::op::{Query, ResponseCode};
+        use hickory_resolver::proto::rr::rdata::SOA;
+        use hickory_resolver::proto::rr::{Name, Record};
+        let bogus = Err(NetError::Dns(DnsError::DnssecBogus));
+        assert!(matches!(TxtVerifier::classify("x", bogus), One::Failed));
+        // A denial whose SOA failed validation is no denial.
+        let mut nr = NoRecords::new(Query::default(), ResponseCode::NXDomain);
+        let mut soa = Record::from_rdata(
+            Name::root(),
+            60,
+            SOA::new(Name::root(), Name::root(), 1, 1, 1, 1, 1),
+        );
+        soa.proof = Proof::Bogus;
+        nr.soa = Some(Box::new(soa.clone()));
+        let denial = Err(NetError::Dns(DnsError::NoRecordsFound(nr.clone())));
+        assert!(matches!(TxtVerifier::classify("x", denial), One::Failed));
+        // A validated one is a validated miss.
+        soa.proof = Proof::Secure;
+        nr.soa = Some(Box::new(soa));
+        let denial = Err(NetError::Dns(DnsError::NoRecordsFound(nr)));
+        assert!(matches!(
+            TxtVerifier::classify("x", denial),
+            One::Miss { secure: true }
+        ));
     }
 
     #[test]

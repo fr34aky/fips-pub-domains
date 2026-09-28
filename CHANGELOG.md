@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- docs/operators.md: how to remove a server from a domain — in which order,
+  and why its claim must be published once more without a DNSSEC proof
+  (hosters that re-sign a changed record with the same signature date
+  otherwise leave offline clients with two proofs they cannot order).
+
 ## [0.2.1] - 2026-09-28
 
 ### Fixed

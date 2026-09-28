@@ -141,35 +141,51 @@ node B when only B does — so either keep such names identical in meaning
 
 To take node A out of service while node B keeps the domain:
 
-1. Delete A's line from the `_fips-dns` TXT record. Clients that are
-   online drop A at their next lookup: a record that no longer names a
-   pinned server, validated as strongly as the pin, unpins it.
-2. **Run A's `publish` once more** before stopping it for good, with the
-   same zone and relays:
+1. **Delete A's line from the `_fips-dns` TXT record**, then wait for the
+   record's TTL plus an hour (clients cache a TXT answer for up to an hour).
+   Online clients drop A at their next lookup after that: a record that no
+   longer names a pinned server, validated as strongly as the pin, unpins
+   it. Keep A answering meanwhile — a client pinned to A alone, offline,
+   keeps asking A and only learns about B online; one pinned to both falls
+   over to B after a timeout.
+2. **Restart B's server** (`sudo systemctl restart fips-pubdom-server`), so
+   B's claim carries a proof of the *new* record. Until then it carries the
+   old one, which still names A.
+3. **Stop A's server**: `sudo systemctl disable --now fips-pubdom-server`.
+4. **Publish A's claim once more, without a proof**, to the same relays A
+   used (those in its `/etc/fips-pubdom/server.env`):
 
    ```sh
-   fips-pubdom-server --key /etc/fips/fips.key publish \
+   sudo fips-pubdom-server --key /etc/fips/fips.key publish --no-dnssec-proof \
        --zone /etc/fips-pubdom/zones/example.org.yaml \
        --relay wss://relay.example --relay ws://npub1….fips:80
    ```
 
-   The record no longer names A, so A's claim goes out without a DNSSEC
-   proof (`dnssec_proof_until=None`, with a warning saying why) and
-   replaces its earlier claim on the relays.
-3. Stop A's server (`systemctl disable --now fips-pubdom-server`).
+   This replaces A's earlier claim on those relays. `--no-dnssec-proof`
+   makes it certain: without it the server would still attach a proof
+   naming A if a resolver still had the old record cached, or would keep
+   its last proof if collecting failed. Step 3 comes first so A's running
+   server cannot republish the old proof afterwards.
 
-Step 2 matters for clients that are offline and have never seen the
+Steps 2 and 4 matter for clients that are offline and have never seen the
 domain: they go by the newest DNSSEC proof, ordered by the TXT record's
 signature date. Some DNS hosters re-sign a changed record with the *same*
-signature date as before (a fixed signing schedule). Then A's old proof,
-naming A, and B's new one, not naming it, cannot be told apart, and those
-clients refuse the domain until A's old signatures expire — up to their
-full lifetime, often weeks. Pinned clients are not affected; they keep
-using the servers they know until they are online again.
+signature date as before (a fixed signing schedule). Then a proof naming A
+and one not naming it cannot be told apart, and those clients refuse the
+domain until the old signatures expire — up to their full lifetime, often
+weeks.
 
-To check, from any node with an empty pin file and only a relay on the
-mesh configured: `fips-pubdom --offline verify example.org` should list A's
-claim with `no DNSSEC proof` and bind B alone.
+To check from any node, with a separate config so no real pin is touched
+(a pinned domain would answer from its pins without looking at proofs):
+
+```sh
+printf 'pins: /tmp/check-pins.json\npublic_relays: []\nmesh_relays: ["ws://npub1….fips:80"]\n' > /tmp/check.yaml
+rm -f /tmp/check-pins.json
+fips-pubdom --config /tmp/check.yaml --offline verify example.org
+```
+
+It should list A's claim with `no DNSSEC proof` and B's with a proof, and
+bind B alone.
 
 ## Checking from another node
 

@@ -11,10 +11,11 @@ the phone can: the mesh transport and the responder registration.
 | fips2go file | role |
 |---|---|
 | `shim/src/names.rs` | builds the resolver over the engine's `MeshLink`, runs it from the DNS proxy's blocking per-query thread on a one-worker tokio runtime, implements `MeshDns` |
+| `shim/src/meshtcp.rs` | relays on the mesh: a loopback listener per relay, admitting only the resolver (random path token), each connection carried over the in-process smoltcp TCP stack to the relay's fips address |
 | `shim/src/meshudp.rs` | one UDP request/response over the mesh from the node's own address through a smoltcp socket — the UDP twin of `meshhttp.rs`; and the ICMPv6 echo that confirms a target node is reachable. `Divert` claims UDP flows and echo replies (by identifier) for it |
 | `shim/src/dns.rs` | the proxy asks the resolver for every non-`.fips` name before the upstreams; `None` means "not over fips" and the query goes upstream unchanged |
 | `shim/src/config.rs` | knobs `names_pins_path` (set = on), `names_mesh_relays`, `names_allow_unverified_offline` |
-| `ConfigStore.kt` / `SettingsFragment.kt` | Settings → *Public domain names over fips* (`public_names`, default on) decides whether the pin path is sent |
+| `ConfigStore.kt` / `SettingsFragment.kt` | Settings → *Public domain names over fips* (`public_names`, default on) decides whether the pin path is sent; *Mesh relays for public names* below it lists relays on fips nodes, validated (bech32 checksum) and sent as `names_mesh_relays` while the switch is on |
 
 The pin file is `names-pins.json` in the app's private files directory,
 same schema as the desktop daemon's, so a backup restores it.
@@ -37,11 +38,15 @@ firewall and the TUN.
   wired yet.
 - **Mesh relays go through a loopback proxy.** nostr-sdk opens kernel
   websockets, which the app's UID cannot point at an `fd…` address, so each
-  relay in Settings → "Mesh relays for public names" (`ws://<npub>.fips:port`)
-  gets a listener on loopback, reachable only with a random path token, and
-  every connection is carried over the in-process TCP stack (`meshtcp.rs`).
-  With one configured, an offline phone discovers domains through it and
-  verifies a domain it never saw from the claim's DNSSEC proof.
+  relay in Settings → "Mesh relays for public names"
+  (`ws://<npub>.fips[:port][/path]`, port 80 if none; the scheme may be
+  left out) gets a listener on loopback, reachable only with a random path
+  token, and every connection is carried over the in-process TCP stack
+  (`meshtcp.rs`). With one configured, an offline phone discovers domains
+  through it, and verifies a domain it never saw — provided the claim
+  carries a valid DNSSEC proof (a 0.2.0 server, a signed zone) and the
+  phone has a mesh path to the relay. Otherwise such a domain is refused
+  offline, as before.
 - **No explicit online flag.** An unreachable upstream simply takes the
   offline path; `network_hint` flushes the resolver's caches so the next
   lookup re-decides.
@@ -52,13 +57,12 @@ firewall and the TUN.
 
 ## Verifying on a device
 
-Build and install fips2go from the `names` branch, connect, then in a
-captured browser open `http://www.example.org:8321/` (fips-ui on the demo
-node). Diagnostics shows `public name answered over fips` for the lookup;
-`fips2go`'s log at info level also shows `binding verified and pinned`. For
-the offline case, switch to the FIPS Hotspot or airplane mode with a mesh
-link and repeat: the pinned name still resolves.
-
-fips2go's CI cannot build the `names` branch until it can fetch this
-repository (private): a token in the workflow, or the repository made
-public.
+Install a current fips2go build, connect, then in a captured browser open a
+name of a bound domain (`www.example.org`). Diagnostics shows `public name
+answered over fips`; the log at info level also shows `binding verified
+and pinned`. Offline with a pin: block the phone's Internet (keep a mesh
+link) and repeat — the pinned name still resolves. Offline without one:
+configure a mesh relay, empty `files/names-pins.json` (debug build, `adb
+shell run-as org.fips.android`), block the Internet and open the name — the
+first lookup may fall back once, the retry resolves from the claim's
+proof ([testing.md](testing.md), level 5b).

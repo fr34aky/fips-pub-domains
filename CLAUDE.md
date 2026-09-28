@@ -16,7 +16,7 @@ Android client), fips-ui (`~/fips-ui`) and fips itself (`~/fips`, fork
 `fr34aky/fips` branch `android-hooks`): the library crates are consumed by
 fips2go as pinned git dependencies. Do not move code into those repos except
 the Android-specific parts that already live there (`shim/src/names.rs`,
-`meshudp.rs`, on branch `names`).
+`meshudp.rs`, `meshtcp.rs`).
 
 ## Working rules
 

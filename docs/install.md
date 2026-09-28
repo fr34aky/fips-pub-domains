@@ -177,12 +177,12 @@ sudo rm -rf /etc/fips-pubdom /var/lib/fips-pubdom          # config, zones, serv
 ## Android
 
 There is nothing to install from this repository: fips2go embeds the
-library crates. Build fips2go's `names` branch as its README's "Build"
-section describes — the native shim with `./build-native.sh arm64-v8a`
+library crates. Build fips2go as its README's "Build" section describes — the native shim with `./build-native.sh arm64-v8a`
 (needs the Android NDK), then the APK from the `android/` directory with
 Gradle and JDK 17 — and install it with `adb install`. The feature is on by
-default under Settings → *Public domain names over fips*. Details and
-limits: [android.md](android.md).
+default under Settings → *Public domain names over fips*; relays on the
+mesh go in *Mesh relays for public names* below it. Details and limits:
+[android.md](android.md).
 
 ## Other platforms
 

@@ -112,7 +112,9 @@ jobs:
         run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
       - name: Release notes from [Unreleased]
         run: |
-          git show "$GITHUB_SHA:CHANGELOG.md" | awk '/^## \[Unreleased\]/{f=1;next} /^## \[/{f=0} f' > notes.md
+          # The section as of the tagged commit: from "## [Unreleased]" to the
+          # next heading or the link definitions at the end of the file.
+          git show "$GITHUB_SHA:CHANGELOG.md" | awk '/^## \[Unreleased\]/{f=1;next} /^## \[|^\[Unreleased\]:/{f=0} f' > notes.md
           if grep -q '[^[:space:]]' notes.md; then echo "notes=file" >> "$GITHUB_ENV"; else echo "notes=generated" >> "$GITHUB_ENV"; fi
           cat notes.md
       - name: Publish

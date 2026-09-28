@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-28
+
 ### Added
 
 - **The protocol** ([docs/spec.md](docs/spec.md)): a signed Nostr claim
@@ -45,4 +47,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   daemon guides, Android, platforms, the live test ladder with its
   results, roadmap, design history.
 
-[Unreleased]: https://github.com/fr34aky/fips-pub-domains/commits/main
+[Unreleased]: https://github.com/fr34aky/fips-pub-domains/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/fr34aky/fips-pub-domains/releases/tag/v0.1.0

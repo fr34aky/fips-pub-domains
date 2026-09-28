@@ -42,10 +42,10 @@ impl<K: Eq + Hash + Clone, V: Clone> TtlCache<K, V> {
             // Cheap pressure valve: drop everything expired, then if still
             // full drop an arbitrary entry. DNS caches survive being lossy.
             g.retain(|_, (exp, _)| *exp > now);
-            if g.len() >= self.max_entries {
-                if let Some(k) = g.keys().next().cloned() {
-                    g.remove(&k);
-                }
+            if g.len() >= self.max_entries
+                && let Some(k) = g.keys().next().cloned()
+            {
+                g.remove(&k);
             }
         }
         g.insert(key, (now.saturating_add(ttl.as_secs()), value));

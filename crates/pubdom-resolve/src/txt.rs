@@ -131,6 +131,14 @@ impl TxtVerifier {
     /// one who can forge an answer can also drop it.
     fn classify(name: &str, result: Result<Lookup, NetError>) -> One {
         match result {
+            // Every shape of bogus hickory can report is handled, including
+            // ones current hickory turns into `DnssecBogus` before we see
+            // them — a cached or future path must not let a bogus record
+            // count as an unvalidated one.
+            Ok(lookup) if lookup.answers().iter().any(|r| r.proof == Proof::Bogus) => {
+                tracing::debug!(%name, "TXT answer failed DNSSEC validation");
+                One::Failed
+            }
             Ok(lookup) => {
                 let mut records = Vec::new();
                 let mut secure = false;
@@ -157,22 +165,18 @@ impl TxtVerifier {
                     }
                 }
             }
-            Err(NetError::Dns(DnsError::NoRecordsFound(nr)))
-                if nr.soa.as_ref().is_some_and(|soa| soa.proof == Proof::Bogus) =>
-            {
-                tracing::debug!(%name, "TXT denial failed DNSSEC validation");
-                One::Failed
+            // A denial. hickory only returns this once any NSEC/NSEC3 proof
+            // held, so it is a denial either way; it counts as validated
+            // when the SOA beside it validated too.
+            Err(NetError::Dns(DnsError::NoRecordsFound(nr))) => One::Miss {
+                secure: nr.soa.as_ref().map(|soa| soa.proof) == Some(Proof::Secure),
+            },
+            // A denial hickory could not validate but that is not bogus:
+            // NSEC3 with more iterations than it accepts is insecure by
+            // RFC 9276 — an unvalidated denial, not a failure.
+            Err(NetError::Dns(DnsError::Nsec { proof, .. })) if proof != Proof::Bogus => {
+                One::Miss { secure: false }
             }
-            Err(NetError::Dns(DnsError::NoRecordsFound(nr))) => {
-                // A validated SOA in the authority section means the denial
-                // itself was proven (NSEC/NSEC3 checked by the validator).
-                let secure = nr
-                    .soa
-                    .as_ref()
-                    .is_some_and(|soa| soa.proof == Proof::Secure);
-                One::Miss { secure }
-            }
-            // hickory reports a bogus answer, record or denial, as an error.
             Err(NetError::Dns(DnsError::DnssecBogus))
             | Err(NetError::Dns(DnsError::Nsec {
                 proof: Proof::Bogus,
@@ -323,29 +327,47 @@ mod tests {
     fn bogus_answers_count_like_no_answer() {
         use hickory_resolver::net::NoRecords;
         use hickory_resolver::proto::op::{Query, ResponseCode};
-        use hickory_resolver::proto::rr::rdata::SOA;
+        use hickory_resolver::proto::rr::rdata::{SOA, TXT};
         use hickory_resolver::proto::rr::{Name, Record};
-        let bogus = Err(NetError::Dns(DnsError::DnssecBogus));
-        assert!(matches!(TxtVerifier::classify("x", bogus), One::Failed));
-        // A denial whose SOA failed validation is no denial.
+        let classify = |r| TxtVerifier::classify("x", r);
+        assert!(matches!(
+            classify(Err(NetError::Dns(DnsError::DnssecBogus))),
+            One::Failed
+        ));
+        // A bogus record inside Ok (not what hickory 0.26 does, but a cached
+        // path might): no answer, never an unvalidated hit.
+        let text = format!("v=fips1 npub={}", Npub::from_bytes([1; 32]));
+        let mut rec = Record::from_rdata(
+            Name::from_ascii("_fips-dns.example.org.").unwrap(),
+            60,
+            RData::TXT(TXT::new(vec![text])),
+        );
+        rec.proof = Proof::Bogus;
+        let lookup = Lookup::new_with_max_ttl(Query::default(), vec![rec.clone()]);
+        assert!(matches!(classify(Ok(lookup)), One::Failed));
+        rec.proof = Proof::Secure;
+        let lookup = Lookup::new_with_max_ttl(Query::default(), vec![rec]);
+        assert!(matches!(
+            classify(Ok(lookup)),
+            One::Hit { secure: true, .. }
+        ));
+        // A denial: validated only with a validated SOA; one whose SOA
+        // failed is still a denial (the NSEC proof held), just unvalidated.
         let mut nr = NoRecords::new(Query::default(), ResponseCode::NXDomain);
         let mut soa = Record::from_rdata(
             Name::root(),
             60,
             SOA::new(Name::root(), Name::root(), 1, 1, 1, 1, 1),
         );
-        soa.proof = Proof::Bogus;
-        nr.soa = Some(Box::new(soa.clone()));
-        let denial = Err(NetError::Dns(DnsError::NoRecordsFound(nr.clone())));
-        assert!(matches!(TxtVerifier::classify("x", denial), One::Failed));
-        // A validated one is a validated miss.
-        soa.proof = Proof::Secure;
-        nr.soa = Some(Box::new(soa));
-        let denial = Err(NetError::Dns(DnsError::NoRecordsFound(nr)));
-        assert!(matches!(
-            TxtVerifier::classify("x", denial),
-            One::Miss { secure: true }
-        ));
+        for (proof, secure) in [(Proof::Secure, true), (Proof::Bogus, false)] {
+            soa.proof = proof;
+            nr.soa = Some(Box::new(soa.clone()));
+            let denial = Err(NetError::Dns(DnsError::NoRecordsFound(nr.clone())));
+            assert!(
+                matches!(classify(denial), One::Miss { secure: s } if s == secure),
+                "{proof:?}"
+            );
+        }
     }
 
     #[test]

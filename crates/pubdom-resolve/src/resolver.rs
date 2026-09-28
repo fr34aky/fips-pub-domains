@@ -1,5 +1,5 @@
 //! `lookup(query) → answer | passthrough`: spec §5 and §7 wired to the
-//! adapters, with the budgets of plan-phase1 §6.
+//! adapters, with the budgets of docs/architecture.md.
 //!
 //! Invariant (spec §7): the only way an application receives a mesh address
 //! is a verified (or pinned, or explicitly opted-in unverified) binding

@@ -163,9 +163,21 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         if candidates.is_empty() {
             return LookupResult::Passthrough;
         }
-        // Longest claim wins (spec §5.2).
+        // Longest claim wins (spec §5.2). Offline, a pinned domain is the
+        // only thing that can resolve without a relay round trip, so it is
+        // taken before relays are asked about longer, unpinned candidates;
+        // the pinned server's zone covers its subtree anyway.
         let mut chosen: Option<(String, Binding, bool)> = None;
+        if !self.is_online()
+            && let Some(d) = candidates.iter().rev().find(|d| self.pins.get(d).is_some())
+            && let CachedDecision::Use(b, unverified) = self.decision(d).await
+        {
+            chosen = Some((d.clone(), b, unverified));
+        }
         for d in candidates.iter().rev() {
+            if chosen.is_some() {
+                break;
+            }
             match self.decision(d).await {
                 CachedDecision::Use(b, unverified) => {
                     chosen = Some((d.clone(), b, unverified));
@@ -212,7 +224,9 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             // The privacy gate (spec §8): relays only after a TXT hit …
             TxtLookup::Hit { .. } => self.claims.fetch_claims(d, true).await,
             TxtLookup::Miss => Vec::new(),
-            // … or offline, where the claim stands in for the record (§5.5).
+            // … or offline, where the claim stands in for the record (§5.5) —
+            // unless a pin already answers, which needs no relay at all.
+            TxtLookup::Unreachable if pin.is_some() => Vec::new(),
             TxtLookup::Unreachable => self.claims.fetch_claims(d, false).await,
         };
         let claims = policy::ingest_claims(self.pins.as_ref(), d, &events, now);
@@ -492,6 +506,7 @@ mod tests {
         r.set_online(false);
         let q = build_query(1, "www.example.org", QTYPE_AAAA).unwrap();
         assert!(matches!(r.lookup(&q).await, LookupResult::Answer(_)));
+        assert!(r.claims.1.lock().unwrap().is_empty(), "pinned offline: no relay round trip at all");
     }
 
     #[tokio::test]

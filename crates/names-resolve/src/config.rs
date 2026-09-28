@@ -105,6 +105,25 @@ impl Config {
         out
     }
 
+    /// Search domains the system's links carry (the `search` line of
+    /// `upstreams_from`). On systemd-resolved a link's search domain is also
+    /// a routing domain and the longest match wins, so names under these go
+    /// to that link's resolver, not to the daemon — a LAN whose search
+    /// domain is a bound domain shadows it entirely.
+    pub fn link_search_domains(&self) -> Vec<String> {
+        let Some(path) = &self.upstreams_from else {
+            return Vec::new();
+        };
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Vec::new();
+        };
+        text.lines()
+            .filter_map(|l| l.strip_prefix("search"))
+            .flat_map(|rest| rest.split_whitespace().map(str::to_owned))
+            .filter(|d| d != ".")
+            .collect()
+    }
+
     pub fn resolver_config(&self, upstreams: Vec<IpAddr>) -> ResolverConfig {
         ResolverConfig {
             public_relays: self.public_relays.clone(),
@@ -162,6 +181,7 @@ mod tests {
         std::fs::write(&f, "# generated\nnameserver ::1\nnameserver 127.0.0.1\nnameserver 192.168.1.1\nnameserver fe80::1%eth0\nsearch lan\n").unwrap();
         let cfg = Config { upstreams_from: Some(f), ..Default::default() };
         assert_eq!(cfg.current_upstreams(), vec!["192.168.1.1".parse::<IpAddr>().unwrap(), "fe80::1".parse().unwrap()]);
+        assert_eq!(cfg.link_search_domains(), vec!["lan"]);
         let cfg = Config::default();
         assert!(cfg.current_upstreams().is_empty());
         let _ = std::fs::remove_dir_all(dir);

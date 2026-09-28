@@ -118,6 +118,17 @@ files/rules (restricted mode) needs admin, so the service, which already
 runs as root/SYSTEM, owns that list and reconciles it at start and on pin
 change; `setup` only installs the service and the mode.
 
+Known interaction (found on the first two-node test): on systemd-resolved
+a link's **search domain is also a routing domain**, and the longest match
+wins over the global `~.`. A LAN whose DHCP hands out `example.org` as the
+search domain therefore sends every `*.example.org` query to the LAN
+resolver, never to the daemon — exactly the domain the owner is most
+likely to bind. The daemon warns at start (from the `search` line of
+`/run/systemd/resolve/resolv.conf`); the fix is on the link
+(`nmcli con mod <con> ipv4.dns-search '' ipv6.dns-search ''`, or
+`UseDomains=no` in networkd, or the router). Search domains that are
+*not* bound domains are unaffected and keep working as split DNS.
+
 Network changes: the daemon watches for them (netlink on Linux,
 `SCDynamicStore` on macOS, `NotifyAddrChange` on Windows — three thin
 `cfg` modules in `names-daemon`, ~50 lines each) to refresh upstreams and the

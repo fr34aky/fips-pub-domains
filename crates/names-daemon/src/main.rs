@@ -108,6 +108,13 @@ async fn handle(state: &State, query: Vec<u8>) -> Option<Vec<u8>> {
 async fn run(cfg: Config) -> Result<()> {
     let upstreams = cfg.current_upstreams();
     tracing::info!(?upstreams, listen = ?cfg.listen, pins = %cfg.pins.display(), "starting");
+    let shadowed = cfg.link_search_domains();
+    if !shadowed.is_empty() {
+        tracing::warn!(
+            domains = ?shadowed,
+            "link search domains route past this daemon on systemd-resolved: names under them never reach it (drop the search domain from the link, e.g. nmcli con mod <con> ipv4.dns-search '')"
+        );
+    }
     let resolver = cfg.build_resolver(upstreams.clone()).await.map_err(anyhow::Error::msg)?;
     let state = Arc::new(State { cfg, resolver, upstreams: RwLock::new(upstreams) });
 

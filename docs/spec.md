@@ -257,7 +257,11 @@ so this is accepted; the online rule (TXT first, §8) is unchanged.
   NXDOMAIN to the application. `*` in the zone → the server's own npub; a
   zone entry with the value `legacy` excludes a name from the wildcard
   (the server answers NXDOMAIN for it), for sites that keep `www` on the
-  public Internet but put `git` on the mesh.
+  public Internet but put `git` on the mesh. **The zone is authoritative
+  for everything under the domain**: clients do not check whether a name
+  also exists in the public DNS, so a zone must name exactly the names that
+  are on the mesh — a wildcard sends *every* name under the domain to the
+  node, including those that exist only on the Internet.
 - Server offline → fall back to the zone record (§3.3).
 
 ### 6.1 The server

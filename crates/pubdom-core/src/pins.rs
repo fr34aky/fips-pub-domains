@@ -67,7 +67,7 @@ pub trait PinStore: Send + Sync {
 }
 
 /// Serializable snapshot of a store — the on-disk shape shared by every
-/// platform (docs/plan-platforms.md §5), so pins can be copied between
+/// platform (docs/platforms.md), so pins can be copied between
 /// machines.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PinSnapshot {

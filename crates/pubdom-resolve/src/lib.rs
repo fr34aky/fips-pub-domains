@@ -9,7 +9,7 @@
 //! - [`pins`]: the JSON pin file shared by every platform.
 //! - [`resolver`]: `lookup(query) → answer | passthrough | fail`.
 //!
-//! No `cfg(target_os)` here (docs/plan-platforms.md §1).
+//! No `cfg(target_os)` here (docs/platforms.md).
 
 pub mod config;
 pub mod mesh;

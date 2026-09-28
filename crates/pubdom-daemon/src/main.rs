@@ -1,4 +1,4 @@
-//! `fips-pubdomd` — the forwarding resolver daemon (docs/plan-platforms.md).
+//! `fips-pubdomd` — the forwarding resolver daemon (docs/platforms.md).
 //!
 //! Sits in front of all DNS on the machine (full mode): every query goes
 //! through `pubdom_resolve::Resolver::lookup`, and everything that is not

@@ -1,4 +1,4 @@
-//! Nostr events of this protocol (spec §3, `docs/nip-draft.md`): the claim
+//! Nostr events of this protocol (spec §3, `docs/nip.md`): the claim
 //! (kind 37197) and the zone record (kind 37199), parsed from a transport-
 //! neutral [`Event`]. Signature checking is the relay client's job
 //! (nostr-sdk verifies on receipt); here we only trust `pubkey`.

@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Policy core for resolving public domain names to fips nodes: no I/O"
 
-# Rule (docs/plan-platforms.md §1): nothing platform-specific in here. The
+# Rule (docs/platforms.md): nothing platform-specific in here. The
 # resolver on Android, the daemon on desktops and the server all share this
 # crate, so it must build for every target without cfg(target_os).
 [dependencies]

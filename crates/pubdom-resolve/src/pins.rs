@@ -1,6 +1,6 @@
 //! The pin file: `pubdom_core::pins::PinSnapshot` as pretty JSON, written
 //! atomically (temp file + rename) on every change. Same schema on every
-//! platform (docs/plan-platforms.md §5); the phone writes it in its private
+//! platform (docs/platforms.md); the phone writes it in its private
 //! files dir, the daemon under `/var/lib/fips-pubdom/`.
 
 use pubdom_core::pins::{Binding, MemoryPinStore, PinSnapshot, PinStore, SeenKey};

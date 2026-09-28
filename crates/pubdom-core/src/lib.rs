@@ -6,7 +6,7 @@
 //! I/O adapters live in `pubdom-resolve`; the phone (fips2go) and the desktop
 //! daemon plug their own transports into that crate and share this one.
 //!
-//! Spec: `docs/domain-binding.md`.
+//! Spec: `docs/spec.md`.
 
 pub mod cache;
 pub mod claim;
@@ -22,7 +22,7 @@ pub use identity::Npub;
 pub use pins::{Binding, MemoryPinStore, Method, PinStore};
 pub use policy::{Decision, Outcome, PinUpdate, Reason, TxtLookup};
 
-/// Nostr kinds. Placeholders until registered (spec §3, `docs/nip-draft.md`).
+/// Nostr kinds. Placeholders until registered (spec §3, `docs/nip.md`).
 pub const KIND_CLAIM: u16 = 37197;
 pub const KIND_ATTESTATION: u16 = 37198;
 pub const KIND_ZONE: u16 = 37199;

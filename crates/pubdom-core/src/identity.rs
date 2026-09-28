@@ -133,7 +133,7 @@ pub fn looks_like_npub(label: &str) -> bool {
 mod tests {
     use super::*;
 
-    // The demo domain's server (docs/plan-phase1.md §5).
+    // The demo domain's server (docs/testing.md).
     const DEMO: &str = "npub1uyutnt7z78e7rpjx4dtkms2ukfs6kkq0feeqa5jqllnylmrpjkqs35ysdl";
 
     #[test]

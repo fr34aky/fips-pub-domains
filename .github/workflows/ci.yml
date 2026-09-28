@@ -11,7 +11,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --workspace
   portable:
-    # docs/plan-platforms.md §1: the library crates carry no target-specific code.
+    # docs/platforms.md: the library crates carry no target-specific code.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

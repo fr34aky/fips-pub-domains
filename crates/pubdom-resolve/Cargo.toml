@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Client I/O for fips-pubdom: relay fetch, legacy TXT verification, step 3 over the mesh"
 
-# Rule (docs/plan-platforms.md §1): no cfg(target_os) here either. The mesh
+# Rule (docs/platforms.md): no cfg(target_os) here either. The mesh
 # transport is a trait; the phone implements it over smoltcp, the daemon over
 # a kernel socket.
 [dependencies]

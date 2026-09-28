@@ -24,9 +24,13 @@
 
 use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
 use hickory_resolver::lookup::Lookup;
+use hickory_resolver::net::NoRecords;
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::net::{DnsError, NetError};
+use hickory_resolver::proto::dnssec::DnssecSummary;
 use hickory_resolver::proto::dnssec::Proof;
+use hickory_resolver::proto::dnssec::rdata::DNSSECRData;
+use hickory_resolver::proto::rr::Record;
 use hickory_resolver::proto::rr::{RData, RecordType};
 use hickory_resolver::{Resolver, TokioResolver};
 use pubdom_core::domain::txt_name;
@@ -131,31 +135,28 @@ impl TxtVerifier {
     /// one who can forge an answer can also drop it.
     fn classify(name: &str, result: Result<Lookup, NetError>) -> One {
         match result {
-            // Every shape of bogus hickory can report is handled, including
-            // ones hickory 0.26 turns into `DnssecBogus` before we see them —
-            // a later version must not let a bogus record count as an
-            // unvalidated one. The check costs one pass over the answers.
-            Ok(lookup) if lookup.answers().iter().any(|r| r.proof == Proof::Bogus) => {
-                tracing::debug!(%name, "TXT answer failed DNSSEC validation");
-                One::Failed
-            }
             Ok(lookup) => {
+                // Judged over the whole answer, CNAME chain included: an
+                // insecure CNAME from an unsigned domain to a signed name
+                // must not lend that name's validation to the domain.
+                let summary = DnssecSummary::from_records(lookup.answers().iter());
+                if summary == DnssecSummary::Bogus {
+                    tracing::debug!(%name, "TXT answer failed DNSSEC validation");
+                    return One::Failed;
+                }
+                let secure = summary == DnssecSummary::Secure;
                 let mut records = Vec::new();
-                let mut secure = false;
                 let mut ttl = u32::MAX;
                 for rec in lookup.answers() {
                     if let RData::TXT(txt) = &rec.data
                         && let Some(parsed) = TxtRecord::parse(&txt.to_string())
                     {
                         records.push(parsed);
-                        secure |= rec.proof == Proof::Secure;
                         ttl = ttl.min(rec.ttl);
                     }
                 }
                 if records.is_empty() {
-                    // TXT records exist, none is ours: same as no record. The
-                    // records themselves may be validated even so.
-                    let secure = lookup.answers().iter().any(|r| r.proof == Proof::Secure);
+                    // TXT records exist, none is ours: same as no record.
                     One::Miss { secure }
                 } else {
                     One::Hit {
@@ -165,32 +166,11 @@ impl TxtVerifier {
                     }
                 }
             }
-            // A denial whose SOA failed validation: no answer, like every
-            // bogus one.
-            Err(NetError::Dns(DnsError::NoRecordsFound(nr)))
-                if nr.soa.as_ref().is_some_and(|soa| soa.proof == Proof::Bogus) =>
-            {
-                tracing::debug!(%name, "TXT denial failed DNSSEC validation");
-                One::Failed
-            }
-            // A denial. It is validated only if a validated NSEC/NSEC3 record
-            // proves it: hickory also returns this for a name it merely
-            // found insecure (an unsigned zone under a signed TLD), without
-            // checking any NSEC — and a replayed, genuinely signed SOA of
-            // the TLD would otherwise pass for a validated denial and unpin
-            // everything.
-            Err(NetError::Dns(DnsError::NoRecordsFound(nr))) => One::Miss {
-                secure: nr.authorities.as_deref().is_some_and(|auth| {
-                    auth.iter().any(|r| {
-                        matches!(r.record_type(), RecordType::NSEC | RecordType::NSEC3)
-                            && r.proof == Proof::Secure
-                    })
-                }),
-            },
+            Err(NetError::Dns(DnsError::NoRecordsFound(nr))) => Self::classify_denial(name, &nr),
             // Not bogus, but hickory could not validate the NSEC3 (more
             // iterations than it accepts — insecure by RFC 9276). Without
             // answers it is an unvalidated denial; with answers (a wildcard
-            // expansion) it is not a denial at all, and not classifiable.
+            // expansion) it is not a denial, and counts as no answer.
             Err(NetError::Dns(DnsError::Nsec {
                 proof, response, ..
             })) if proof != Proof::Bogus => {
@@ -212,6 +192,41 @@ impl TxtVerifier {
                 tracing::debug!(%name, error = %e, "TXT upstream failed");
                 One::Failed
             }
+        }
+    }
+
+    /// A denial is validated only when it is for the name asked (not the
+    /// target of a CNAME hop), nothing in its authority section failed
+    /// validation, and a validated NSEC/NSEC3 without opt-out proves it: a
+    /// validated SOA alone comes with an unsigned child of a signed TLD, and
+    /// an opt-out NSEC3 of the TLD covers unsigned children too — replayed,
+    /// either would fake a validated denial for an unsigned domain.
+    fn classify_denial(name: &str, nr: &NoRecords) -> One {
+        let auth: &[Record] = nr.authorities.as_deref().unwrap_or(&[]);
+        let soa_bogus = nr.soa.as_ref().is_some_and(|s| s.proof == Proof::Bogus);
+        if soa_bogus || DnssecSummary::from_records(auth.iter()) == DnssecSummary::Bogus {
+            tracing::debug!(%name, "TXT denial failed DNSSEC validation");
+            return One::Failed;
+        }
+        let asked = nr
+            .query
+            .name()
+            .to_ascii()
+            .trim_end_matches('.')
+            .eq_ignore_ascii_case(name.trim_end_matches('.'));
+        let proven = auth.iter().any(|r| {
+            r.proof == Proof::Secure
+                && match &r.data {
+                    RData::DNSSEC(DNSSECRData::NSEC(_)) => true,
+                    RData::DNSSEC(DNSSECRData::NSEC3(n)) => !n.opt_out(),
+                    _ => false,
+                }
+        });
+        let opt_out = auth
+            .iter()
+            .any(|r| matches!(&r.data, RData::DNSSEC(DNSSECRData::NSEC3(n)) if n.opt_out()));
+        One::Miss {
+            secure: asked && proven && !opt_out,
         }
     }
 }
@@ -348,12 +363,12 @@ mod tests {
 
     #[test]
     fn bogus_answers_count_like_no_answer() {
-        use hickory_resolver::net::NoRecords;
-        use hickory_resolver::proto::dnssec::rdata::{DNSSECRData, NSEC};
+        use hickory_resolver::proto::dnssec::Nsec3HashAlgorithm;
+        use hickory_resolver::proto::dnssec::rdata::{NSEC, NSEC3};
         use hickory_resolver::proto::op::{Query, ResponseCode};
-        use hickory_resolver::proto::rr::rdata::{SOA, TXT};
-        use hickory_resolver::proto::rr::{Name, Record};
-        let classify = |r| TxtVerifier::classify("x", r);
+        use hickory_resolver::proto::rr::Name;
+        use hickory_resolver::proto::rr::rdata::{CNAME, SOA, TXT};
+        let classify = |r| TxtVerifier::classify("_fips-dns.example.org", r);
         assert!(matches!(
             classify(Err(NetError::Dns(DnsError::DnssecBogus))),
             One::Failed
@@ -370,10 +385,23 @@ mod tests {
         let lookup = Lookup::new_with_max_ttl(Query::default(), vec![rec.clone()]);
         assert!(matches!(classify(Ok(lookup)), One::Failed));
         rec.proof = Proof::Secure;
-        let lookup = Lookup::new_with_max_ttl(Query::default(), vec![rec]);
+        let lookup = Lookup::new_with_max_ttl(Query::default(), vec![rec.clone()]);
         assert!(matches!(
             classify(Ok(lookup)),
             One::Hit { secure: true, .. }
+        ));
+        // A validated record reached through an unvalidated CNAME lends the
+        // domain nothing: the whole answer is judged.
+        let mut cname = Record::from_rdata(
+            Name::from_ascii("_fips-dns.example.org.").unwrap(),
+            60,
+            RData::CNAME(CNAME(Name::from_ascii("x.signed.example.").unwrap())),
+        );
+        cname.proof = Proof::Insecure;
+        let lookup = Lookup::new_with_max_ttl(Query::default(), vec![cname, rec]);
+        assert!(matches!(
+            classify(Ok(lookup)),
+            One::Hit { secure: false, .. }
         ));
         // A denial is validated only by a validated NSEC/NSEC3 record — a
         // validated SOA alone (a replayed TLD SOA for an unsigned name)
@@ -391,8 +419,12 @@ mod tests {
                 [RecordType::SOA],
             ))),
         );
+        let asked = Query::query(
+            Name::from_ascii("_fips-dns.example.org.").unwrap(),
+            RecordType::TXT,
+        );
         let denial = |soa: Option<&Record<SOA>>, auth: Vec<Record>| {
-            let mut nr = NoRecords::new(Query::default(), ResponseCode::NXDomain);
+            let mut nr = NoRecords::new(asked.clone(), ResponseCode::NXDomain);
             nr.soa = soa.map(|s| Box::new(s.clone()));
             nr.authorities = (!auth.is_empty()).then(|| auth.into());
             Err(NetError::Dns(DnsError::NoRecordsFound(nr)))
@@ -415,6 +447,37 @@ mod tests {
         assert!(matches!(
             classify(denial(Some(&soa), vec![nsec.clone()])),
             One::Miss { secure: true }
+        ));
+        // …but not a denial of another name (the target of a CNAME hop).
+        let mut other = NoRecords::new(
+            Query::query(
+                Name::from_ascii("gone.signed.example.").unwrap(),
+                RecordType::TXT,
+            ),
+            ResponseCode::NXDomain,
+        );
+        other.authorities = Some(vec![nsec.clone()].into());
+        assert!(matches!(
+            classify(Err(NetError::Dns(DnsError::NoRecordsFound(other)))),
+            One::Miss { secure: false }
+        ));
+        // A validated NSEC3 with opt-out covers unsigned children: no proof.
+        let mut nsec3 = Record::from_rdata(
+            Name::root(),
+            60,
+            RData::DNSSEC(DNSSECRData::NSEC3(NSEC3::new(
+                Nsec3HashAlgorithm::SHA1,
+                true,
+                0,
+                vec![],
+                vec![0; 20],
+                [RecordType::NS],
+            ))),
+        );
+        nsec3.proof = Proof::Secure;
+        assert!(matches!(
+            classify(denial(Some(&soa), vec![nsec.clone(), nsec3])),
+            One::Miss { secure: false }
         ));
         soa.proof = Proof::Bogus;
         assert!(matches!(

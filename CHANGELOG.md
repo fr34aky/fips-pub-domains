@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `fips-pubdom-server` said "Invalid secret key" when the key file merely
+  could not be read (a `fips.key` with mode 600 and a user outside the
+  `fips` group); it now says so, and also accepts a 32-byte raw key file.
+
 ### Added
 
 - **Redundant servers** (spec §5.3): every key the TXT record names and

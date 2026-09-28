@@ -25,7 +25,9 @@ depends on the role of the machine:
 - For the server: read access to the node key. With fips's packages the key
   is `/etc/fips/fips.key`, mode 640, group `fips` — add the serving user to
   that group (`sudo usermod -aG fips $USER`, re-login) or run the unit,
-  which does it for you.
+  which does it for you. Some installs leave the file at mode 600, readable
+  by the `fips` user only: `sudo chmod 640 /etc/fips/fips.key` restores the
+  packaged layout the unit relies on.
 
 The repository is private at the moment: cloning needs a GitHub account
 with access (`gh auth login`, or an SSH key).

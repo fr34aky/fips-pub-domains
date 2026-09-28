@@ -50,7 +50,9 @@ pub fn registrable(name: &str) -> Option<String> {
         return None;
     }
     let domain = psl::domain(name.as_bytes())?;
-    std::str::from_utf8(domain.as_bytes()).ok().map(str::to_owned)
+    std::str::from_utf8(domain.as_bytes())
+        .ok()
+        .map(str::to_owned)
 }
 
 /// Is `domain` acceptable as the `d` of a claim: normalized, registrable,
@@ -103,21 +105,36 @@ mod tests {
 
     #[test]
     fn normalizes_case_and_trailing_dot() {
-        assert_eq!(normalize("WWW.Example.ORG.").as_deref(), Some("www.example.org"));
+        assert_eq!(
+            normalize("WWW.Example.ORG.").as_deref(),
+            Some("www.example.org")
+        );
         assert_eq!(normalize(""), None);
         assert_eq!(normalize("a..b"), None);
         assert_eq!(normalize("-a.ch"), None);
         assert_eq!(normalize("a_b.ch"), None);
-        assert_eq!(normalize("_fips-dns.example.org").as_deref(), Some("_fips-dns.example.org"));
+        assert_eq!(
+            normalize("_fips-dns.example.org").as_deref(),
+            Some("_fips-dns.example.org")
+        );
         assert_eq!(normalize(&"a".repeat(64)), None);
     }
 
     #[test]
     fn registrable_domain_is_psl_aware() {
-        assert_eq!(registrable("www.example.org").as_deref(), Some("example.org"));
-        assert_eq!(registrable("a.b.example.co.uk").as_deref(), Some("example.co.uk"));
+        assert_eq!(
+            registrable("www.example.org").as_deref(),
+            Some("example.org")
+        );
+        assert_eq!(
+            registrable("a.b.example.co.uk").as_deref(),
+            Some("example.co.uk")
+        );
         // Private-section suffixes: the user of github.io owns foo.github.io.
-        assert_eq!(registrable("x.foo.github.io").as_deref(), Some("foo.github.io"));
+        assert_eq!(
+            registrable("x.foo.github.io").as_deref(),
+            Some("foo.github.io")
+        );
         assert_eq!(registrable("ch"), None);
         assert_eq!(registrable("co.uk"), None);
         // Unknown TLDs (.fips, .local, .internal) are never claimable.
@@ -152,7 +169,10 @@ mod tests {
         assert!(is_valid_zone_label("*"));
         assert!(!is_valid_zone_label("_fips-dns"));
         assert!(!is_valid_zone_label(&format!("npub1{}", "q".repeat(58))));
-        assert_eq!(relative_label("www.example.org", "example.org"), Some("www"));
+        assert_eq!(
+            relative_label("www.example.org", "example.org"),
+            Some("www")
+        );
         assert_eq!(relative_label("example.org", "example.org"), Some("@"));
         assert_eq!(relative_label("evilexample.org", "example.org"), None);
         assert_eq!(txt_name("example.org"), "_fips-dns.example.org");

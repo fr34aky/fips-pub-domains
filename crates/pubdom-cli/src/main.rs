@@ -55,23 +55,34 @@ fn qtype(s: &str) -> Result<u16> {
         "ANY" => synth::QTYPE_ANY,
         "CNAME" => synth::QTYPE_CNAME,
         "HTTPS" => 65,
-        other => other.parse().map_err(|_| anyhow!("unknown qtype {other}"))?,
+        other => other
+            .parse()
+            .map_err(|_| anyhow!("unknown qtype {other}"))?,
     })
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
+        )
         .with_writer(std::io::stderr)
         .init();
     let cli = Cli::parse();
     let cfg = Config::load_or_default(&cli.config).map_err(anyhow::Error::msg)?;
-    let upstreams = if cli.offline { Vec::new() } else { cfg.current_upstreams() };
+    let upstreams = if cli.offline {
+        Vec::new()
+    } else {
+        cfg.current_upstreams()
+    };
 
     match cli.cmd {
         Cmd::Lookup { name, qtype: qt } => {
-            let r = cfg.build_resolver(upstreams).await.map_err(anyhow::Error::msg)?;
+            let r = cfg
+                .build_resolver(upstreams)
+                .await
+                .map_err(anyhow::Error::msg)?;
             if cli.offline {
                 r.set_online(false);
             }
@@ -88,14 +99,16 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Verify { domain } => {
-            let domain = pubdom_core::domain::normalize(&domain).ok_or_else(|| anyhow!("bad domain"))?;
+            let domain =
+                pubdom_core::domain::normalize(&domain).ok_or_else(|| anyhow!("bad domain"))?;
             let pins = FilePinStore::open(&cfg.pins)?;
             let pin = pins.get(&domain);
             println!("pin: {pin:?}");
             let (txt, ttl) = if upstreams.is_empty() {
                 (TxtLookup::Unreachable, None)
             } else {
-                let v = TxtVerifier::new(&upstreams, cfg.dnssec, Duration::from_millis(1500)).map_err(anyhow::Error::msg)?;
+                let v = TxtVerifier::new(&upstreams, cfg.dnssec, Duration::from_millis(1500))
+                    .map_err(anyhow::Error::msg)?;
                 println!("upstreams: {:?}", v.upstreams());
                 v.lookup(&domain).await
             };
@@ -106,12 +119,17 @@ async fn main() -> Result<()> {
                 TxtLookup::Unreachable if cli.offline => RelayScope::Offline,
                 TxtLookup::Unreachable => RelayScope::MeshOnly,
             };
-            let relays = RelayClient::new(&cfg.public_relays, &cfg.mesh_relays, Duration::from_secs(3)).await;
+            let relays =
+                RelayClient::new(&cfg.public_relays, &cfg.mesh_relays, Duration::from_secs(3))
+                    .await;
             let events = relays.fetch_claims(&domain, scope).await;
             println!("claim events: {}", events.len());
             let claims = policy::ingest_claims(&pins, &domain, &events, pubdom_resolve::now());
             for c in &claims {
-                println!("  claim by {} port {} created_at {}", c.author, c.port, c.created_at);
+                println!(
+                    "  claim by {} port {} created_at {}",
+                    c.author, c.port, c.created_at
+                );
             }
             let out = policy::decide(Input {
                 domain: &domain,
@@ -127,8 +145,14 @@ async fn main() -> Result<()> {
             relays.shutdown().await;
         }
         Cmd::Claims { domain } => {
-            let relays = RelayClient::new(&cfg.public_relays, &cfg.mesh_relays, Duration::from_secs(3)).await;
-            let scope = if cli.offline { RelayScope::Offline } else { RelayScope::AfterHit };
+            let relays =
+                RelayClient::new(&cfg.public_relays, &cfg.mesh_relays, Duration::from_secs(3))
+                    .await;
+            let scope = if cli.offline {
+                RelayScope::Offline
+            } else {
+                RelayScope::AfterHit
+            };
             for ev in relays.fetch_claims(&domain, scope).await {
                 println!("{}", serde_json::to_string_pretty(&ev)?);
             }
@@ -139,7 +163,10 @@ async fn main() -> Result<()> {
             match cmd {
                 PinsCmd::List => {
                     for b in pins.list() {
-                        println!("{}\t{}:{}\t{:?}\tverified_at {}", b.domain, b.npub, b.port, b.method, b.verified_at);
+                        println!(
+                            "{}\t{}:{}\t{:?}\tverified_at {}",
+                            b.domain, b.npub, b.port, b.method, b.verified_at
+                        );
                     }
                 }
                 PinsCmd::Forget { domain } => {

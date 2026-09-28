@@ -141,6 +141,13 @@ The library crates carry no platform-specific code (CI checks) and build for
 `aarch64-linux-android`; the binaries target Linux first, then macOS and
 Windows ([docs/platforms.md](docs/platforms.md)).
 
+## Contributing and releases
+
+[CONTRIBUTING.md](CONTRIBUTING.md) has the workflow, [PR-REVIEW.md](PR-REVIEW.md)
+the checklist every PR is read against, [CHANGELOG.md](CHANGELOG.md) what
+changed between releases. Releases are annotated `vX.Y.Z` tags on `main`;
+the release workflow builds the binaries for Linux, macOS and Windows.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

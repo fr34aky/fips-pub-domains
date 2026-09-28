@@ -6,9 +6,9 @@
 //! spec §8); offline, the mesh set first. fips exposes no generic event
 //! fetch, so this is our own small nostr-sdk client.
 
+use nostr_sdk::prelude::*;
 use pubdom_core::claim::Event as CoreEvent;
 use pubdom_core::{Claim, KIND_CLAIM};
-use nostr_sdk::prelude::*;
 use std::time::Duration;
 
 /// Which relays a claim fetch may touch (spec §8, the privacy gate).
@@ -34,7 +34,11 @@ impl RelayClient {
     /// Clients are created connected-lazily: `connect()` returns at once and
     /// relays that are unreachable simply never answer within `timeout`.
     pub async fn new(public: &[String], mesh: &[String], timeout: Duration) -> Self {
-        Self { public: make(public).await, mesh: make(mesh).await, timeout }
+        Self {
+            public: make(public).await,
+            mesh: make(mesh).await,
+            timeout,
+        }
     }
 
     /// Claims for `domain` (kind 37197, `d=<domain>`). Online, both relay
@@ -44,7 +48,10 @@ impl RelayClient {
     /// the public ones are tried afterwards in case a path exists.
     /// Signatures are verified by the pool.
     pub async fn fetch_claims(&self, domain: &str, scope: RelayScope) -> Vec<CoreEvent> {
-        let filter = Filter::new().kind(Kind::from(KIND_CLAIM)).identifier(domain).limit(32);
+        let filter = Filter::new()
+            .kind(Kind::from(KIND_CLAIM))
+            .identifier(domain)
+            .limit(32);
         match scope {
             RelayScope::AfterHit => {
                 let (a, b) = futures::join!(
@@ -76,7 +83,9 @@ impl RelayClient {
 }
 
 async fn fetch_one(client: Option<&Client>, filter: &Filter, timeout: Duration) -> Vec<CoreEvent> {
-    let Some(client) = client else { return Vec::new() };
+    let Some(client) = client else {
+        return Vec::new();
+    };
     match client.fetch_events(filter.clone(), timeout).await {
         Ok(events) => events.into_iter().map(convert).collect(),
         Err(e) => {
@@ -155,7 +164,12 @@ pub async fn publish_claim(
 
 /// The claim event as JSON without sending it — for `--dry-run` and for
 /// operators who publish through other tooling.
-pub fn claim_event_json(keys: &Keys, domain: &str, port: u16, dnssec: Option<&str>) -> Result<String, String> {
+pub fn claim_event_json(
+    keys: &Keys,
+    domain: &str,
+    port: u16,
+    dnssec: Option<&str>,
+) -> Result<String, String> {
     let tags: Vec<Tag> = Claim::tags(domain, port, dnssec)
         .into_iter()
         .map(|t| Tag::parse(t).map_err(|e| e.to_string()))

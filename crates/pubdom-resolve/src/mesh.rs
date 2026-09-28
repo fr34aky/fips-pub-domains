@@ -14,10 +14,12 @@ use std::time::Duration;
 pub trait MeshDns: Send + Sync {
     /// One DNS exchange over UDP with `server` on the mesh. The reply may be
     /// truncated; the caller then calls [`query_tcp`](Self::query_tcp).
-    fn query_udp(&self, server: SocketAddrV6, msg: &[u8], timeout: Duration) -> io::Result<Vec<u8>>;
+    fn query_udp(&self, server: SocketAddrV6, msg: &[u8], timeout: Duration)
+    -> io::Result<Vec<u8>>;
 
     /// The same over TCP (RFC 7766 framing), for truncated answers.
-    fn query_tcp(&self, server: SocketAddrV6, msg: &[u8], timeout: Duration) -> io::Result<Vec<u8>>;
+    fn query_tcp(&self, server: SocketAddrV6, msg: &[u8], timeout: Duration)
+    -> io::Result<Vec<u8>>;
 
     /// Make the local fips node able to route to `npub`: ask its own `.fips`
     /// responder for `<npub>.fips` (spec §6). Returns whether the responder
@@ -54,7 +56,12 @@ impl KernelMeshDns {
 }
 
 impl MeshDns for KernelMeshDns {
-    fn query_udp(&self, server: SocketAddrV6, msg: &[u8], timeout: Duration) -> io::Result<Vec<u8>> {
+    fn query_udp(
+        &self,
+        server: SocketAddrV6,
+        msg: &[u8],
+        timeout: Duration,
+    ) -> io::Result<Vec<u8>> {
         let sock = self.udp_socket()?;
         sock.set_read_timeout(Some(timeout))?;
         sock.connect(server)?;
@@ -66,7 +73,12 @@ impl MeshDns for KernelMeshDns {
         Ok(buf)
     }
 
-    fn query_tcp(&self, server: SocketAddrV6, msg: &[u8], timeout: Duration) -> io::Result<Vec<u8>> {
+    fn query_tcp(
+        &self,
+        server: SocketAddrV6,
+        msg: &[u8],
+        timeout: Duration,
+    ) -> io::Result<Vec<u8>> {
         let mut stream = TcpStream::connect_timeout(&SocketAddr::V6(server), timeout)?;
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
@@ -81,12 +93,19 @@ impl MeshDns for KernelMeshDns {
     }
 
     fn register(&self, npub: Npub, timeout: Duration) -> bool {
-        let Some(query) = pubdom_core::synth::build_query(0x4e50, &npub.fips_name(), pubdom_core::synth::QTYPE_AAAA)
-        else {
+        let Some(query) = pubdom_core::synth::build_query(
+            0x4e50,
+            &npub.fips_name(),
+            pubdom_core::synth::QTYPE_AAAA,
+        ) else {
             return false;
         };
         let attempt = || -> io::Result<bool> {
-            let sock = UdpSocket::bind(if self.responder.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" })?;
+            let sock = UdpSocket::bind(if self.responder.is_ipv6() {
+                "[::]:0"
+            } else {
+                "0.0.0.0:0"
+            })?;
             sock.set_read_timeout(Some(timeout))?;
             sock.connect(self.responder)?;
             sock.send(&query)?;
@@ -96,7 +115,8 @@ impl MeshDns for KernelMeshDns {
                 pubdom_core::synth::parse_step3_reply(&buf[..n], 0x4e50),
                 // The responder answers AAAA, not CNAME; any NoError reply
                 // with our id means it resolved and registered the identity.
-                pubdom_core::synth::Step3Outcome::NotOverFips | pubdom_core::synth::Step3Outcome::Node { .. }
+                pubdom_core::synth::Step3Outcome::NotOverFips
+                    | pubdom_core::synth::Step3Outcome::Node { .. }
             ) && simple_dns_noerror(&buf[..n]))
         };
         attempt().unwrap_or(false)
@@ -137,22 +157,40 @@ impl KernelMeshDns {
             pkt.extend_from_slice(&seq.to_be_bytes());
             pkt.extend_from_slice(b"fips-pubdom reachability");
             sock.send_to(&pkt, &target)?;
-            let wait = if seq == 0 { timeout / 2 } else { deadline.saturating_duration_since(std::time::Instant::now()) };
+            let wait = if seq == 0 {
+                timeout / 2
+            } else {
+                deadline.saturating_duration_since(std::time::Instant::now())
+            };
             let start = std::time::Instant::now();
             while start.elapsed() < wait {
-                sock.set_read_timeout(Some((wait - start.elapsed()).max(Duration::from_millis(10))))?;
+                sock.set_read_timeout(Some(
+                    (wait - start.elapsed()).max(Duration::from_millis(10)),
+                ))?;
                 match sock.recv_from(&mut buf) {
                     Ok((n, from)) => {
                         let same = from.as_socket_ipv6().is_some_and(|a| *a.ip() == addr);
                         // Raw sockets deliver the IPv6 header too; the type is
                         // then at offset 40. Datagram sockets start at the ICMP header.
-                        let data: Vec<u8> = buf[..n].iter().map(|b| unsafe { b.assume_init() }).collect();
-                        let ty = if data.len() >= 48 && data[0] >> 4 == 6 { data[40] } else { data.first().copied().unwrap_or(0) };
+                        let data: Vec<u8> = buf[..n]
+                            .iter()
+                            .map(|b| unsafe { b.assume_init() })
+                            .collect();
+                        let ty = if data.len() >= 48 && data[0] >> 4 == 6 {
+                            data[40]
+                        } else {
+                            data.first().copied().unwrap_or(0)
+                        };
                         if same && ty == 129 {
                             return Ok(true);
                         }
                     }
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => break,
+                    Err(e)
+                        if e.kind() == io::ErrorKind::WouldBlock
+                            || e.kind() == io::ErrorKind::TimedOut =>
+                    {
+                        break;
+                    }
                     Err(e) => return Err(e),
                 }
             }
@@ -208,14 +246,21 @@ mod tests {
         });
         let mesh = KernelMeshDns::new("[::1]:1".parse().unwrap(), None);
         let q = build_query(11, "www.example.org", QTYPE_AAAA).unwrap();
-        let r = mesh.query_udp(udp_addr, &q, Duration::from_secs(2)).unwrap();
+        let r = mesh
+            .query_udp(udp_addr, &q, Duration::from_secs(2))
+            .unwrap();
         assert_eq!(parse_query(&r), None, "it is a reply");
         assert!(matches!(
             pubdom_core::synth::parse_step3_reply(&r, 11),
             pubdom_core::synth::Step3Outcome::Node { .. }
         ));
-        let r = mesh.query_tcp(tcp_addr, &q, Duration::from_secs(2)).unwrap();
-        assert_eq!(pubdom_core::synth::parse_step3_reply(&r, 11), pubdom_core::synth::Step3Outcome::NotOverFips);
+        let r = mesh
+            .query_tcp(tcp_addr, &q, Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(
+            pubdom_core::synth::parse_step3_reply(&r, 11),
+            pubdom_core::synth::Step3Outcome::NotOverFips
+        );
     }
 
     #[test]
@@ -236,6 +281,10 @@ mod tests {
             }
         }
         // A documentation-prefix address nobody answers for.
-        assert_eq!(mesh.echo("2001:db8::1".parse().unwrap(), Duration::from_millis(300)).unwrap_or(false), false);
+        assert_eq!(
+            mesh.echo("2001:db8::1".parse().unwrap(), Duration::from_millis(300))
+                .unwrap_or(false),
+            false
+        );
     }
 }

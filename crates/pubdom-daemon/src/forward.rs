@@ -11,7 +11,10 @@ use tokio::net::{TcpStream, UdpSocket};
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub async fn forward(query: &[u8], upstreams: &[IpAddr]) -> Option<Vec<u8>> {
-    let addrs: Vec<SocketAddr> = upstreams.iter().map(|ip| SocketAddr::new(*ip, 53)).collect();
+    let addrs: Vec<SocketAddr> = upstreams
+        .iter()
+        .map(|ip| SocketAddr::new(*ip, 53))
+        .collect();
     forward_to(query, &addrs).await
 }
 
@@ -23,7 +26,9 @@ pub async fn forward_to(query: &[u8], servers: &[SocketAddr]) -> Option<Vec<u8>>
             Ok(Ok(reply)) => {
                 if reply.len() >= 3 && reply[2] & 0x02 != 0 {
                     // TC bit: the upstream has more than fits in UDP.
-                    if let Ok(Ok(full)) = tokio::time::timeout(UPSTREAM_TIMEOUT * 2, tcp(query, *addr)).await {
+                    if let Ok(Ok(full)) =
+                        tokio::time::timeout(UPSTREAM_TIMEOUT * 2, tcp(query, *addr)).await
+                    {
                         return Some(full);
                     }
                 }
@@ -43,7 +48,12 @@ pub fn is_fips_name(query: &[u8]) -> bool {
 }
 
 async fn udp(query: &[u8], addr: SocketAddr) -> std::io::Result<Vec<u8>> {
-    let sock = UdpSocket::bind(if addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" }).await?;
+    let sock = UdpSocket::bind(if addr.is_ipv6() {
+        "[::]:0"
+    } else {
+        "0.0.0.0:0"
+    })
+    .await?;
     sock.connect(addr).await?;
     sock.send(query).await?;
     let mut buf = vec![0u8; 4096];

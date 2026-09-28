@@ -20,15 +20,21 @@ the Android-specific parts that already live there (`shim/src/names.rs`,
 
 ## Working rules
 
-- Private repo `fr34aky/fips-pub-domains`. Commit and push only as
+- Public repo `fr34aky/fips-pub-domains`. Commit and push only as
   `fr34aky <162515565+fr34aky@users.noreply.github.com>`.
 - **No Claude attribution anywhere**: no `Co-Authored-By: Claude`, no
   `Claude-Session:` trailer, no claude.ai links, no "Generated with Claude
   Code" in commits or PR bodies.
 - Commit messages explain *why*, as in the sibling fips2go repo.
-- Nothing gets published outside this repository without the user saying so:
-  no claims on public relays, no kind registration, no NIP submission
-  (standing instruction, 2026-09-28).
+  [CONTRIBUTING.md](CONTRIBUTING.md) and [PR-REVIEW.md](PR-REVIEW.md) are
+  the rules for PRs and reviews; every user-visible change gets a line
+  under `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md).
+- Releases: bump `version` in `[workspace.package]`, annotated tag
+  `vX.Y.Z` on `main`; `.github/workflows/release.yml` does the rest.
+  Never tag without the user asking.
+- Nothing gets published outside this repository without the user saying
+  so. Allowed since 2026-09-28: the demo domain's claim on public relays.
+  Still not: kind registration, NIP submission, tagging a release.
 - No `cfg(target_os)` in `pubdom-core` or `pubdom-resolve` (CI enforces).
 - `cargo test --workspace` must stay green; the policy tables in
   `pubdom-core` are the place to add a case before changing behaviour.

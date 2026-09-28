@@ -29,7 +29,11 @@ pub trait TxtSource: Send + Sync {
 
 /// Where claims come from — relays in production, a table in tests.
 pub trait ClaimSource: Send + Sync {
-    fn fetch_claims(&self, domain: &str, scope: RelayScope) -> impl Future<Output = Vec<Event>> + Send;
+    fn fetch_claims(
+        &self,
+        domain: &str,
+        scope: RelayScope,
+    ) -> impl Future<Output = Vec<Event>> + Send;
 }
 
 impl TxtSource for TxtVerifier {
@@ -135,7 +139,13 @@ pub struct Resolver<T: TxtSource, C: ClaimSource> {
 }
 
 impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
-    pub fn new(cfg: ResolverConfig, pins: Arc<dyn PinStore>, txt: T, claims: C, mesh: Arc<dyn MeshDns>) -> Self {
+    pub fn new(
+        cfg: ResolverConfig,
+        pins: Arc<dyn PinStore>,
+        txt: T,
+        claims: C,
+        mesh: Arc<dyn MeshDns>,
+    ) -> Self {
         Self {
             cfg,
             pins,
@@ -228,7 +238,9 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
     fn answer(&self, q: &Query, npub: Npub) -> LookupResult {
         let ttl = ANSWER_TTL_SECS;
         let bytes = match q.qtype {
-            synth::QTYPE_A | synth::QTYPE_AAAA | synth::QTYPE_ANY | synth::QTYPE_CNAME => synth::build_answer(q, npub, ttl),
+            synth::QTYPE_A | synth::QTYPE_AAAA | synth::QTYPE_ANY | synth::QTYPE_CNAME => {
+                synth::build_answer(q, npub, ttl)
+            }
             // HTTPS/SVCB and the like: a public record could carry address
             // hints for the legacy path. NODATA keeps the mesh the only path.
             _ => synth::build_rcode(q, simple_dns::RCODE::NoError),
@@ -260,7 +272,11 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         let now = crate::now();
         let pin = self.pins.get(d);
         let online = self.is_online();
-        let (txt, txt_ttl) = if online { self.txt.lookup(d).await } else { (TxtLookup::Unreachable, None) };
+        let (txt, txt_ttl) = if online {
+            self.txt.lookup(d).await
+        } else {
+            (TxtLookup::Unreachable, None)
+        };
         let events = match &txt {
             // The privacy gate (spec §8): relays only after a TXT hit …
             TxtLookup::Hit { .. } => self.claims.fetch_claims(d, RelayScope::AfterHit).await,
@@ -270,7 +286,9 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             TxtLookup::Unreachable if pin.is_some() => Vec::new(),
             // Believed online but DNS did not answer: a public relay must not
             // learn the domain; relays on the mesh may.
-            TxtLookup::Unreachable if online => self.claims.fetch_claims(d, RelayScope::MeshOnly).await,
+            TxtLookup::Unreachable if online => {
+                self.claims.fetch_claims(d, RelayScope::MeshOnly).await
+            }
             TxtLookup::Unreachable => self.claims.fetch_claims(d, RelayScope::Offline).await,
         };
         let claims = policy::ingest_claims(self.pins.as_ref(), d, &events, now);
@@ -297,7 +315,9 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         }
         let (cached, ttl) = match outcome.decision {
             Decision::Bound(b) => {
-                let ttl = txt_ttl.map(|t| Duration::from_secs(t.into()).min(cache::TXT_HIT_MAX_TTL)).unwrap_or(cache::CLAIM_TTL);
+                let ttl = txt_ttl
+                    .map(|t| Duration::from_secs(t.into()).min(cache::TXT_HIT_MAX_TTL))
+                    .unwrap_or(cache::CLAIM_TTL);
                 (CachedDecision::Use(b, false), ttl)
             }
             Decision::Unverified(b) => (CachedDecision::Use(b, true), cache::RELAY_MISS_TTL),
@@ -325,7 +345,10 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         let result = self.step3_uncached(q, binding).await;
         drop(_flight);
         if Arc::strong_count(&lock) == 2 {
-            self.inflight.lock().unwrap().remove(&format!("step3:{}", q.name));
+            self.inflight
+                .lock()
+                .unwrap()
+                .remove(&format!("step3:{}", q.name));
         }
         result
     }
@@ -358,11 +381,15 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
                     let reply = match mesh.query_udp(server, &msg, t_udp) {
                         Ok(r) => r,
                         // One retry: a mesh path may still be settling.
-                        Err(_) => mesh.query_udp(server, &msg, t_udp).map_err(|e| e.to_string())?,
+                        Err(_) => mesh
+                            .query_udp(server, &msg, t_udp)
+                            .map_err(|e| e.to_string())?,
                     };
                     let mut out = synth::parse_step3_reply(&reply, id);
                     if out == Step3Outcome::Truncated {
-                        let reply = mesh.query_tcp(server, &msg, t_tcp).map_err(|e| e.to_string())?;
+                        let reply = mesh
+                            .query_tcp(server, &msg, t_tcp)
+                            .map_err(|e| e.to_string())?;
                         out = synth::parse_step3_reply(&reply, id);
                     }
                     Ok::<_, String>(out)
@@ -373,11 +400,17 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
                 match outcome {
                     Ok(Step3Outcome::Node { npub, ttl }) => {
                         let ttl = Duration::from_secs(ttl.into()).min(cache::STEP3_MAX_TTL);
-                        self.step3.put(q.name.clone(), CachedStep3::Node(npub), ttl, now);
+                        self.step3
+                            .put(q.name.clone(), CachedStep3::Node(npub), ttl, now);
                         Some(npub)
                     }
                     Ok(Step3Outcome::NotOverFips) => {
-                        self.step3.put(q.name.clone(), CachedStep3::NotOverFips, Duration::from_secs(300), now);
+                        self.step3.put(
+                            q.name.clone(),
+                            CachedStep3::NotOverFips,
+                            Duration::from_secs(300),
+                            now,
+                        );
                         return None;
                     }
                     Ok(other) => {
@@ -414,8 +447,14 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         }
         let mesh = self.mesh.clone();
         let t = self.cfg.reach_timeout;
-        let ok = tokio::task::spawn_blocking(move || mesh.reachable(npub, t)).await.unwrap_or(false);
-        let ttl = if ok { Duration::from_secs(120) } else { Duration::from_secs(30) };
+        let ok = tokio::task::spawn_blocking(move || mesh.reachable(npub, t))
+            .await
+            .unwrap_or(false);
+        let ttl = if ok {
+            Duration::from_secs(120)
+        } else {
+            Duration::from_secs(30)
+        };
         self.reachable.put(npub, ok, ttl, now);
         ok
     }
@@ -427,7 +466,9 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         }
         let mesh = self.mesh.clone();
         let t = self.cfg.register_timeout;
-        let ok = tokio::task::spawn_blocking(move || mesh.register(npub, t)).await.unwrap_or(false);
+        let ok = tokio::task::spawn_blocking(move || mesh.register(npub, t))
+            .await
+            .unwrap_or(false);
         if ok {
             self.registered.put(npub, (), Duration::from_secs(240), now);
         }
@@ -463,7 +504,12 @@ mod tests {
     impl TxtSource for FakeTxt {
         async fn lookup(&self, domain: &str) -> (TxtLookup, Option<u32>) {
             let r = self.0.lock().unwrap().get(domain).cloned();
-            (r.unwrap_or(TxtLookup::Miss { method: Method::DnsSingle }), Some(300))
+            (
+                r.unwrap_or(TxtLookup::Miss {
+                    method: Method::DnsSingle,
+                }),
+                Some(300),
+            )
         }
     }
 
@@ -471,7 +517,11 @@ mod tests {
     impl ClaimSource for FakeClaims {
         async fn fetch_claims(&self, domain: &str, scope: RelayScope) -> Vec<Event> {
             self.1.lock().unwrap().push((domain.into(), scope));
-            self.0.iter().filter(|e| e.tags[0][1] == domain).cloned().collect()
+            self.0
+                .iter()
+                .filter(|e| e.tags[0][1] == domain)
+                .cloned()
+                .collect()
         }
     }
 
@@ -484,7 +534,12 @@ mod tests {
         unreachable: Vec<Npub>,
     }
     impl MeshDns for FakeMesh {
-        fn query_udp(&self, server: SocketAddrV6, msg: &[u8], _: Duration) -> std::io::Result<Vec<u8>> {
+        fn query_udp(
+            &self,
+            server: SocketAddrV6,
+            msg: &[u8],
+            _: Duration,
+        ) -> std::io::Result<Vec<u8>> {
             self.queries.lock().unwrap().push(server);
             assert_eq!(server.ip(), &npub(1).fips_address());
             let q = synth::parse_query(msg).unwrap();
@@ -509,7 +564,12 @@ mod tests {
     }
 
     fn claim_event(author: Npub, domain: &str) -> Event {
-        Event { kind: KIND_CLAIM, pubkey: author.to_hex(), created_at: crate::now() - 10, tags: Claim::tags(domain, 5355, None) }
+        Event {
+            kind: KIND_CLAIM,
+            pubkey: author.to_hex(),
+            created_at: crate::now() - 10,
+            tags: Claim::tags(domain, 5355, None),
+        }
     }
 
     fn resolver(
@@ -519,14 +579,34 @@ mod tests {
         unreachable: Vec<Npub>,
         allow_unverified: bool,
     ) -> (Resolver<FakeTxt, FakeClaims>, Arc<FakeMesh>) {
-        let mesh = Arc::new(FakeMesh { queries: Mutex::new(vec![]), registered: Mutex::new(vec![]), echoes: Mutex::new(vec![]), unreachable });
-        let cfg = ResolverConfig { allow_unverified_offline: allow_unverified, ..Default::default() };
-        let r = Resolver::new(cfg, pins, FakeTxt(Mutex::new(txt)), FakeClaims(claims, Mutex::new(vec![])), mesh.clone());
+        let mesh = Arc::new(FakeMesh {
+            queries: Mutex::new(vec![]),
+            registered: Mutex::new(vec![]),
+            echoes: Mutex::new(vec![]),
+            unreachable,
+        });
+        let cfg = ResolverConfig {
+            allow_unverified_offline: allow_unverified,
+            ..Default::default()
+        };
+        let r = Resolver::new(
+            cfg,
+            pins,
+            FakeTxt(Mutex::new(txt)),
+            FakeClaims(claims, Mutex::new(vec![])),
+            mesh.clone(),
+        );
         (r, mesh)
     }
 
     fn hit(author: Npub) -> TxtLookup {
-        TxtLookup::Hit { records: vec![TxtRecord { npub: author, port: Some(5355) }], method: Method::Dnssec }
+        TxtLookup::Hit {
+            records: vec![TxtRecord {
+                npub: author,
+                port: Some(5355),
+            }],
+            method: Method::Dnssec,
+        }
     }
 
     #[tokio::test]
@@ -540,8 +620,16 @@ mod tests {
             false,
         );
         let q = build_query(1, "www.example.org", QTYPE_AAAA).unwrap();
-        let LookupResult::Answer(a) = r.lookup(&q).await else { panic!("expected answer") };
-        assert_eq!(parse_step3_reply(&a, 1), Step3Outcome::Node { npub: npub(1), ttl: ANSWER_TTL_SECS });
+        let LookupResult::Answer(a) = r.lookup(&q).await else {
+            panic!("expected answer")
+        };
+        assert_eq!(
+            parse_step3_reply(&a, 1),
+            Step3Outcome::Node {
+                npub: npub(1),
+                ttl: ANSWER_TTL_SECS
+            }
+        );
         let pin = pins.get("example.org").unwrap();
         assert_eq!((pin.npub, pin.method), (npub(1), Method::Dnssec));
         assert_eq!(mesh.queries.lock().unwrap().len(), 1);
@@ -550,7 +638,10 @@ mod tests {
         assert!(matches!(r.lookup(&q).await, LookupResult::Answer(_)));
         assert_eq!(mesh.queries.lock().unwrap().len(), 1);
         // Relays were asked only after the TXT hit, and only online.
-        assert_eq!(r.claims.1.lock().unwrap().as_slice(), &[("example.org".to_string(), RelayScope::AfterHit)]);
+        assert_eq!(
+            r.claims.1.lock().unwrap().as_slice(),
+            &[("example.org".to_string(), RelayScope::AfterHit)]
+        );
     }
 
     #[tokio::test]
@@ -561,7 +652,12 @@ mod tests {
                 (TxtLookup::Unreachable, None)
             }
         }
-        let mesh = Arc::new(FakeMesh { queries: Mutex::new(vec![]), registered: Mutex::new(vec![]), echoes: Mutex::new(vec![]), unreachable: vec![] });
+        let mesh = Arc::new(FakeMesh {
+            queries: Mutex::new(vec![]),
+            registered: Mutex::new(vec![]),
+            echoes: Mutex::new(vec![]),
+            unreachable: vec![],
+        });
         let r = Resolver::new(
             ResolverConfig::default(),
             Arc::new(MemoryPinStore::new()),
@@ -573,7 +669,10 @@ mod tests {
         assert_eq!(r.lookup(&q).await, LookupResult::Passthrough);
         let asked = r.claims.1.lock().unwrap().clone();
         assert!(!asked.is_empty());
-        assert!(asked.iter().all(|(_, s)| *s == RelayScope::MeshOnly), "{asked:?}");
+        assert!(
+            asked.iter().all(|(_, s)| *s == RelayScope::MeshOnly),
+            "{asked:?}"
+        );
     }
 
     #[tokio::test]
@@ -596,20 +695,37 @@ mod tests {
         for t in tasks {
             assert!(matches!(t.await.unwrap(), LookupResult::Answer(_)));
         }
-        assert_eq!(r.claims.1.lock().unwrap().len(), 1, "one relay fetch for three concurrent queries");
+        assert_eq!(
+            r.claims.1.lock().unwrap().len(),
+            1,
+            "one relay fetch for three concurrent queries"
+        );
         assert_eq!(mesh.queries.lock().unwrap().len(), 1, "one step 3 query");
     }
 
     #[tokio::test]
     async fn no_txt_is_passthrough_and_relays_are_never_asked() {
-        let (r, mesh) = resolver(HashMap::new(), vec![claim_event(npub(1), "example.org")], Arc::new(MemoryPinStore::new()), vec![], false);
+        let (r, mesh) = resolver(
+            HashMap::new(),
+            vec![claim_event(npub(1), "example.org")],
+            Arc::new(MemoryPinStore::new()),
+            vec![],
+            false,
+        );
         let q = build_query(1, "www.example.org", QTYPE_AAAA).unwrap();
         assert_eq!(r.lookup(&q).await, LookupResult::Passthrough);
         assert!(r.claims.1.lock().unwrap().is_empty(), "privacy gate");
         assert!(mesh.queries.lock().unwrap().is_empty());
         // Public suffixes and unknown TLDs never even start.
-        assert_eq!(r.lookup(&build_query(2, "ch", QTYPE_AAAA).unwrap()).await, LookupResult::Passthrough);
-        assert_eq!(r.lookup(&build_query(3, "home.fips", QTYPE_AAAA).unwrap()).await, LookupResult::Passthrough);
+        assert_eq!(
+            r.lookup(&build_query(2, "ch", QTYPE_AAAA).unwrap()).await,
+            LookupResult::Passthrough
+        );
+        assert_eq!(
+            r.lookup(&build_query(3, "home.fips", QTYPE_AAAA).unwrap())
+                .await,
+            LookupResult::Passthrough
+        );
     }
 
     #[tokio::test]
@@ -622,7 +738,11 @@ mod tests {
             false,
         );
         let q = build_query(1, "mail.example.org", QTYPE_AAAA).unwrap();
-        assert_eq!(r.lookup(&q).await, LookupResult::Passthrough, "NXDOMAIN from step 3 means legacy");
+        assert_eq!(
+            r.lookup(&q).await,
+            LookupResult::Passthrough,
+            "NXDOMAIN from step 3 means legacy"
+        );
     }
 
     #[tokio::test]
@@ -641,34 +761,65 @@ mod tests {
         // wait out another echo budget.
         let q = build_query(2, "git.example.org", QTYPE_A).unwrap();
         assert_eq!(r.lookup(&q).await, LookupResult::Passthrough);
-        assert_eq!(mesh.echoes.lock().unwrap().len(), 1, "one echo for two queries");
+        assert_eq!(
+            mesh.echoes.lock().unwrap().len(),
+            1,
+            "one echo for two queries"
+        );
     }
 
     #[tokio::test]
     async fn offline_pinned_domain_resolves_without_dns_or_relays() {
         let pins: Arc<MemoryPinStore> = Arc::new(MemoryPinStore::new());
-        pins.put(Binding { domain: "example.org".into(), npub: npub(1), port: 5355, method: Method::Dns, verified_at: 1 });
+        pins.put(Binding {
+            domain: "example.org".into(),
+            npub: npub(1),
+            port: 5355,
+            method: Method::Dns,
+            verified_at: 1,
+        });
         let (r, _) = resolver(HashMap::new(), vec![], pins, vec![], false);
         r.set_online(false);
         let q = build_query(1, "www.example.org", QTYPE_AAAA).unwrap();
         assert!(matches!(r.lookup(&q).await, LookupResult::Answer(_)));
-        assert!(r.claims.1.lock().unwrap().is_empty(), "pinned offline: no relay round trip at all");
+        assert!(
+            r.claims.1.lock().unwrap().is_empty(),
+            "pinned offline: no relay round trip at all"
+        );
     }
 
     #[tokio::test]
     async fn offline_unpinned_claim_is_refused_unless_opted_in() {
         let claims = vec![claim_event(npub(1), "example.org")];
-        let (r, _) = resolver(HashMap::new(), claims.clone(), Arc::new(MemoryPinStore::new()), vec![], false);
+        let (r, _) = resolver(
+            HashMap::new(),
+            claims.clone(),
+            Arc::new(MemoryPinStore::new()),
+            vec![],
+            false,
+        );
         r.set_online(false);
         let q = build_query(1, "www.example.org", QTYPE_AAAA).unwrap();
         assert_eq!(r.lookup(&q).await, LookupResult::Passthrough);
         let asked = r.claims.1.lock().unwrap().clone();
-        assert!(asked.iter().all(|(_, s)| *s == RelayScope::Offline), "offline scope");
+        assert!(
+            asked.iter().all(|(_, s)| *s == RelayScope::Offline),
+            "offline scope"
+        );
         assert!(asked.iter().any(|(d, _)| d == "example.org"));
 
-        let (r, _) = resolver(HashMap::new(), claims, Arc::new(MemoryPinStore::new()), vec![], true);
+        let (r, _) = resolver(
+            HashMap::new(),
+            claims,
+            Arc::new(MemoryPinStore::new()),
+            vec![],
+            true,
+        );
         r.set_online(false);
-        assert!(matches!(r.lookup(&q).await, LookupResult::Answer(_)), "opt-in marker path");
+        assert!(
+            matches!(r.lookup(&q).await, LookupResult::Answer(_)),
+            "opt-in marker path"
+        );
     }
 
     #[tokio::test]
@@ -681,7 +832,9 @@ mod tests {
             false,
         );
         let q = build_query(1, "www.example.org", 65).unwrap(); // HTTPS
-        let LookupResult::Answer(a) = r.lookup(&q).await else { panic!() };
+        let LookupResult::Answer(a) = r.lookup(&q).await else {
+            panic!()
+        };
         let p = simple_dns::Packet::parse(&a).unwrap();
         assert!(p.answers.is_empty());
         assert_eq!(p.rcode(), simple_dns::RCODE::NoError);

@@ -96,7 +96,8 @@ async fn handle(state: &State, query: Vec<u8>) -> Option<Vec<u8>> {
             None => forward::servfail(&query),
         };
     }
-    let result = match tokio::time::timeout(state.cfg.budget(), state.resolver.lookup(&query)).await {
+    let result = match tokio::time::timeout(state.cfg.budget(), state.resolver.lookup(&query)).await
+    {
         Ok(r) => r,
         Err(_) => {
             tracing::warn!("lookup exceeded the budget; falling back to legacy");
@@ -125,19 +126,32 @@ async fn run(cfg: Config) -> Result<()> {
             "link search domains route past this daemon on systemd-resolved: names under them never reach it (drop the search domain from the link, e.g. nmcli con mod <con> ipv4.dns-search '')"
         );
     }
-    let resolver = cfg.build_resolver(upstreams.clone()).await.map_err(anyhow::Error::msg)?;
-    let state = Arc::new(State { cfg, resolver, upstreams: RwLock::new(upstreams) });
+    let resolver = cfg
+        .build_resolver(upstreams.clone())
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let state = Arc::new(State {
+        cfg,
+        resolver,
+        upstreams: RwLock::new(upstreams),
+    });
 
     let mut tasks = Vec::new();
     for addr in state.cfg.listen.clone() {
-        let udp = UdpSocket::bind(addr).await.with_context(|| format!("bind udp {addr}"))?;
-        let tcp = TcpListener::bind(addr).await.with_context(|| format!("bind tcp {addr}"))?;
+        let udp = UdpSocket::bind(addr)
+            .await
+            .with_context(|| format!("bind udp {addr}"))?;
+        let tcp = TcpListener::bind(addr)
+            .await
+            .with_context(|| format!("bind tcp {addr}"))?;
         let udp = Arc::new(udp);
         let st = state.clone();
         tasks.push(tokio::spawn(async move {
             let mut buf = vec![0u8; 4096];
             loop {
-                let Ok((n, from)) = udp.recv_from(&mut buf).await else { continue };
+                let Ok((n, from)) = udp.recv_from(&mut buf).await else {
+                    continue;
+                };
                 let (st, udp, q) = (st.clone(), udp.clone(), buf[..n].to_vec());
                 tokio::spawn(async move {
                     if let Some(r) = handle(&st, q).await {
@@ -149,7 +163,9 @@ async fn run(cfg: Config) -> Result<()> {
         let st = state.clone();
         tasks.push(tokio::spawn(async move {
             loop {
-                let Ok((mut s, _)) = tcp.accept().await else { continue };
+                let Ok((mut s, _)) = tcp.accept().await else {
+                    continue;
+                };
                 let st = st.clone();
                 tokio::spawn(async move {
                     let _ = tokio::time::timeout(Duration::from_secs(15), async {
@@ -222,7 +238,9 @@ fn setup(config_path: &Path, backend: Backend) -> Result<()> {
                      [Resolve]\nDNS=\nDNS={listen}\nDomains=\nDomains=~.\n"
                 ),
             )?;
-            let st = std::process::Command::new("systemctl").args(["restart", "systemd-resolved"]).status()?;
+            let st = std::process::Command::new("systemctl")
+                .args(["restart", "systemd-resolved"])
+                .status()?;
             if !st.success() {
                 bail!("systemctl restart systemd-resolved failed");
             }
@@ -242,7 +260,9 @@ fn teardown(backend: Backend) -> Result<()> {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
             }
-            let st = std::process::Command::new("systemctl").args(["restart", "systemd-resolved"]).status()?;
+            let st = std::process::Command::new("systemctl")
+                .args(["restart", "systemd-resolved"])
+                .status()?;
             if !st.success() {
                 bail!("systemctl restart systemd-resolved failed");
             }
@@ -255,7 +275,9 @@ fn teardown(backend: Backend) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
         .init();
     let cli = Cli::parse();
     match cli.cmd {

@@ -12,8 +12,8 @@
 //! none answered the lookup is `Unreachable` — the offline path.
 
 use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
-use hickory_resolver::net::{DnsError, NetError};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::net::{DnsError, NetError};
 use hickory_resolver::proto::dnssec::Proof;
 use hickory_resolver::proto::rr::{RData, RecordType};
 use hickory_resolver::{Resolver, TokioResolver};
@@ -33,8 +33,14 @@ pub struct TxtVerifier {
 /// validated under DNSSEC.
 #[derive(Debug)]
 enum One {
-    Hit { records: Vec<TxtRecord>, secure: bool, ttl: u32 },
-    Miss { secure: bool },
+    Hit {
+        records: Vec<TxtRecord>,
+        secure: bool,
+        ttl: u32,
+    },
+    Miss {
+        secure: bool,
+    },
     Failed,
 }
 
@@ -44,7 +50,8 @@ impl TxtVerifier {
     /// resolve, just without the `Dnssec` strength.
     pub fn new(upstreams: &[IpAddr], dnssec: bool, timeout: Duration) -> Result<Self, String> {
         let ips: Vec<IpAddr> = if upstreams.is_empty() {
-            let (conf, _) = hickory_resolver::system_conf::read_system_conf().map_err(|e| e.to_string())?;
+            let (conf, _) =
+                hickory_resolver::system_conf::read_system_conf().map_err(|e| e.to_string())?;
             let ips: Vec<IpAddr> = conf.name_servers().iter().map(|ns| ns.ip).collect();
             if ips.is_empty() {
                 return Err("no upstream resolvers configured".into());
@@ -57,7 +64,11 @@ impl TxtVerifier {
         let ips = unique(ips);
         let mut resolvers = Vec::new();
         for ip in ips {
-            let conf = ResolverConfig::from_parts(None, Vec::new(), vec![NameServerConfig::udp_and_tcp(ip)]);
+            let conf = ResolverConfig::from_parts(
+                None,
+                Vec::new(),
+                vec![NameServerConfig::udp_and_tcp(ip)],
+            );
             let mut opts = ResolverOpts::default();
             opts.timeout = timeout;
             opts.attempts = 1;
@@ -83,9 +94,12 @@ impl TxtVerifier {
         let futs = self.resolvers.iter().map(|(ip, r)| {
             let name = name.clone();
             async move {
-                let one = tokio::time::timeout(self.timeout + Duration::from_millis(200), Self::one(r, &name))
-                    .await
-                    .unwrap_or(One::Failed);
+                let one = tokio::time::timeout(
+                    self.timeout + Duration::from_millis(200),
+                    Self::one(r, &name),
+                )
+                .await
+                .unwrap_or(One::Failed);
                 tracing::debug!(upstream = %ip, result = ?one, "TXT lookup");
                 one
             }
@@ -115,13 +129,20 @@ impl TxtVerifier {
                     let secure = lookup.answers().iter().any(|r| r.proof == Proof::Secure);
                     One::Miss { secure }
                 } else {
-                    One::Hit { records, secure, ttl }
+                    One::Hit {
+                        records,
+                        secure,
+                        ttl,
+                    }
                 }
             }
             Err(NetError::Dns(DnsError::NoRecordsFound(nr))) => {
                 // A validated SOA in the authority section means the denial
                 // itself was proven (NSEC/NSEC3 checked by the validator).
-                let secure = nr.soa.as_ref().is_some_and(|soa| soa.proof == Proof::Secure);
+                let secure = nr
+                    .soa
+                    .as_ref()
+                    .is_some_and(|soa| soa.proof == Proof::Secure);
                 One::Miss { secure }
             }
             Err(e) => {
@@ -151,8 +172,13 @@ fn combine(answers: Vec<One>) -> (TxtLookup, Option<u32>) {
         }
     }
     let Some((_, best)) = groups.iter().max_by_key(|(_, v)| v.len()) else {
-        let misses = answers.iter().filter(|a| matches!(a, One::Miss { .. })).count();
-        let secure = answers.iter().any(|a| matches!(a, One::Miss { secure: true }));
+        let misses = answers
+            .iter()
+            .filter(|a| matches!(a, One::Miss { .. }))
+            .count();
+        let secure = answers
+            .iter()
+            .any(|a| matches!(a, One::Miss { secure: true }));
         let method = if secure {
             Method::Dnssec
         } else if misses >= 2 {
@@ -162,7 +188,9 @@ fn combine(answers: Vec<One>) -> (TxtLookup, Option<u32>) {
         };
         return (TxtLookup::Miss { method }, None);
     };
-    let secure = best.iter().any(|a| matches!(a, One::Hit { secure: true, .. }));
+    let secure = best
+        .iter()
+        .any(|a| matches!(a, One::Hit { secure: true, .. }));
     let method = if secure {
         Method::Dnssec
     } else if best.len() >= 2 {
@@ -194,7 +222,13 @@ mod tests {
 
     fn hit(authors: &[u8], secure: bool) -> One {
         One::Hit {
-            records: authors.iter().map(|a| TxtRecord { npub: Npub::from_bytes([*a; 32]), port: None }).collect(),
+            records: authors
+                .iter()
+                .map(|a| TxtRecord {
+                    npub: Npub::from_bytes([*a; 32]),
+                    port: None,
+                })
+                .collect(),
             secure,
             ttl: 300,
         }
@@ -202,19 +236,52 @@ mod tests {
 
     #[test]
     fn combine_counts_agreement() {
-        assert_eq!(combine(vec![One::Failed, One::Failed]).0, TxtLookup::Unreachable);
-        assert_eq!(combine(vec![One::Miss { secure: false }, One::Failed]).0, TxtLookup::Miss { method: Method::DnsSingle });
         assert_eq!(
-            combine(vec![One::Miss { secure: false }, One::Miss { secure: false }]).0,
-            TxtLookup::Miss { method: Method::Dns }
+            combine(vec![One::Failed, One::Failed]).0,
+            TxtLookup::Unreachable
         );
-        assert_eq!(combine(vec![One::Miss { secure: true }]).0, TxtLookup::Miss { method: Method::Dnssec });
-        assert_eq!(unique(vec!["1.1.1.1".parse().unwrap(), "8.8.8.8".parse().unwrap(), "1.1.1.1".parse().unwrap()]).len(), 2);
+        assert_eq!(
+            combine(vec![One::Miss { secure: false }, One::Failed]).0,
+            TxtLookup::Miss {
+                method: Method::DnsSingle
+            }
+        );
+        assert_eq!(
+            combine(vec![
+                One::Miss { secure: false },
+                One::Miss { secure: false }
+            ])
+            .0,
+            TxtLookup::Miss {
+                method: Method::Dns
+            }
+        );
+        assert_eq!(
+            combine(vec![One::Miss { secure: true }]).0,
+            TxtLookup::Miss {
+                method: Method::Dnssec
+            }
+        );
+        assert_eq!(
+            unique(vec![
+                "1.1.1.1".parse().unwrap(),
+                "8.8.8.8".parse().unwrap(),
+                "1.1.1.1".parse().unwrap()
+            ])
+            .len(),
+            2
+        );
         match combine(vec![hit(&[1], false), One::Failed]).0 {
             TxtLookup::Hit { method, .. } => assert_eq!(method, Method::DnsSingle),
             other => panic!("{other:?}"),
         }
-        match combine(vec![hit(&[1], false), hit(&[1], false), One::Miss { secure: false }]).0 {
+        match combine(vec![
+            hit(&[1], false),
+            hit(&[1], false),
+            One::Miss { secure: false },
+        ])
+        .0
+        {
             TxtLookup::Hit { method, records } => {
                 assert_eq!(method, Method::Dns);
                 assert_eq!(records.len(), 1);
@@ -236,7 +303,12 @@ mod tests {
         // Hits outrank misses even when misses are more numerous: a stale
         // negative cache somewhere must not hide a fresh record.
         assert!(matches!(
-            combine(vec![One::Miss { secure: false }, One::Miss { secure: false }, hit(&[1], false)]).0,
+            combine(vec![
+                One::Miss { secure: false },
+                One::Miss { secure: false },
+                hit(&[1], false)
+            ])
+            .0,
             TxtLookup::Hit { .. }
         ));
     }

@@ -67,16 +67,31 @@ mod tests {
         let hex = Npub::parse(DEMO).unwrap().to_hex();
         let r = TxtRecord::parse(&format!("v=fips1   future=1 port=53 npub={hex}")).unwrap();
         assert_eq!(r.port, Some(53));
-        assert_eq!(TxtRecord::parse(&format!("v=fips1 npub={DEMO}")).unwrap().port, None);
+        assert_eq!(
+            TxtRecord::parse(&format!("v=fips1 npub={DEMO}"))
+                .unwrap()
+                .port,
+            None
+        );
     }
 
     #[test]
     fn rejects_foreign_or_broken_records() {
         assert_eq!(TxtRecord::parse("v=spf1 -all"), None);
-        assert_eq!(TxtRecord::parse(&format!("npub={DEMO} v=fips1")), None, "version first");
+        assert_eq!(
+            TxtRecord::parse(&format!("npub={DEMO} v=fips1")),
+            None,
+            "version first"
+        );
         assert_eq!(TxtRecord::parse("v=fips1 port=5355"), None, "npub required");
-        assert_eq!(TxtRecord::parse(&format!("v=fips1 npub={DEMO} port=0")), None);
-        assert_eq!(TxtRecord::parse(&format!("v=fips1 npub={DEMO} port=abc")), None);
+        assert_eq!(
+            TxtRecord::parse(&format!("v=fips1 npub={DEMO} port=0")),
+            None
+        );
+        assert_eq!(
+            TxtRecord::parse(&format!("v=fips1 npub={DEMO} port=abc")),
+            None
+        );
         assert_eq!(TxtRecord::parse("v=fips1 npub=npub1nope"), None);
         assert_eq!(TxtRecord::parse(""), None);
     }

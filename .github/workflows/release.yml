@@ -1,0 +1,152 @@
+# Releases are driven by tags: pushing an annotated tag vX.Y.Z on a commit of
+# main runs the CI checks on that commit and, when they pass, builds the
+# binaries for every platform and publishes the GitHub release.
+#   set version = "0.2.0" in [workspace.package], commit
+#   git tag -a v0.2.0 -m "fips-pub-domains 0.2.0" && git push origin main v0.2.0
+# The notes are CHANGELOG.md's [Unreleased] section (GitHub's generated notes
+# when it is empty); afterwards that section is moved under the new version on
+# main. A tag with a pre-release suffix (v0.2.0-rc.1) becomes a pre-release.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  check-tag:
+    name: Check the tag
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - id: tag
+        name: Tag format, on main, matches Cargo.toml, not released yet
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)(-[0-9A-Za-z.]+)?$ ]] || { echo "::error::tag $TAG is not vX.Y.Z or vX.Y.Z-pre"; exit 1; }
+          version=${BASH_REMATCH[1]}; pre=${BASH_REMATCH[2]}
+          git fetch -q --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          [[ $(git cat-file -t "refs/tags/$TAG") == tag ]] || { echo "::error::$TAG is a lightweight tag; use git tag -a"; exit 1; }
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::$TAG is not on main"; exit 1; }
+          cargo_version=$(sed -nE '/^\[workspace\.package\]/,/^\[/{s/^version = "([^"]+)"/\1/p}' Cargo.toml)
+          [[ "$cargo_version" == "$version${pre}" || "$cargo_version" == "$version" ]] || { echo "::error::Cargo.toml says $cargo_version, the tag says $version$pre"; exit 1; }
+          if gh release view "$TAG" >/dev/null 2>&1; then echo "::error::release $TAG exists already"; exit 1; fi
+          echo "version=$version$pre" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$([[ -n "$pre" ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  ci:
+    name: CI checks
+    needs: check-tag
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: [check-tag, ci]
+    strategy:
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu,  os: ubuntu-24.04,     archive: tar }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm, archive: tar }
+          - { target: aarch64-apple-darwin,      os: macos-latest,     archive: tar }
+          - { target: x86_64-apple-darwin,       os: macos-15-intel,   archive: tar }
+          - { target: x86_64-pc-windows-msvc,    os: windows-latest,   archive: zip }
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.check-tag.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --workspace --target ${{ matrix.target }}
+      - name: Pack
+        shell: bash
+        run: |
+          name="fips-pub-domains-$VERSION-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          bin="target/${{ matrix.target }}/release"
+          if [[ "${{ matrix.archive }}" == zip ]]; then
+            cp "$bin"/fips-pubdom.exe "$bin"/fips-pubdomd.exe "$bin"/fips-pubdom-server.exe "dist/$name/"
+          else
+            cp "$bin"/fips-pubdom "$bin"/fips-pubdomd "$bin"/fips-pubdom-server "dist/$name/"
+          fi
+          cp -r packaging LICENSE README.md "dist/$name/"
+          cd dist
+          if [[ "${{ matrix.archive }}" == zip ]]; then
+            7z a -tzip "$name.zip" "$name" >/dev/null
+          else
+            tar czf "$name.tar.gz" "$name"
+          fi
+          rm -r "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish the release
+    needs: [check-tag, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.check-tag.outputs.version }}
+      PRERELEASE: ${{ needs.check-tag.outputs.prerelease }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: main, fetch-depth: 0 }
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - name: Release notes from [Unreleased]
+        run: |
+          git show "$GITHUB_SHA:CHANGELOG.md" | awk '/^## \[Unreleased\]/{f=1;next} /^## \[/{f=0} f' > notes.md
+          if grep -q '[^[:space:]]' notes.md; then echo "notes=file" >> "$GITHUB_ENV"; else echo "notes=generated" >> "$GITHUB_ENV"; fi
+          cat notes.md
+      - name: Publish
+        run: |
+          args=(--verify-tag --title "fips-pub-domains $VERSION")
+          [[ "$notes" == file ]] && args+=(--notes-file notes.md) || args+=(--generate-notes)
+          [[ "$PRERELEASE" == true ]] && args+=(--prerelease) || args+=(--latest)
+          gh release create "$TAG" "${args[@]}" dist/*
+      - name: Move [Unreleased] under the new version on main
+        if: env.PRERELEASE == 'false'
+        run: |
+          prev=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-*' "$GITHUB_SHA^" 2>/dev/null || true)
+          python3 - "$VERSION" "$prev" <<'PY'
+          import re, sys, datetime
+          version, prev = sys.argv[1], sys.argv[2]
+          p = 'CHANGELOG.md'; s = open(p).read()
+          if f'## [{version}]' in s:
+              sys.exit(0)
+          m = re.search(r'^## \[Unreleased\]\n(.*?)(?=^## \[|^\[Unreleased\]:)', s, flags=re.S | re.M)
+          if m is None or m.group(1).strip() != open('notes.md').read().strip():
+              print(f'::warning::[Unreleased] changed since {version} was tagged; move its entries under {version} by hand')
+              sys.exit(0)
+          today = datetime.date.today().isoformat()
+          s = s.replace('## [Unreleased]\n', f'## [Unreleased]\n\n## [{version}] - {today}\n', 1)
+          base = 'https://github.com/fr34aky/fips-pub-domains'
+          s = re.sub(r'^\[Unreleased\]: .*$', f'[Unreleased]: {base}/compare/v{version}...HEAD'
+                     + (f'\n[{version}]: {base}/compare/{prev}...v{version}' if prev else f'\n[{version}]: {base}/releases/tag/v{version}'),
+                     s, count=1, flags=re.M)
+          s = re.sub(r'\n{3,}', '\n\n', s)
+          open(p, 'w').write(s)
+          PY
+          git diff --quiet && exit 0
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -qam "Changelog: $VERSION"
+          for _ in 1 2 3; do git push origin HEAD:main && exit 0; git pull -q --rebase origin main; done
+          echo "::warning::could not update CHANGELOG.md on main; move [Unreleased] under $VERSION by hand"

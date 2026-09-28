@@ -50,7 +50,10 @@ impl Default for Config {
     fn default() -> Self {
         let d = ResolverConfig::default();
         Self {
-            listen: vec!["[::1]:5356".parse().unwrap(), "127.0.0.1:5356".parse().unwrap()],
+            listen: vec![
+                "[::1]:5356".parse().unwrap(),
+                "127.0.0.1:5356".parse().unwrap(),
+            ],
             upstreams: Vec::new(),
             upstreams_from: None,
             dnssec: d.dnssec,
@@ -73,7 +76,11 @@ impl Config {
 
     /// Load if present, defaults otherwise.
     pub fn load_or_default(path: &Path) -> Result<Self, String> {
-        if path.exists() { Self::load(path) } else { Ok(Self::default()) }
+        if path.exists() {
+            Self::load(path)
+        } else {
+            Ok(Self::default())
+        }
     }
 
     pub fn budget(&self) -> Duration {
@@ -146,7 +153,8 @@ impl Config {
     pub async fn build_resolver(&self, upstreams: Vec<IpAddr>) -> Result<ProdResolver, String> {
         let rc = self.resolver_config(upstreams.clone());
         let txt = MaybeTxt::new(&upstreams, self.dnssec, rc.txt_timeout)?;
-        let relays = RelayClient::new(&self.public_relays, &self.mesh_relays, rc.relay_timeout).await;
+        let relays =
+            RelayClient::new(&self.public_relays, &self.mesh_relays, rc.relay_timeout).await;
         let pins = FilePinStore::open(&self.pins).map_err(|e| e.to_string())?;
         let mesh = KernelMeshDns::new(self.responder, self.mesh_bind);
         let r = Resolver::new(rc, Arc::new(pins), txt, relays, Arc::new(mesh));
@@ -169,7 +177,11 @@ pub struct MaybeTxt {
 
 impl MaybeTxt {
     pub fn new(upstreams: &[IpAddr], dnssec: bool, timeout: Duration) -> Result<Self, String> {
-        let me = Self { inner: std::sync::Mutex::new(None), dnssec, timeout };
+        let me = Self {
+            inner: std::sync::Mutex::new(None),
+            dnssec,
+            timeout,
+        };
         me.set_upstreams(upstreams)?;
         Ok(me)
     }
@@ -180,7 +192,11 @@ impl MaybeTxt {
         let v = if upstreams.is_empty() {
             None
         } else {
-            Some(Arc::new(TxtVerifier::new(upstreams, self.dnssec, self.timeout)?))
+            Some(Arc::new(TxtVerifier::new(
+                upstreams,
+                self.dnssec,
+                self.timeout,
+            )?))
         };
         *self.inner.lock().unwrap() = v;
         Ok(())
@@ -210,8 +226,17 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("resolv.conf");
         std::fs::write(&f, "# generated\nnameserver ::1\nnameserver 127.0.0.1\nnameserver 192.168.1.1\nnameserver fe80::1%eth0\nsearch lan fips\n").unwrap();
-        let cfg = Config { upstreams_from: Some(f), ..Default::default() };
-        assert_eq!(cfg.current_upstreams(), vec!["192.168.1.1".parse::<IpAddr>().unwrap(), "fe80::1".parse().unwrap()]);
+        let cfg = Config {
+            upstreams_from: Some(f),
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.current_upstreams(),
+            vec![
+                "192.168.1.1".parse::<IpAddr>().unwrap(),
+                "fe80::1".parse().unwrap()
+            ]
+        );
         assert_eq!(cfg.link_search_domains(), vec!["lan"]);
         let cfg = Config::default();
         assert!(cfg.current_upstreams().is_empty());

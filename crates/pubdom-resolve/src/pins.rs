@@ -25,12 +25,21 @@ impl FilePinStore {
     pub fn open(path: impl Into<PathBuf>) -> io::Result<Self> {
         let path = path.into();
         let snap = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice::<PinSnapshot>(&bytes)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{}: {e}", path.display())))?,
+            Ok(bytes) => serde_json::from_slice::<PinSnapshot>(&bytes).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}: {e}", path.display()),
+                )
+            })?,
             Err(e) if e.kind() == io::ErrorKind::NotFound => PinSnapshot::default(),
             Err(e) => return Err(e),
         };
-        Ok(Self { path, mem: MemoryPinStore::from_snapshot(snap), saving: Mutex::new(()), seq: AtomicU64::new(0) })
+        Ok(Self {
+            path,
+            mem: MemoryPinStore::from_snapshot(snap),
+            saving: Mutex::new(()),
+            seq: AtomicU64::new(0),
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -49,7 +58,9 @@ impl FilePinStore {
             std::fs::create_dir_all(dir)?;
         }
         let n = self.seq.fetch_add(1, Ordering::Relaxed);
-        let tmp = self.path.with_extension(format!("json.{}.{n}.tmp", std::process::id()));
+        let tmp = self
+            .path
+            .with_extension(format!("json.{}.{n}.tmp", std::process::id()));
         let bytes = serde_json::to_vec_pretty(&self.mem.snapshot()).map_err(io::Error::other)?;
         let result = std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, &self.path));
         if result.is_err() {

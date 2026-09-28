@@ -142,7 +142,11 @@ mod tests {
         assert_eq!(n.to_string(), DEMO);
         assert_eq!(Npub::from_hex(&n.to_hex()).unwrap(), n);
         assert_eq!(Npub::parse_any(&n.to_hex()).unwrap(), n);
-        assert_eq!(DEMO.len(), 63, "an npub is exactly one max-length DNS label");
+        assert_eq!(
+            DEMO.len(),
+            63,
+            "an npub is exactly one max-length DNS label"
+        );
     }
 
     #[test]

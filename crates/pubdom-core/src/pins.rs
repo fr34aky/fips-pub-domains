@@ -96,10 +96,16 @@ impl MemoryPinStore {
 
     pub fn from_snapshot(snap: PinSnapshot) -> Self {
         let inner = Inner {
-            pins: snap.pins.into_iter().map(|b| (b.domain.clone(), b)).collect(),
+            pins: snap
+                .pins
+                .into_iter()
+                .map(|b| (b.domain.clone(), b))
+                .collect(),
             seen: snap.seen.into_iter().collect(),
         };
-        Self { inner: Mutex::new(inner) }
+        Self {
+            inner: Mutex::new(inner),
+        }
     }
 
     pub fn snapshot(&self) -> PinSnapshot {
@@ -107,7 +113,9 @@ impl MemoryPinStore {
         let mut pins: Vec<Binding> = g.pins.values().cloned().collect();
         pins.sort_by(|a, b| a.domain.cmp(&b.domain));
         let mut seen: Vec<(SeenKey, u64)> = g.seen.iter().map(|(k, v)| (k.clone(), *v)).collect();
-        seen.sort_by(|a, b| (&a.0.domain, a.0.kind, &a.0.author).cmp(&(&b.0.domain, b.0.kind, &b.0.author)));
+        seen.sort_by(|a, b| {
+            (&a.0.domain, a.0.kind, &a.0.author).cmp(&(&b.0.domain, b.0.kind, &b.0.author))
+        });
         PinSnapshot { pins, seen }
     }
 }
@@ -154,7 +162,13 @@ mod tests {
     use super::*;
 
     fn b(domain: &str, method: Method) -> Binding {
-        Binding { domain: domain.into(), npub: Npub::from_bytes([1; 32]), port: 5355, method, verified_at: 10 }
+        Binding {
+            domain: domain.into(),
+            npub: Npub::from_bytes([1; 32]),
+            port: 5355,
+            method,
+            verified_at: 10,
+        }
     }
 
     #[test]
@@ -169,16 +183,26 @@ mod tests {
     fn store_round_trips_through_snapshot() {
         let s = MemoryPinStore::new();
         s.put(b("example.org", Method::Dnssec));
-        let key = SeenKey { kind: 37197, author: Npub::from_bytes([1; 32]), domain: "example.org".into() };
+        let key = SeenKey {
+            kind: 37197,
+            author: Npub::from_bytes([1; 32]),
+            domain: "example.org".into(),
+        };
         assert!(s.note_seen(key.clone(), 5));
         assert!(!s.note_seen(key.clone(), 3), "only moves forward");
         assert_eq!(s.newest_seen(&key), Some(5));
-        assert!(!s.put(b("example.org", Method::Dnssec)), "unchanged pin reports no change");
+        assert!(
+            !s.put(b("example.org", Method::Dnssec)),
+            "unchanged pin reports no change"
+        );
         let snap = s.snapshot();
         let json = serde_json::to_string(&snap).unwrap();
         let back: PinSnapshot = serde_json::from_str(&json).unwrap();
         let s2 = MemoryPinStore::from_snapshot(back);
-        assert_eq!(s2.get("example.org"), Some(b("example.org", Method::Dnssec)));
+        assert_eq!(
+            s2.get("example.org"),
+            Some(b("example.org", Method::Dnssec))
+        );
         assert_eq!(s2.newest_seen(&key), Some(5));
         s2.forget("example.org");
         assert!(s2.list().is_empty());

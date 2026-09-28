@@ -23,7 +23,10 @@ pub struct TtlCache<K, V> {
 
 impl<K: Eq + Hash + Clone, V: Clone> TtlCache<K, V> {
     pub fn new(max_entries: usize) -> Self {
-        Self { inner: Mutex::new(HashMap::new()), max_entries }
+        Self {
+            inner: Mutex::new(HashMap::new()),
+            max_entries,
+        }
     }
 
     /// `now` in seconds, same clock as `put`.

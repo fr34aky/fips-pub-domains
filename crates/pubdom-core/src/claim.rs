@@ -83,7 +83,13 @@ impl Claim {
         let dnssec = tag_value(&ev.tags, "dnssec")
             .filter(|s| !s.is_empty() && s.len() <= MAX_DNSSEC_B64)
             .map(str::to_owned);
-        Ok(Self { author, domain, port, created_at: ev.created_at, dnssec })
+        Ok(Self {
+            author,
+            domain,
+            port,
+            created_at: ev.created_at,
+            dnssec,
+        })
     }
 
     /// The tags of a claim for `domain` — what the server publishes.
@@ -154,7 +160,12 @@ impl ZoneRecord {
                 return Err(ClaimError::TooLarge);
             }
         }
-        Ok(Self { author, domain, created_at: ev.created_at, names })
+        Ok(Self {
+            author,
+            domain,
+            created_at: ev.created_at,
+            names,
+        })
     }
 
     /// Resolve `label` (relative, see `domain::relative_label`) to a node,
@@ -202,7 +213,10 @@ mod tests {
         assert_eq!(c.port, 5355);
         assert_eq!(c.author.to_hex(), DEMO_HEX);
         assert_eq!(c.dnssec, None);
-        assert_eq!(Claim::tags("example.org", 5355, None), claim_event("example.org", "5355").tags);
+        assert_eq!(
+            Claim::tags("example.org", 5355, None),
+            claim_event("example.org", "5355").tags
+        );
     }
 
     #[test]
@@ -210,10 +224,22 @@ mod tests {
         let mut e = claim_event("example.org", "5355");
         e.kind = 1;
         assert_eq!(Claim::parse(&e).unwrap_err(), ClaimError::Kind(1));
-        assert_eq!(Claim::parse(&claim_event("ch", "5355")).unwrap_err(), ClaimError::PublicSuffix);
-        assert_eq!(Claim::parse(&claim_event("Example.org", "5355")).unwrap_err(), ClaimError::Domain);
-        assert_eq!(Claim::parse(&claim_event("example.org.", "5355")).unwrap_err(), ClaimError::Domain);
-        assert_eq!(Claim::parse(&claim_event("example.org", "0")).unwrap_err(), ClaimError::Service);
+        assert_eq!(
+            Claim::parse(&claim_event("ch", "5355")).unwrap_err(),
+            ClaimError::PublicSuffix
+        );
+        assert_eq!(
+            Claim::parse(&claim_event("Example.org", "5355")).unwrap_err(),
+            ClaimError::Domain
+        );
+        assert_eq!(
+            Claim::parse(&claim_event("example.org.", "5355")).unwrap_err(),
+            ClaimError::Domain
+        );
+        assert_eq!(
+            Claim::parse(&claim_event("example.org", "0")).unwrap_err(),
+            ClaimError::Service
+        );
         let mut e = claim_event("example.org", "5355");
         e.tags[1][1] = "fips-http".into();
         assert_eq!(Claim::parse(&e).unwrap_err(), ClaimError::Service);
@@ -221,7 +247,8 @@ mod tests {
         e.pubkey = "zz".into();
         assert_eq!(Claim::parse(&e).unwrap_err(), ClaimError::Author);
         let mut e = claim_event("example.org", "5355");
-        e.tags.extend(std::iter::repeat_n(vec!["x".to_string()], MAX_TAGS));
+        e.tags
+            .extend(std::iter::repeat_n(vec!["x".to_string()], MAX_TAGS));
         assert_eq!(Claim::parse(&e).unwrap_err(), ClaimError::TooLarge);
     }
 

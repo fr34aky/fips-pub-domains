@@ -739,6 +739,7 @@ mod tests {
         });
         let b = &bound(&o)[0];
         assert_eq!((b.npub, b.method), (npub(2), Method::Dnssec));
+        assert_eq!(b.verified_at, NOW, "when the binding was made");
         assert_eq!(o.changes, vec![PinChange::Put(b.clone())]);
         // Every proven claim is a server, newest first; an unproven one is not.
         let mut second = claim(4, 7);

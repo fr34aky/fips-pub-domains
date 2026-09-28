@@ -111,8 +111,10 @@ struct Prover {
     /// empty for a dry run, which must not touch the network beyond DNS.
     relays: Vec<String>,
     last: std::sync::Mutex<std::collections::HashMap<String, (String, u64)>>,
-    /// Domains whose relays had nothing to restore, or whose record stopped
-    /// naming this server: not asked again in this process.
+    /// Domains whose record stopped naming this server: its earlier proofs
+    /// are evidence for a retired key and are never restored in this
+    /// process. (A relay lookup that found nothing is not remembered — the
+    /// relays may just not have been reachable yet.)
     no_seed: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
@@ -134,10 +136,10 @@ impl Prover {
         }
     }
 
-    /// The chain of this server's own claim on the relays, if it is still
-    /// valid for an hour and names this server — the newest record among
-    /// them: after a restart during a DNS outage, what keeps the relays'
-    /// copy from being replaced by a claim without a proof.
+    /// The chain of this server's newest claim on the relays, if it carries
+    /// a valid proof naming this server: after a restart during a DNS
+    /// outage, what keeps the relays' copy from being replaced by a claim
+    /// without a proof.
     async fn published_chain(&self, domain: &str) -> Option<(String, u64)> {
         if self.relays.is_empty() || self.no_seed.lock().unwrap().contains(domain) {
             return None;
@@ -158,13 +160,7 @@ impl Prover {
             .collect();
         let checker = proof::DnssecProofs::default();
         let now = pubdom_resolve::now();
-        let found = own_chain(&claims, self.author, domain, now, |c| {
-            checker.check(c, now).ok()
-        });
-        if found.is_none() {
-            self.no_seed.lock().unwrap().insert(domain.to_string());
-        }
-        found
+        own_chain(&claims, self.author, domain, |c| checker.check(c, now).ok())
     }
 
     async fn proof(&self, domain: &str) -> Proof {
@@ -230,7 +226,7 @@ impl Prover {
             }
         };
         match last {
-            Some((chain, expires)) if expires > now + 3600 => {
+            Some((chain, expires)) if expires > now + KEEP_MARGIN => {
                 tracing::warn!(%domain, error = %e, "could not refresh the DNSSEC proof; keeping the last one");
                 Proof {
                     chain: Some(chain),
@@ -248,15 +244,17 @@ impl Prover {
     }
 }
 
-/// The chain to restore from this server's own claims on the relays: only
-/// the newest claim counts (a relay that missed the latest publication
-/// must not bring back an older proof — for a key since rotated out, say),
-/// and only if its proof names the server and has an hour left.
+/// A kept chain is republished only while it has this much validity left.
+const KEEP_MARGIN: u64 = 3600;
+
+/// The chain to restore from this server's own claims on the relays, with
+/// its expiry: only the newest claim counts (a relay that missed the latest
+/// publication must not bring back an older proof — for a key since
+/// rotated out, say), and only if `check` accepts its proof.
 fn own_chain(
     claims: &[pubdom_core::Claim],
     author: Npub,
     domain: &str,
-    now: u64,
     check: impl Fn(&pubdom_core::Claim) -> Option<proof::Proven>,
 ) -> Option<(String, u64)> {
     let newest = claims
@@ -265,7 +263,7 @@ fn own_chain(
         .max_by_key(|c| c.created_at)?;
     let chain = newest.dnssec.clone()?;
     let p = check(newest)?;
-    (p.expires > now + 3600).then_some((chain, p.expires))
+    Some((chain, p.expires))
 }
 
 #[derive(Debug, Deserialize)]
@@ -521,7 +519,7 @@ async fn publish_one(keys: &Keys, z: &Zone, relays: &[String], prover: &Prover) 
     retry
 }
 
-/// A snapshot of the zones as last loaded — what `publish_all` sends.
+/// A snapshot of the zones as last loaded — what the scheduler publishes.
 fn snapshot(zones: &Zones) -> Vec<Zone> {
     let g = zones.zones.read().unwrap();
     g.iter()
@@ -685,6 +683,7 @@ mod tests {
     #[test]
     fn only_the_newest_own_claim_is_restored() {
         let me = Npub::from_bytes([1; 32]);
+        let other = Npub::from_bytes([2; 32]);
         let claim = |author: Npub, created_at, chain: Option<&str>| pubdom_core::Claim {
             author,
             domain: "example.org".into(),
@@ -692,40 +691,31 @@ mod tests {
             created_at,
             dnssec: chain.map(str::to_owned),
         };
-        let valid_until = |exp: u64| {
-            move |c: &pubdom_core::Claim| {
-                c.dnssec.as_ref().map(|_| proof::Proven {
-                    records: vec![],
-                    signed_at: 0,
-                    expires: exp,
-                })
-            }
+        let valid = |c: &pubdom_core::Claim| {
+            c.dnssec.as_ref().map(|_| proof::Proven {
+                records: vec![],
+                signed_at: 0,
+                expires: 999,
+            })
         };
-        let now = 1_000_000;
-        // The newest claim carries a proof: restored.
-        let claims = [claim(me, 10, Some("old")), claim(me, 20, Some("new"))];
+        // The newest own claim carries a proof: restored, even with another
+        // key's newer claim beside it.
+        let claims = [
+            claim(me, 10, Some("old")),
+            claim(me, 20, Some("new")),
+            claim(other, 30, Some("theirs")),
+        ];
         assert_eq!(
-            own_chain(&claims, me, "example.org", now, valid_until(now + 86400)),
-            Some(("new".into(), now + 86400))
+            own_chain(&claims, me, "example.org", valid),
+            Some(("new".into(), 999))
         );
         // The newest has none (the server stopped vouching): nothing, even
         // though a relay still holds an older one.
         let claims = [claim(me, 10, Some("old")), claim(me, 20, None)];
-        assert_eq!(
-            own_chain(&claims, me, "example.org", now, valid_until(now + 86400)),
-            None
-        );
-        // Another key's claim is not ours; one with under an hour left is
-        // not worth restoring.
-        let other = Npub::from_bytes([2; 32]);
-        let claims = [
-            claim(other, 30, Some("theirs")),
-            claim(me, 20, Some("mine")),
-        ];
-        assert_eq!(
-            own_chain(&claims, me, "example.org", now, valid_until(now + 60)),
-            None
-        );
+        assert_eq!(own_chain(&claims, me, "example.org", valid), None);
+        // A proof the check refuses: nothing.
+        let claims = [claim(me, 20, Some("bad"))];
+        assert_eq!(own_chain(&claims, me, "example.org", |_| None), None);
     }
 
     #[test]

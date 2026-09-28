@@ -20,7 +20,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 
 const DEFAULT_CONFIG: &str = "/etc/fips-names/config.yaml";
-const RESOLVED_DROPIN: &str = "/etc/systemd/resolved.conf.d/fips-names.conf";
+/// Sorts after fips's own drop-in (`fips-dns-setup` writes one named after
+/// itself) so the list resets below win: resolved merges every drop-in
+/// into ONE global server pool, and two servers with different routing
+/// domains in one pool are queried interchangeably.
+const RESOLVED_DROPIN: &str = "/etc/systemd/resolved.conf.d/zz-fips-names.conf";
 const RESOLVED_UPSTREAMS: &str = "/run/systemd/resolve/resolv.conf";
 
 #[derive(Parser)]
@@ -74,6 +78,14 @@ impl State {
 }
 
 async fn handle(state: &State, query: Vec<u8>) -> Option<Vec<u8>> {
+    // fips's own names go to its responder: in full mode we are the only
+    // global server systemd-resolved knows, so `.fips` arrives here too.
+    if forward::is_fips_name(&query) {
+        return match forward::forward_to(&query, &[state.cfg.responder]).await {
+            Some(r) => Some(r),
+            None => forward::servfail(&query),
+        };
+    }
     let result = match tokio::time::timeout(state.cfg.budget(), state.resolver.lookup(&query)).await {
         Ok(r) => r,
         Err(_) => {
@@ -187,8 +199,10 @@ fn setup(config_path: &Path, backend: Backend) -> Result<()> {
                 RESOLVED_DROPIN,
                 format!(
                     "# Managed by fips-namesd setup. All names go through fips-names (full mode);\n\
-                     # names that are not over fips are forwarded to the previous upstreams.\n\
-                     [Resolve]\nDNS={listen}\nDomains=~.\n"
+                     # names that are not over fips are forwarded to the previous upstreams,\n\
+                     # .fips names to fips's responder. The empty assignments reset the lists\n\
+                     # other drop-ins (fips-dns-setup's) added to the same global pool.\n\
+                     [Resolve]\nDNS=\nDNS={listen}\nDomains=\nDomains=~.\n"
                 ),
             )?;
             let st = std::process::Command::new("systemctl").args(["restart", "systemd-resolved"]).status()?;

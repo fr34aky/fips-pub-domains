@@ -11,13 +11,19 @@ use tokio::net::{TcpStream, UdpSocket};
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub async fn forward(query: &[u8], upstreams: &[IpAddr]) -> Option<Vec<u8>> {
-    for ip in upstreams {
-        let addr = SocketAddr::new(*ip, 53);
-        match tokio::time::timeout(UPSTREAM_TIMEOUT, udp(query, addr)).await {
+    let addrs: Vec<SocketAddr> = upstreams.iter().map(|ip| SocketAddr::new(*ip, 53)).collect();
+    forward_to(query, &addrs).await
+}
+
+/// The same, to explicit socket addresses (fips's `.fips` responder).
+pub async fn forward_to(query: &[u8], servers: &[SocketAddr]) -> Option<Vec<u8>> {
+    for addr in servers {
+        let ip = addr.ip();
+        match tokio::time::timeout(UPSTREAM_TIMEOUT, udp(query, *addr)).await {
             Ok(Ok(reply)) => {
                 if reply.len() >= 3 && reply[2] & 0x02 != 0 {
                     // TC bit: the upstream has more than fits in UDP.
-                    if let Ok(Ok(full)) = tokio::time::timeout(UPSTREAM_TIMEOUT * 2, tcp(query, addr)).await {
+                    if let Ok(Ok(full)) = tokio::time::timeout(UPSTREAM_TIMEOUT * 2, tcp(query, *addr)).await {
                         return Some(full);
                     }
                 }
@@ -28,6 +34,12 @@ pub async fn forward(query: &[u8], upstreams: &[IpAddr]) -> Option<Vec<u8>> {
         }
     }
     None
+}
+
+/// Is this a `.fips` name — fips's own namespace, answered by its responder?
+pub fn is_fips_name(query: &[u8]) -> bool {
+    names_core::synth::parse_query(query)
+        .is_some_and(|q| q.name == "fips" || q.name.ends_with(".fips"))
 }
 
 async fn udp(query: &[u8], addr: SocketAddr) -> std::io::Result<Vec<u8>> {

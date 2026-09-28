@@ -124,7 +124,9 @@ impl Config {
         text.lines()
             .filter_map(|l| l.strip_prefix("search"))
             .flat_map(|rest| rest.split_whitespace().map(str::to_owned))
-            .filter(|d| d != ".")
+            // `fips` is fips's own routing domain on its link: by design,
+            // and never a bound domain (spec §5.2 rejects unknown TLDs).
+            .filter(|d| d != "." && d != "fips")
             .collect()
     }
 
@@ -207,7 +209,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fips-pubdom-cfg-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("resolv.conf");
-        std::fs::write(&f, "# generated\nnameserver ::1\nnameserver 127.0.0.1\nnameserver 192.168.1.1\nnameserver fe80::1%eth0\nsearch lan\n").unwrap();
+        std::fs::write(&f, "# generated\nnameserver ::1\nnameserver 127.0.0.1\nnameserver 192.168.1.1\nnameserver fe80::1%eth0\nsearch lan fips\n").unwrap();
         let cfg = Config { upstreams_from: Some(f), ..Default::default() };
         assert_eq!(cfg.current_upstreams(), vec!["192.168.1.1".parse::<IpAddr>().unwrap(), "fe80::1".parse().unwrap()]);
         assert_eq!(cfg.link_search_domains(), vec!["lan"]);

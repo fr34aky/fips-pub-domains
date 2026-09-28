@@ -112,6 +112,18 @@ the public address again, `-- link: eth0`. Nothing left behind.
 `127.0.0.53`; `resolvectl query` still works because it uses D-Bus, but
 `curl` and `getent` do not. Exclude `lo`.)
 
+## Level 3b — a third node, from the install guide
+
+A fresh Arch/Omarchy desktop following [install.md](install.md) verbatim:
+built with the distribution's Rust, `setup`, the unit. Its first query
+discovered and pinned the domain on its own (`binding verified and pinned
+… method=Dnssec`, 2.1 s), `www` resolved to the mesh, a subdomain that lives
+only on the Internet resolved to its public address, `.fips` names kept
+working through the daemon. Found: the demo zone's `*` wildcard had claimed
+that Internet-only subdomain — the operators guide now says when a wildcard
+is appropriate — and the search-domain warning listed fips's own `fips`
+routing domain, which it no longer does.
+
 ## Level 5 — the phone
 
 Run on a Pixel 9 Pro with fips2go's `names` branch (a debug build from

@@ -35,15 +35,20 @@ firewall and the TUN.
 - **No TCP fallback for step 3.** A step 3 answer is a single CNAME and is
   never truncated; the TCP path would ride on `meshhttp`'s stack and is not
   wired yet.
-- **No mesh relays.** nostr-sdk opens kernel websockets, which the app's UID
-  cannot point at an `fd…` address, so offline discovery through a relay on
-  the mesh is not available on the phone. **Offline on Android means pinned
-  domains only** — verified once online, they keep working.
+- **Mesh relays go through a loopback proxy.** nostr-sdk opens kernel
+  websockets, which the app's UID cannot point at an `fd…` address, so each
+  relay in Settings → "Mesh relays for public names" (`ws://<npub>.fips:port`)
+  gets a listener on loopback, reachable only with a random path token, and
+  every connection is carried over the in-process TCP stack (`meshtcp.rs`).
+  With one configured, an offline phone discovers domains through it and
+  verifies a domain it never saw from the claim's DNSSEC proof.
 - **No explicit online flag.** An unreachable upstream simply takes the
   offline path; `network_hint` flushes the resolver's caches so the next
   lookup re-decides.
 - The whole lookup runs on a 3.5 s budget so the legacy fallback still fits
-  inside bionic's 5 s resolver timeout.
+  inside bionic's 5 s resolver timeout. A lookup that overruns it (offline:
+  TXT timeout, then a mesh relay) finishes in the background and caches,
+  so the application's retry resolves.
 
 ## Verifying on a device
 

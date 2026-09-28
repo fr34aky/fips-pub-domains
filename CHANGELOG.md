@@ -24,12 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and HTTPS/SVCB get NODATA; MX, TXT, SRV and every other type stay legacy
   DNS. Under a wildcard zone they were answered empty, which broke mail
   and SPF lookups from machines running the daemon.
-- Upstream resolvers that disagree on the `_fips-dns` record: validated
-  records now win over any unvalidated majority (only validated answers are
-  counted then), and a tie is no longer broken by list order but treated
-  as disputed, as is a validated denial against unvalidated records. Pins
-  keep resolving; an unpinned domain stays legacy and is asked again a
-  minute later.
+- Upstream resolvers that disagree on the `_fips-dns` record: once any
+  answer validated, only validated answers count (a validated denial
+  included), so a forged or stale unsigned answer cannot outvote a signed
+  zone; a tie is no longer broken by list order but treated as disputed —
+  pins keep resolving, an unpinned domain stays legacy and is asked again a
+  minute later. A record that fails validation counts as no answer.
 - Re-verifying an unchanged binding no longer rewrites the pin file and
   logs "binding verified and pinned" each time.
 - The reachability echo could panic on a scheduling delay; the daemon's

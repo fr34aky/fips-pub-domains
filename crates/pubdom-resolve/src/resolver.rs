@@ -163,6 +163,10 @@ pub struct Resolver<T: TxtSource, C: ClaimSource> {
     /// (negative, 30 s): a browser asks A, AAAA and HTTPS for one name, and
     /// each would otherwise wait out the full echo budget.
     reachable: TtlCache<Npub, bool>,
+    /// Servers that answered step 3 for themselves in the last
+    /// REACHABLE_TTL: proof of reachability without an echo. Separate from
+    /// `reachable` so an echo never passes for a step 3 answer.
+    answered: TtlCache<Npub, ()>,
     /// Zone records by domain, for names asked while the domain's servers
     /// are unreachable (spec §3.3, §6). `None` = no server published one.
     zones: TtlCache<String, Option<ZoneRecord>>,
@@ -196,6 +200,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             step3: TtlCache::new(4096),
             registered: TtlCache::new(1024),
             reachable: TtlCache::new(1024),
+            answered: TtlCache::new(1024),
             zones: TtlCache::new(1024),
             down: TtlCache::new(1024),
             inflight: Mutex::new(HashMap::new()),
@@ -380,6 +385,17 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
                 }
             }
         }
+        if disputed {
+            let then = if matches!(outcome.decision, Decision::Bound(_)) {
+                "keeping the pins"
+            } else {
+                "not over fips"
+            };
+            tracing::info!(
+                domain = d,
+                "upstream resolvers disagree on the TXT record; {then}"
+            );
+        }
         let (cached, ttl) = match outcome.decision {
             Decision::Bound(b) => {
                 let ttl = if disputed {
@@ -393,14 +409,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             }
             Decision::Unverified(b) => (CachedDecision::Use(vec![b], true), cache::RELAY_MISS_TTL),
             Decision::NotOverFips(reason) => {
-                if reason == Reason::Disputed {
-                    tracing::info!(
-                        domain = d,
-                        "not over fips: upstream resolvers disagree on the TXT record"
-                    );
-                } else {
-                    tracing::debug!(domain = d, ?reason, "not over fips");
-                }
+                tracing::debug!(domain = d, ?reason, "not over fips");
                 let ttl = match reason {
                     Reason::NoTxt | Reason::PublicSuffix => cache::TXT_MISS_TTL,
                     Reason::Disputed => cache::TXT_DISPUTED_TTL,
@@ -452,7 +461,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             // The server answered for itself, which proved it reachable for
             // REACHABLE_TTL. Past that, ask it again rather than ping it —
             // the answer is the proof, and servers may filter echo.
-            Some(CachedStep3::Node(n, true)) if self.reachable.get(&n, now) == Some(true) => {
+            Some(CachedStep3::Node(n, true)) if self.answered.get(&n, now).is_some() => {
                 return self.deliverable(q, n, true).await;
             }
             Some(CachedStep3::Node(n, true)) => lapsed = Some(n),
@@ -463,6 +472,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         // window (spec §5.3): the primary stays the primary while it
         // answers, and a failed server is retried once its window expires.
         let mut all_skipped = true;
+        let mut unregistered = Vec::new();
         for (i, server) in servers.iter().enumerate() {
             if self
                 .down
@@ -479,6 +489,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             all_skipped = false;
             if !self.ensure_registered(server.npub).await {
                 tracing::debug!(npub = %server.npub, "domain server not reachable through the local node");
+                unregistered.push(server.npub);
                 self.mark_down(server.npub, crate::now());
                 continue;
             }
@@ -492,7 +503,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
                         // The reply proves the node reachable, for as long as
                         // an echo would: the A query that follows the AAAA
                         // must not need an echo the node may filter.
-                        self.reachable.put(npub, true, REACHABLE_TTL, now);
+                        self.answered.put(npub, (), REACHABLE_TTL, now);
                     }
                     self.step3
                         .put(q.name.clone(), CachedStep3::Node(npub, proven), ttl, now);
@@ -525,7 +536,11 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         // No server answered now, but one did for this name before: its
         // own answer beats the zone record — provided the node answers an
         // echo (its DNS may be down while the node is up).
+        // Only a server still pinned, and not one the local node just failed
+        // to register (that would wait out the same timeout again).
         if let Some(n) = lapsed
+            && servers.iter().any(|s| s.npub == n)
+            && !unregistered.contains(&n)
             && let Some(n) = self.deliverable(q, n, false).await
         {
             return Some(n);
@@ -573,9 +588,8 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
     fn mark_down(&self, npub: Npub, now: u64) {
         // The streak is forgotten once the entry expires: a server that has
         // not failed for a whole maximum window starts over.
-        // Whatever its last answer proved no longer holds: the zone-record
-        // fallback must echo it like any other target.
-        self.reachable.remove(&npub);
+        // Whatever its last answer proved no longer holds.
+        self.answered.remove(&npub);
         let prev = self.down.get(&npub, now);
         if prev.is_some_and(|d| now < d.retry_at) {
             // Already marked for this outage by a concurrent lookup of
@@ -1378,36 +1392,50 @@ mod tests {
         );
         // Once that proof has lapsed, the server is asked again — not
         // pinged — and answers.
-        r.reachable.remove(&npub(1));
+        r.answered.remove(&npub(1));
         let q = build_query(3, "www.example.org", QTYPE_A).unwrap();
         assert!(matches!(r.lookup(&q).await, LookupResult::Answer(_)));
         assert!(mesh.echoes.lock().unwrap().is_empty());
         assert_eq!(mesh.queries.lock().unwrap().len(), 2, "re-asked");
-        // Re-asking fails (the server is in its backoff), but the node
-        // still answers an echo: the cached answer is used.
-        let (r, mesh) = resolver(
-            HashMap::from([("example.org".to_string(), hit(npub(1)))]),
-            vec![claim_event(npub(1), "example.org")],
-            Arc::new(MemoryPinStore::new()),
-            vec![],
-            false,
-        );
-        let q = build_query(1, "www.example.org", QTYPE_AAAA).unwrap();
-        assert!(matches!(r.lookup(&q).await, LookupResult::Answer(_)));
-        r.reachable.remove(&npub(1));
+        // A server that fails loses its proof.
+        assert!(r.answered.get(&npub(1), crate::now()).is_some());
         r.mark_down(npub(1), crate::now());
-        let q = build_query(2, "www.example.org", QTYPE_A).unwrap();
-        assert!(matches!(r.lookup(&q).await, LookupResult::Answer(_)));
-        assert_eq!(
-            mesh.queries.lock().unwrap().len(),
-            1,
-            "not re-asked in backoff"
-        );
-        assert_eq!(*mesh.echoes.lock().unwrap(), vec![npub(1)]);
-        // A server that fails loses its proof: the zone-record fallback
-        // must echo it.
-        r.mark_down(npub(1), crate::now());
-        assert_eq!(r.reachable.get(&npub(1), crate::now()), None);
+        assert!(r.answered.get(&npub(1), crate::now()).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_lapsed_self_answer_needs_an_echo_when_re_asking_fails() {
+        // The proof lapsed and the server is in its backoff: the cached
+        // answer is used if the node answers an echo (its DNS may be down
+        // while the node is up), and not otherwise.
+        for (echo, expect_answer) in [(true, true), (false, false)] {
+            let unreachable = if echo { vec![] } else { vec![npub(1)] };
+            let (r, mesh) = resolver(
+                HashMap::from([("example.org".to_string(), hit(npub(1)))]),
+                vec![claim_event(npub(1), "example.org")],
+                Arc::new(MemoryPinStore::new()),
+                unreachable,
+                false,
+            );
+            let q = build_query(1, "www.example.org", QTYPE_AAAA).unwrap();
+            assert!(matches!(r.lookup(&q).await, LookupResult::Answer(_)));
+            r.answered.remove(&npub(1));
+            r.mark_down(npub(1), crate::now());
+            let q = build_query(2, "www.example.org", QTYPE_A).unwrap();
+            assert_eq!(
+                matches!(r.lookup(&q).await, LookupResult::Answer(_)),
+                expect_answer,
+                "echo {echo}"
+            );
+            assert_eq!(
+                mesh.queries.lock().unwrap().len(),
+                1,
+                "not re-asked in backoff"
+            );
+            assert_eq!(*mesh.echoes.lock().unwrap(), vec![npub(1)]);
+            // An echo does not pass for a step 3 answer.
+            assert!(r.answered.get(&npub(1), crate::now()).is_none());
+        }
     }
 
     #[tokio::test]

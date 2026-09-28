@@ -23,4 +23,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
-      - run: cargo check -p pubdom-core -p pubdom-resolve --target aarch64-linux-android
+      # ring (via hickory's DNSSEC feature) compiles C for the target: point
+      # cc and the linker at the runner's preinstalled NDK, API 24 like fips2go.
+      - run: |
+          BIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          test -x "$BIN/aarch64-linux-android24-clang" || { echo "NDK clang not found in $BIN" >&2; ls "$BIN" | head; exit 1; }
+          export CC_aarch64_linux_android="$BIN/aarch64-linux-android24-clang"
+          export AR_aarch64_linux_android="$BIN/llvm-ar"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$BIN/aarch64-linux-android24-clang"
+          cargo check -p pubdom-core -p pubdom-resolve --target aarch64-linux-android

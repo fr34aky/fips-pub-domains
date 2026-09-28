@@ -3,6 +3,6 @@
 # truncation (RFC 7766). Port is the claim's `service fips-dns <port>`.
 #
 #   sudo cp fips-pubdom.nft /etc/fips/fips.d/fips-pubdom.nft
-#   sudo systemctl reload fips-firewall
+#   sudo systemctl try-reload-or-restart fips-firewall
 udp dport 5355 accept comment "fips-pubdom domain DNS server"
 tcp dport 5355 accept comment "fips-pubdom domain DNS server (TC fallback)"

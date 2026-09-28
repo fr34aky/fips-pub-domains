@@ -73,7 +73,7 @@ for each role. In short:
 
 ```sh
 cargo build --release
-sudo install -m755 target/release/fips-pubdom{,d,-server} /usr/bin/
+sudo install -m755 target/release/fips-pubdom target/release/fips-pubdomd target/release/fips-pubdom-server /usr/bin/
 ```
 
 ### Serve a domain
@@ -92,7 +92,7 @@ names:
 ```
 
 ```sh
-sudo cp packaging/common/fips-pubdom.nft /etc/fips/fips.d/ && sudo systemctl reload fips-firewall
+sudo cp packaging/common/fips-pubdom.nft /etc/fips/fips.d/ && sudo systemctl try-reload-or-restart fips-firewall
 fips-pubdom-server --key /etc/fips/fips.key txt --zone example.org.yaml      # → the TXT record to add at your DNS hoster
 fips-pubdom-server --key /etc/fips/fips.key serve --zone example.org.yaml --publish --relay wss://…
 ```

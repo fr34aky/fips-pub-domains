@@ -6,19 +6,12 @@ everything else is forwarded to the resolvers the machine had before,
 unchanged. On Android the same logic lives inside fips2go
 ([android.md](android.md)).
 
-## Install (Linux, systemd-resolved)
+## What `setup` does (Linux, systemd-resolved)
 
-Prerequisites and the build are in [install.md](install.md); in short:
-
-```sh
-cargo build --release
-sudo install -m755 target/release/fips-pubdomd target/release/fips-pubdom /usr/bin/
-sudo install -m644 packaging/systemd/fips-pubdom.service /etc/systemd/system/
-
-sudo fips-pubdomd setup            # writes /etc/fips-pubdom/config.yaml and the resolved drop-in
-sudo systemctl daemon-reload
-sudo systemctl enable --now fips-pubdom
-```
+Building and installing — binaries, unit, `sudo fips-pubdomd setup`,
+enabling the service — is one procedure, kept in one place:
+[install.md](install.md). This section explains the OS integration that
+`setup` performs.
 
 `setup` snapshots the machine's current upstream resolvers, writes
 `/etc/systemd/resolved.conf.d/zz-fips-pubdom.conf`:

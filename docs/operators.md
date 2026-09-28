@@ -62,7 +62,7 @@ drop-in does not allow:
 
 ```sh
 sudo cp packaging/common/fips-pubdom.nft /etc/fips/fips.d/fips-pubdom.nft
-sudo systemctl reload fips-firewall
+sudo systemctl try-reload-or-restart fips-firewall    # no-op if you do not run fips's firewall
 sudo nft list chain inet fips inbound | grep 5355     # two rules: udp and tcp
 ```
 
@@ -83,8 +83,10 @@ instead, for other tooling. A relay may gate writes on a pubkey allowlist —
 strfry's write-policy plugin, for instance — in which case the node's hex
 pubkey must be on it.
 
-`packaging/systemd/fips-pubdom-server.service` runs `serve` for every zone
-in `/etc/fips-pubdom/zones/` as group `fips`.
+`packaging/systemd/fips-pubdom-server.service` runs one `serve` for all the
+zones in `/etc/fips-pubdom/zones/` (same port for all) as group `fips`;
+`--publish --relay …` go into `/etc/fips-pubdom/server.env` as
+`PUBDOM_SERVER_ARGS=…` ([install.md](install.md)).
 
 ## Checking from another node
 

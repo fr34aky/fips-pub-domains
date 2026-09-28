@@ -13,10 +13,11 @@ depends on the role of the machine:
 
 ## Prerequisites
 
-- **Rust** (stable, 1.88 or newer for let-chains):
-  `curl https://sh.rustup.rs -sSf | sh` on Linux/macOS, or the distribution
-  package (`rust`/`cargo` on Arch, Debian ≥ 13, Fedora; older Debian/Ubuntu
-  packages are too old — use rustup).
+- **Rust 1.88 or newer** (the code uses let-chains). The safe route is
+  rustup: `curl https://sh.rustup.rs -sSf | sh`. Distribution packages work
+  only where they are current enough — Arch and Fedora usually are; Debian
+  13 ships 1.85 and Ubuntu LTS releases older still, so use rustup there.
+  `rustc --version` tells you.
 - **git**, to clone.
 - **fips** installed and running on the machine — both roles talk to the
   local node: the server binds the node's fips address, the daemon asks
@@ -61,16 +62,22 @@ sudo install -m755 target/release/fips-pubdom /usr/bin/          # optional, for
 sudo install -m644 packaging/systemd/fips-pubdom-server.service /etc/systemd/system/
 sudo mkdir -p /etc/fips-pubdom/zones
 
-# firewall: fips's baseline drops everything inbound on fips0 unless allowed
+# firewall: if you run fips's baseline firewall (fips-firewall.service, off
+# by default in fips's packages), it drops everything inbound on fips0
+# unless a drop-in allows it
 sudo cp packaging/common/fips-pubdom.nft /etc/fips/fips.d/fips-pubdom.nft
-sudo systemctl reload fips-firewall
+sudo systemctl try-reload-or-restart fips-firewall
 ```
 
 Then write the zone file, add the TXT record and start the unit — the
 whole procedure is in [operators.md](operators.md). To publish the claim
-automatically, add `--publish --relay wss://…` to the unit's `ExecStart`
-(`sudo systemctl edit fips-pubdom-server`) or run `fips-pubdom-server
-publish` by hand.
+automatically, give the unit the extra flags through its environment file
+(it is read if present, so the unit runs without it too):
+
+```sh
+echo "PUBDOM_SERVER_ARGS=--publish --relay wss://relay.example --relay ws://npub1….fips:80" \
+    | sudo tee /etc/fips-pubdom/server.env
+```
 
 ```sh
 sudo systemctl daemon-reload
@@ -78,9 +85,10 @@ sudo systemctl enable --now fips-pubdom-server
 systemctl status fips-pubdom-server
 ```
 
-The unit runs as group `fips` (to read the key), one process for every
-`/etc/fips-pubdom/zones/*.yaml`, listening on the node's fips address port
-5355 (UDP and TCP).
+The unit runs as group `fips` (to read the key): **one process serving
+every** `/etc/fips-pubdom/zones/*.yaml`, all on the same port — the node's
+fips address, 5355 by default, UDP and TCP. Zones that name different
+`port:` values need separate processes.
 
 ## Install: the desktop resolver
 
@@ -93,8 +101,12 @@ sudo fips-pubdomd setup                 # systemd-resolved: writes the config an
 sudo systemctl daemon-reload
 sudo systemctl enable --now fips-pubdom
 resolvectl query peer.fips              # .fips still works
-fips-pubdom verify example.org          # a bound domain verifies
+sudo fips-pubdom verify example.org     # a bound domain verifies
 ```
+
+On a daemon host the CLI shares the daemon's config and therefore its pin
+file under `/var/lib/fips-pubdom/`, which is root-owned: run it with `sudo`,
+or give yourself a user-level config as in "the CLI only" below.
 
 `setup` currently supports systemd-resolved (Ubuntu, Fedora, Arch, Debian
 with resolved); other backends are on the [roadmap](roadmap.md). Everything
@@ -102,11 +114,18 @@ with resolved); other backends are on the [roadmap](roadmap.md). Everything
 behaviour and troubleshooting: [daemon.md](daemon.md).
 
 To run the daemon without touching the OS resolver — for a look, or for
-tests — start it on loopback and query it directly:
+tests — give it a config with a writable pin path and explicit upstreams
+(without upstreams it considers itself offline and answers SERVFAIL for
+every legacy name), then query it directly:
 
 ```sh
+cat > ./config.yaml <<'EOF'
+pins: ./pins.json
+upstreams: ["9.9.9.9", "1.1.1.1"]
+EOF
 fips-pubdomd --config ./config.yaml run     # listens on [::1]:5356 / 127.0.0.1:5356
 dig @::1 -p 5356 www.example.org AAAA
+dig @::1 -p 5356 peer.fips AAAA
 ```
 
 ## Install: the CLI only
@@ -145,19 +164,23 @@ the file format is stable within a phase.
 ```sh
 sudo systemctl disable --now fips-pubdom fips-pubdom-server
 sudo fips-pubdomd teardown
-sudo rm -f /usr/bin/fips-pubdom{,d,-server} /etc/systemd/system/fips-pubdom{,-server}.service /etc/fips/fips.d/fips-pubdom.nft
-sudo systemctl daemon-reload && sudo systemctl reload fips-firewall
-sudo rm -rf /etc/fips-pubdom /var/lib/fips-pubdom          # config, zones and pins
+sudo rm -f /usr/bin/fips-pubdom /usr/bin/fips-pubdomd /usr/bin/fips-pubdom-server
+sudo rm -f /etc/systemd/system/fips-pubdom.service /etc/systemd/system/fips-pubdom-server.service
+sudo rm -f /etc/fips/fips.d/fips-pubdom.nft
+sudo systemctl daemon-reload
+sudo systemctl try-reload-or-restart fips-firewall
+sudo rm -rf /etc/fips-pubdom /var/lib/fips-pubdom          # config, zones, server.env and pins
 ```
 
 ## Android
 
 There is nothing to install from this repository: fips2go embeds the
-library crates. Build fips2go's `names` branch (`./build-native.sh
-arm64-v8a`, then `gradle assembleDebug` — see fips2go's own CLAUDE.md for
-the toolchain) and install the APK; the feature is on by default under
-Settings → *Public domain names over fips*. Details and limits:
-[android.md](android.md).
+library crates. Build fips2go's `names` branch as its README's "Build"
+section describes — the native shim with `./build-native.sh arm64-v8a`
+(needs the Android NDK), then the APK from the `android/` directory with
+Gradle and JDK 17 — and install it with `adb install`. The feature is on by
+default under Settings → *Public domain names over fips*. Details and
+limits: [android.md](android.md).
 
 ## Other platforms
 

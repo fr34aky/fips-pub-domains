@@ -39,6 +39,10 @@ the Android-specific parts that already live there (`shim/src/names.rs`,
 - No `cfg(target_os)` in `pubdom-core` or `pubdom-resolve` (CI enforces).
 - `cargo test --workspace` must stay green; the policy tables in
   `pubdom-core` are the place to add a case before changing behaviour.
+- **Every PR gets a code review before it merges** (`/code-review high`
+  on the branch; findings fixed on the branch or listed in the PR body).
+  Merge only when the checks *and* the review are clean — user rule,
+  2026-09-28.
 
 ## Layout
 

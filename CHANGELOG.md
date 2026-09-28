@@ -11,8 +11,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The `fips-pubdom-server` systemd unit never started: systemd expands
   `%s` in `ExecStart` to the service user's shell and `$z` itself, so the
-  server was told to load a zone file named `/bin/sh`. The specifier and
-  the shell variables are escaped now.
+  server was told to load a zone file named `/bin/sh`. The command no
+  longer needs a specifier and escapes the shell's variables; zone paths
+  may contain spaces, relay URLs are not glob-expanded, and with no zone
+  file the unit stops once instead of restarting forever. **Existing
+  installs must copy the unit again** (`sudo install -m644
+  packaging/systemd/fips-pubdom-server.service /etc/systemd/system/ &&
+  sudo systemctl daemon-reload`); the upgrade steps in docs/install.md
+  now include this.
+
+### Changed
+
+- The server unit runs as an unprivileged dynamic user in group `fips`
+  instead of root.
 
 ## [0.2.0] - 2026-09-28
 

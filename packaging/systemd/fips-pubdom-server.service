@@ -6,14 +6,22 @@ Requires=fips.service
 
 [Service]
 Type=simple
-# Reads the node key (group fips), listens on the node's fips address.
-Group=fips
+# Not root: a throwaway user that can read the node key (group fips) and
+# listens on the node's fips address (port 5355, no privilege needed).
+DynamicUser=yes
+SupplementaryGroups=fips
 # Optional extra flags for `serve`, e.g. PUBDOM_SERVER_ARGS=--publish --relay wss://…
 # (docs/install.md). The file is optional; the unit runs without it.
 EnvironmentFile=-/etc/fips-pubdom/server.env
-ExecStart=/bin/sh -c 'exec /usr/bin/fips-pubdom-server --key /etc/fips/fips.key serve $$(for z in /etc/fips-pubdom/zones/*.yaml; do printf -- "--zone %%s " "$$z"; done) $$PUBDOM_SERVER_ARGS'
+# One --zone per file, built as positional arguments so paths keep their
+# spaces; globbing off before the extra flags (a relay URL may hold ? or *).
+# systemd expands % and $ itself: every one meant for the shell is doubled.
+# A zone file added later needs a restart; edits to a loaded one do not.
+ExecStart=/bin/sh -c 'set --; for z in /etc/fips-pubdom/zones/*.yaml; do [ -e "$$z" ] || { echo "no zone files in /etc/fips-pubdom/zones" >&2; exit 78; }; set -- "$$@" --zone "$$z"; done; set -f; exec /usr/bin/fips-pubdom-server --key /etc/fips/fips.key serve "$$@" $$PUBDOM_SERVER_ARGS'
 Restart=on-failure
 RestartSec=5
+# 78 (EX_CONFIG): no zone to serve — retrying will not help.
+RestartPreventExitStatus=78
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

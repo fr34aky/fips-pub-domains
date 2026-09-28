@@ -87,10 +87,13 @@ sudo systemctl enable --now fips-pubdom-server
 systemctl status fips-pubdom-server
 ```
 
-The unit runs as group `fips` (to read the key): **one process serving
-every** `/etc/fips-pubdom/zones/*.yaml`, all on the same port — the node's
+The unit runs as an unprivileged throwaway user in group `fips` (to read
+the key): **one process serving every** `/etc/fips-pubdom/zones/*.yaml`, all on the same port — the node's
 fips address, 5355 by default, UDP and TCP. Zones that name different
-`port:` values need separate processes.
+`port:` values need separate processes. A zone file added to the directory is
+picked up at the next `systemctl restart fips-pubdom-server`; edits to a
+loaded one are re-read on their own. With no zone file the unit stops
+with "no zone files in /etc/fips-pubdom/zones" instead of retrying.
 
 ## Install: the desktop resolver
 
@@ -150,12 +153,15 @@ local fips node — and prints the answer an application would get;
 
 ## Upgrading
 
-Rebuild, reinstall the binaries, restart the units:
+Rebuild, reinstall the binaries and the units, restart:
 
 ```sh
 git pull && cargo build --release
 sudo install -m755 target/release/fips-pubdom-server target/release/fips-pubdomd target/release/fips-pubdom /usr/bin/
-sudo systemctl restart fips-pubdom-server fips-pubdom     # whichever are installed
+# the units too — a fixed unit only takes effect once copied (whichever are installed):
+sudo install -m644 packaging/systemd/fips-pubdom-server.service packaging/systemd/fips-pubdom.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl restart fips-pubdom-server fips-pubdom
 ```
 
 Pins (`/var/lib/fips-pubdom/pins.json`) and the config survive upgrades;

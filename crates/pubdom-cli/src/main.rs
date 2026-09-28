@@ -104,8 +104,22 @@ async fn main() -> Result<()> {
             let domain =
                 pubdom_core::domain::normalize(&domain).ok_or_else(|| anyhow!("bad domain"))?;
             let pins = FilePinStore::open(&cfg.pins)?;
-            let pin = pins.get(&domain);
-            println!("pin: {pin:?}");
+            let pinned = pins.get(&domain);
+            match pinned.len() {
+                0 => println!("pins: none"),
+                _ => {
+                    for (i, p) in pinned.iter().enumerate() {
+                        println!(
+                            "pin {}: {}:{} {:?} verified_at {}",
+                            i + 1,
+                            p.npub,
+                            p.port,
+                            p.method,
+                            p.verified_at
+                        );
+                    }
+                }
+            }
             let (txt, ttl) = if upstreams.is_empty() {
                 (TxtLookup::Unreachable, None)
             } else {
@@ -135,7 +149,7 @@ async fn main() -> Result<()> {
             }
             let out = policy::decide(Input {
                 domain: &domain,
-                pin,
+                pins: pinned,
                 txt,
                 claims: &claims,
                 now: pubdom_resolve::now(),
@@ -143,7 +157,7 @@ async fn main() -> Result<()> {
                 proofs: &NoProofs,
             });
             println!("decision: {:?}", out.decision);
-            println!("pin update: {:?} (not applied by `verify`)", out.pin_update);
+            println!("pin changes: {:?} (not applied by `verify`)", out.changes);
             relays.shutdown().await;
         }
         Cmd::Claims { domain } => {
@@ -164,12 +178,13 @@ async fn main() -> Result<()> {
             let domain =
                 pubdom_core::domain::normalize(&domain).ok_or_else(|| anyhow!("bad domain"))?;
             let pins = FilePinStore::open(&cfg.pins)?;
-            let Some(pin) = pins.get(&domain) else {
+            let pinned = pins.get(&domain);
+            if pinned.is_empty() {
                 println!(
-                    "{domain}: not pinned; a zone record is only trusted from the pinned server"
+                    "{domain}: not pinned; a zone record is only trusted from a pinned server"
                 );
                 return Ok(());
-            };
+            }
             let relays =
                 RelayClient::new(&cfg.public_relays, &cfg.mesh_relays, Duration::from_secs(3))
                     .await;
@@ -178,18 +193,21 @@ async fn main() -> Result<()> {
             } else {
                 RelayScope::AfterHit
             };
-            let events = relays.fetch_zone(&domain, &pin.npub, scope).await;
-            match policy::ingest_zone(&pins, &domain, pin.npub, &events, pubdom_resolve::now()) {
-                Some(z) => {
-                    println!(
-                        "{domain}: zone record by {} created_at {}",
-                        z.author, z.created_at
-                    );
-                    for (label, target) in &z.names {
-                        println!("  {label:<12} {target:?}");
+            for pin in &pinned {
+                let events = relays.fetch_zone(&domain, &pin.npub, scope).await;
+                match policy::ingest_zone(&pins, &domain, pin.npub, &events, pubdom_resolve::now())
+                {
+                    Some(z) => {
+                        println!(
+                            "{domain}: zone record by {} created_at {}",
+                            z.author, z.created_at
+                        );
+                        for (label, target) in &z.names {
+                            println!("  {label:<12} {target:?}");
+                        }
                     }
+                    None => println!("{domain}: no zone record from {}", pin.npub),
                 }
-                None => println!("{domain}: no zone record from {}", pin.npub),
             }
             relays.shutdown().await;
         }

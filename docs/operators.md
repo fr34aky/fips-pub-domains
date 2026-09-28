@@ -97,6 +97,24 @@ zones in `/etc/fips-pubdom/zones/` (same port for all) as group `fips`;
 `--publish --relay …` go into `/etc/fips-pubdom/server.env` as
 `PUBDOM_SERVER_ARGS=…` ([install.md](install.md)).
 
+## Redundant servers
+
+Run the server on two (or more) nodes with the **same zone file**, each
+with its own key, and add one TXT record per node:
+
+```
+_fips-dns.example.org.  TXT  "v=fips1 npub=<node A> port=5355"
+_fips-dns.example.org.  TXT  "v=fips1 npub=<node B> port=5355"
+```
+
+Each node publishes its own claim and zone record (`serve --publish`).
+Clients pin every server the record names, ask them in order, fail over
+when one does not answer, and retry a failed server after a growing
+backoff (5 min → 15 → 45 → 3 h). Names that point at `self` differ per
+server — `www: self` on node A resolves to node A when A answers and to
+node B when only B does — so either keep such names identical in meaning
+(the same site on both nodes) or name the node explicitly.
+
 ## Checking from another node
 
 From any linked fips node, with the server's fips address:

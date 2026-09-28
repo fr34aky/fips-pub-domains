@@ -1,15 +1,15 @@
 [workspace]
 resolver = "2"
-members = ["crates/names-core", "crates/names-resolve", "crates/names-server", "crates/names-daemon", "crates/names-cli"]
+members = ["crates/pubdom-core", "crates/pubdom-resolve", "crates/pubdom-server", "crates/pubdom-daemon", "crates/pubdom-cli"]
 
 [workspace.package]
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/fr34aky/fips-names"
+repository = "https://github.com/fr34aky/fips-pub-domains"
 
 [workspace.dependencies]
-names-core = { path = "crates/names-core" }
-names-resolve = { path = "crates/names-resolve" }
+pubdom-core = { path = "crates/pubdom-core" }
+pubdom-resolve = { path = "crates/pubdom-resolve" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

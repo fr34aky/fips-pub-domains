@@ -16,10 +16,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: |
-          if grep -rn 'cfg(target_os\|cfg(unix\|cfg(windows' crates/names-core crates/names-resolve; then
+          if grep -rn 'cfg(target_os\|cfg(unix\|cfg(windows' crates/pubdom-core crates/pubdom-resolve; then
             echo "platform-specific code in a library crate" >&2; exit 1
           fi
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
-      - run: cargo check -p names-core -p names-resolve --target aarch64-linux-android
+      - run: cargo check -p pubdom-core -p pubdom-resolve --target aarch64-linux-android

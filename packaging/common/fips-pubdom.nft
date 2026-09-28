@@ -1,0 +1,8 @@
+# fips-pubdom — the domain's fips DNS server (step 3 of docs/domain-binding.md),
+# reached by mesh peers on the node's fips0 address. UDP first, TCP on
+# truncation (RFC 7766). Port is the claim's `service fips-dns <port>`.
+#
+#   sudo cp fips-pubdom.nft /etc/fips/fips.d/fips-pubdom.nft
+#   sudo systemctl reload fips-firewall
+udp dport 5355 accept comment "fips-pubdom domain DNS server"
+tcp dport 5355 accept comment "fips-pubdom domain DNS server (TC fallback)"

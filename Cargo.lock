@@ -1127,91 +1127,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "names-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "names-core",
- "names-resolve",
- "nostr-sdk",
- "serde",
- "serde_json",
- "serde_yaml",
- "simple-dns",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "names-core"
-version = "0.1.0"
-dependencies = [
- "bech32",
- "hex",
- "psl",
- "serde",
- "serde_json",
- "sha2",
- "simple-dns",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "names-daemon"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "names-core",
- "names-resolve",
- "nostr-sdk",
- "serde",
- "serde_json",
- "serde_yaml",
- "simple-dns",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "names-resolve"
-version = "0.1.0"
-dependencies = [
- "futures",
- "hickory-resolver",
- "names-core",
- "nostr-sdk",
- "serde",
- "serde_json",
- "serde_yaml",
- "simple-dns",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "names-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "names-core",
- "names-resolve",
- "nostr-sdk",
- "serde",
- "serde_json",
- "serde_yaml",
- "simple-dns",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "ndk-context"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1477,6 +1392,91 @@ name = "psl-types"
 version = "2.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
+
+[[package]]
+name = "pubdom-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "nostr-sdk",
+ "pubdom-core",
+ "pubdom-resolve",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "simple-dns",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "pubdom-core"
+version = "0.1.0"
+dependencies = [
+ "bech32",
+ "hex",
+ "psl",
+ "serde",
+ "serde_json",
+ "sha2",
+ "simple-dns",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "pubdom-daemon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "nostr-sdk",
+ "pubdom-core",
+ "pubdom-resolve",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "simple-dns",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "pubdom-resolve"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "hickory-resolver",
+ "nostr-sdk",
+ "pubdom-core",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "simple-dns",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "pubdom-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "nostr-sdk",
+ "pubdom-core",
+ "pubdom-resolve",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "simple-dns",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "quote"
@@ -2079,9 +2079,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-rustls"
-version = "0.26.5"
+version = "0.26.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0c85f2c3ef0b1cd58b36682f4b17aaa995f0e5db534d85692b4903abce21f67"
+checksum = "c9cc2678c2cdd569ef8215e2afd7954ada2ae20b4fdd2c5fe6139a3b02d105db"
 dependencies = [
  "rustls",
  "tokio",

@@ -1,0 +1,23 @@
+[Unit]
+Description=fips-pubdom resolver: public domain names over fips
+Documentation=https://github.com/fr34aky/fips-pub-domains
+After=network-online.target fips.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/fips-pubdomd run
+Restart=on-failure
+RestartSec=2
+# Loopback listener, pin file under /var/lib, nothing else.
+StateDirectory=fips-pubdom
+ConfigurationDirectory=fips-pubdom
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/fips-pubdom
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target

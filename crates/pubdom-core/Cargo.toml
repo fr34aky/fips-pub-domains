@@ -1,0 +1,20 @@
+[package]
+name = "pubdom-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Policy core for resolving public domain names to fips nodes: no I/O"
+
+# Rule (docs/plan-platforms.md §1): nothing platform-specific in here. The
+# resolver on Android, the daemon on desktops and the server all share this
+# crate, so it must build for every target without cfg(target_os).
+[dependencies]
+bech32 = "0.11"
+hex = "0.4"
+psl = "2"
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+simple-dns = "0.11"
+thiserror.workspace = true

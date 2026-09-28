@@ -1,0 +1,24 @@
+[package]
+name = "pubdom-server"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "fips-pubdom-server"
+path = "src/main.rs"
+
+[dependencies]
+pubdom-core.workspace = true
+pubdom-resolve.workspace = true
+nostr-sdk = { version = "0.44", default-features = false }
+simple-dns = "0.11"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net", "macros", "fs", "signal", "io-util"] }
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

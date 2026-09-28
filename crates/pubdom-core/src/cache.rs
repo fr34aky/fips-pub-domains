@@ -75,6 +75,8 @@ impl<K: Eq + Hash + Clone, V: Clone> TtlCache<K, V> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn remove_if_only_removes_live_matching_entries() {
         let c: TtlCache<u8, bool> = TtlCache::new(8);
@@ -84,13 +86,13 @@ mod tests {
         c.remove_if(&2, 105, |v| *v);
         assert_eq!(c.get(&1, 105), None);
         assert_eq!(c.get(&2, 105), Some(false));
-        // Expired: left alone, and still invisible.
+        // Expired: `pred` is not even asked, and the entry stays for the
+        // pressure sweep.
         c.put(3, true, Duration::from_secs(1), 100);
-        c.remove_if(&3, 200, |_| true);
+        c.remove_if(&3, 200, |_| panic!("asked about an expired entry"));
+        assert!(c.inner.lock().unwrap().contains_key(&3));
         assert_eq!(c.get(&3, 200), None);
     }
-
-    use super::*;
 
     #[test]
     fn expires_and_bounds() {

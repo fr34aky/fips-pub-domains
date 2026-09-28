@@ -30,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   zone; a tie is no longer broken by list order but treated as disputed —
   pins keep resolving, an unpinned domain stays legacy and is asked again a
   minute later.
+- A denial from a signed zone using more NSEC3 iterations than the
+  validator accepts (insecure by RFC 9276) counted as a failed upstream,
+  sending the domain down the offline path; it is an unvalidated denial.
+  Every form of answer that fails DNSSEC validation counts like no answer,
+  and is logged as such.
 - Re-verifying an unchanged binding no longer rewrites the pin file and
   logs "binding verified and pinned" each time.
 - The reachability echo could panic on a scheduling delay; the daemon's

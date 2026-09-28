@@ -67,7 +67,9 @@
 - Mesh relays are desktop-only; on Android offline means pinned domains.
 - When DNS fails while the node believes it is online (every upstream
   timing out, or answers failing DNSSEC validation — a router stripping
-  DNSSEC records does that for every signed zone), an unpinned domain is
+  DNSSEC records does that for every zone under a signed TLD, unsigned
+  domains included, since the proof of an insecure delegation is stripped
+  too), an unpinned domain is
   looked up on the mesh relays and the decision is cached for an hour.
   A shorter retry would recover sooner from a hiccup but ask the relays
   more often; the balance is open.

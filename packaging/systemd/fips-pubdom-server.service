@@ -11,7 +11,7 @@ Group=fips
 # Optional extra flags for `serve`, e.g. PUBDOM_SERVER_ARGS=--publish --relay wss://…
 # (docs/install.md). The file is optional; the unit runs without it.
 EnvironmentFile=-/etc/fips-pubdom/server.env
-ExecStart=/bin/sh -c 'exec /usr/bin/fips-pubdom-server --key /etc/fips/fips.key serve $(for z in /etc/fips-pubdom/zones/*.yaml; do printf -- "--zone %s " "$z"; done) $PUBDOM_SERVER_ARGS'
+ExecStart=/bin/sh -c 'exec /usr/bin/fips-pubdom-server --key /etc/fips/fips.key serve $$(for z in /etc/fips-pubdom/zones/*.yaml; do printf -- "--zone %%s " "$$z"; done) $$PUBDOM_SERVER_ARGS'
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=yes

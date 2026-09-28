@@ -124,9 +124,10 @@ pub struct Resolver<T: TxtSource, C: ClaimSource> {
     decisions: TtlCache<String, CachedDecision>,
     step3: TtlCache<String, CachedStep3>,
     registered: TtlCache<Npub, ()>,
-    /// Nodes that answered an echo recently: the check is per name target
-    /// and would otherwise run on every uncached lookup.
-    reachable: TtlCache<Npub, ()>,
+    /// Nodes that answered an echo recently (positive, 2 min) or did not
+    /// (negative, 30 s): a browser asks A, AAAA and HTTPS for one name, and
+    /// each would otherwise wait out the full echo budget.
+    reachable: TtlCache<Npub, bool>,
     /// Single-flight per domain: a browser's first visit fires A, AAAA and
     /// HTTPS queries at once, and only one of them should pay for the TXT
     /// and relay round trips (and write the pin).
@@ -408,15 +409,14 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
 
     async fn ensure_reachable(&self, npub: Npub) -> bool {
         let now = crate::now();
-        if self.reachable.get(&npub, now).is_some() {
-            return true;
+        if let Some(known) = self.reachable.get(&npub, now) {
+            return known;
         }
         let mesh = self.mesh.clone();
         let t = self.cfg.reach_timeout;
         let ok = tokio::task::spawn_blocking(move || mesh.reachable(npub, t)).await.unwrap_or(false);
-        if ok {
-            self.reachable.put(npub, (), Duration::from_secs(120), now);
-        }
+        let ttl = if ok { Duration::from_secs(120) } else { Duration::from_secs(30) };
+        self.reachable.put(npub, ok, ttl, now);
         ok
     }
 
@@ -480,6 +480,7 @@ mod tests {
     struct FakeMesh {
         queries: Mutex<Vec<SocketAddrV6>>,
         registered: Mutex<Vec<Npub>>,
+        echoes: Mutex<Vec<Npub>>,
         unreachable: Vec<Npub>,
     }
     impl MeshDns for FakeMesh {
@@ -502,6 +503,7 @@ mod tests {
             true
         }
         fn reachable(&self, npub: Npub, _: Duration) -> bool {
+            self.echoes.lock().unwrap().push(npub);
             !self.unreachable.contains(&npub)
         }
     }
@@ -517,7 +519,7 @@ mod tests {
         unreachable: Vec<Npub>,
         allow_unverified: bool,
     ) -> (Resolver<FakeTxt, FakeClaims>, Arc<FakeMesh>) {
-        let mesh = Arc::new(FakeMesh { queries: Mutex::new(vec![]), registered: Mutex::new(vec![]), unreachable });
+        let mesh = Arc::new(FakeMesh { queries: Mutex::new(vec![]), registered: Mutex::new(vec![]), echoes: Mutex::new(vec![]), unreachable });
         let cfg = ResolverConfig { allow_unverified_offline: allow_unverified, ..Default::default() };
         let r = Resolver::new(cfg, pins, FakeTxt(Mutex::new(txt)), FakeClaims(claims, Mutex::new(vec![])), mesh.clone());
         (r, mesh)
@@ -559,7 +561,7 @@ mod tests {
                 (TxtLookup::Unreachable, None)
             }
         }
-        let mesh = Arc::new(FakeMesh { queries: Mutex::new(vec![]), registered: Mutex::new(vec![]), unreachable: vec![] });
+        let mesh = Arc::new(FakeMesh { queries: Mutex::new(vec![]), registered: Mutex::new(vec![]), echoes: Mutex::new(vec![]), unreachable: vec![] });
         let r = Resolver::new(
             ResolverConfig::default(),
             Arc::new(MemoryPinStore::new()),
@@ -626,7 +628,7 @@ mod tests {
     #[tokio::test]
     async fn unreachable_target_node_is_passthrough() {
         // git → npub 2, which the local node cannot reach.
-        let (r, _) = resolver(
+        let (r, mesh) = resolver(
             HashMap::from([("example.org".to_string(), hit(npub(1)))]),
             vec![claim_event(npub(1), "example.org")],
             Arc::new(MemoryPinStore::new()),
@@ -635,6 +637,11 @@ mod tests {
         );
         let q = build_query(1, "git.example.org", QTYPE_AAAA).unwrap();
         assert_eq!(r.lookup(&q).await, LookupResult::Passthrough);
+        // The verdict is remembered: the A query that follows does not
+        // wait out another echo budget.
+        let q = build_query(2, "git.example.org", QTYPE_A).unwrap();
+        assert_eq!(r.lookup(&q).await, LookupResult::Passthrough);
+        assert_eq!(mesh.echoes.lock().unwrap().len(), 1, "one echo for two queries");
     }
 
     #[tokio::test]

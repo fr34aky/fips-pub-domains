@@ -139,7 +139,12 @@ pixel.example.org: over fips, rcode NoError
 
 Found here: the reachability check had been the responder registration,
 which succeeds for any well-formed npub — the ghost resolved to a mesh
-address nobody answers at. The check is an echo now.
+address nobody answers at. The check is an echo now. On the phone the same
+zone entry logs `target node not reachable through the local fips node;
+using the legacy answer` (the echo runs through the smoltcp stack), while
+names pointing at the phone itself and at another desktop node resolve
+over the mesh. A negative verdict is remembered for 30 s so a browser's
+A/AAAA/HTTPS trio waits out one echo budget, not three.
 
 ## Level 5 — the phone
 

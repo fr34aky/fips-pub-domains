@@ -15,6 +15,7 @@ pubdom-resolve.workspace = true
 nostr-sdk = { version = "0.44", default-features = false }
 simple-dns = "0.11"
 anyhow = "1"
+hex = "0.4"
 clap = { version = "4", features = ["derive"] }
 serde.workspace = true
 serde_json.workspace = true

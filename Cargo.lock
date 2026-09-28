@@ -1455,6 +1455,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "simple-dns",
+ "socket2",
  "thiserror 2.0.21",
  "tokio",
  "tracing",

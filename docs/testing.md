@@ -124,6 +124,23 @@ that Internet-only subdomain — the operators guide now says when a wildcard
 is appropriate — and the search-domain warning listed fips's own `fips`
 routing domain, which it no longer does.
 
+## Level 3c — a name pointing at a node that does not exist
+
+Zone entry `ghost: <npub of nobody>`. The server answers the CNAME (the
+zone says so); the client registers the identity, sends an ICMPv6 echo,
+gets nothing within 1.5 s and hands the application the legacy answer:
+
+```
+$ fips-pubdom lookup ghost.example.org      # 1.9 s
+ghost.example.org: not over fips (legacy passthrough)
+$ fips-pubdom lookup pixel.example.org      # a phone on the mesh: echo ~250 ms, then answered
+pixel.example.org: over fips, rcode NoError
+```
+
+Found here: the reachability check had been the responder registration,
+which succeeds for any well-formed npub — the ghost resolved to a mesh
+address nobody answers at. The check is an echo now.
+
 ## Level 5 — the phone
 
 Run on a Pixel 9 Pro with fips2go's `names` branch (a debug build from

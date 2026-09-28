@@ -52,6 +52,12 @@
   with a provider") bypass the system resolver. Answering the canary
   `use-application-dns.net` with NXDOMAIN disables Firefox's automatic DoH;
   enterprise policies can still override. Not implemented yet.
+- The reachability check is an ICMPv6 echo (1.5 s budget) because fips
+  drops traffic for unknown nodes silently. fips's own `probe` control
+  command gives a definitive verdict (`bloom_miss` in ~60 ms) and would be
+  the better source on the desktop, but it is a mutating command on the
+  control socket and not reachable from fips2go's shim; worth wiring in
+  where available.
 - Once an `fd…` address has been handed to an application, DNS is out of
   the path: a later connection failure is only re-decided at the next
   lookup (30 s TTL).

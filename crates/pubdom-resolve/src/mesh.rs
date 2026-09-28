@@ -21,9 +21,15 @@ pub trait MeshDns: Send + Sync {
 
     /// Make the local fips node able to route to `npub`: ask its own `.fips`
     /// responder for `<npub>.fips` (spec §6). Returns whether the responder
-    /// answered with an address — which, for the domain's server, is also the
-    /// only reachability signal phase 1 has (spec §7).
+    /// answered — which says nothing about reachability: the responder
+    /// derives an address for any well-formed npub.
     fn register(&self, npub: Npub, timeout: Duration) -> bool;
+
+    /// Can the local node actually deliver to `npub` right now (spec §7)?
+    /// fips drops traffic for a node it has no path to *silently* — no
+    /// ICMPv6 unreachable comes back — so the only cheap positive signal is
+    /// an ICMPv6 echo reply from the node itself.
+    fn reachable(&self, npub: Npub, timeout: Duration) -> bool;
 }
 
 /// Kernel sockets: desktops and servers, where the node's TUN exists and
@@ -95,6 +101,64 @@ impl MeshDns for KernelMeshDns {
         };
         attempt().unwrap_or(false)
     }
+
+    fn reachable(&self, npub: Npub, timeout: Duration) -> bool {
+        match self.echo(npub.fips_address(), timeout) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "ICMPv6 echo not possible; treating the node as unreachable");
+                false
+            }
+        }
+    }
+}
+
+impl KernelMeshDns {
+    /// ICMPv6 echo through the node's TUN. An unprivileged ICMPv6 datagram
+    /// socket where the kernel allows it (`net.ipv4.ping_group_range`), a raw
+    /// socket otherwise (the daemon runs as root). Two requests inside the
+    /// budget: the first can hit a path still being set up.
+    fn echo(&self, addr: Ipv6Addr, timeout: Duration) -> io::Result<bool> {
+        use socket2::{Domain, Protocol, Socket, Type};
+        let sock = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::ICMPV6))
+            .or_else(|_| Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::ICMPV6)))?;
+        if let Some(bind) = self.bind {
+            let _ = sock.bind(&SocketAddrV6::new(bind, 0, 0, 0).into());
+        }
+        let deadline = std::time::Instant::now() + timeout;
+        let target: socket2::SockAddr = SocketAddrV6::new(addr, 0, 0, 0).into();
+        let ident = (std::process::id() & 0xffff) as u16;
+        let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 256];
+        for seq in 0u16..2 {
+            // type 128 (echo request), code 0, checksum (kernel fills it in
+            // for ICMPv6), identifier, sequence, payload.
+            let mut pkt = vec![128, 0, 0, 0];
+            pkt.extend_from_slice(&ident.to_be_bytes());
+            pkt.extend_from_slice(&seq.to_be_bytes());
+            pkt.extend_from_slice(b"fips-pubdom reachability");
+            sock.send_to(&pkt, &target)?;
+            let wait = if seq == 0 { timeout / 2 } else { deadline.saturating_duration_since(std::time::Instant::now()) };
+            let start = std::time::Instant::now();
+            while start.elapsed() < wait {
+                sock.set_read_timeout(Some((wait - start.elapsed()).max(Duration::from_millis(10))))?;
+                match sock.recv_from(&mut buf) {
+                    Ok((n, from)) => {
+                        let same = from.as_socket_ipv6().is_some_and(|a| *a.ip() == addr);
+                        // Raw sockets deliver the IPv6 header too; the type is
+                        // then at offset 40. Datagram sockets start at the ICMP header.
+                        let data: Vec<u8> = buf[..n].iter().map(|b| unsafe { b.assume_init() }).collect();
+                        let ty = if data.len() >= 48 && data[0] >> 4 == 6 { data[40] } else { data.first().copied().unwrap_or(0) };
+                        if same && ty == 129 {
+                            return Ok(true);
+                        }
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => break,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        Ok(false)
+    }
 }
 
 fn simple_dns_noerror(bytes: &[u8]) -> bool {
@@ -158,5 +222,20 @@ mod tests {
     fn register_reports_false_when_no_responder() {
         let mesh = KernelMeshDns::new("[::1]:9".parse().unwrap(), None);
         assert!(!mesh.register(npub(), Duration::from_millis(200)));
+    }
+
+    #[test]
+    fn echo_reaches_loopback_and_not_a_black_hole() {
+        let mesh = KernelMeshDns::new("[::1]:9".parse().unwrap(), None);
+        match mesh.echo(Ipv6Addr::LOCALHOST, Duration::from_millis(500)) {
+            Ok(true) => {}
+            Ok(false) => panic!("loopback did not answer an echo"),
+            Err(e) => {
+                eprintln!("no ICMPv6 socket available here ({e}); skipping");
+                return;
+            }
+        }
+        // A documentation-prefix address nobody answers for.
+        assert_eq!(mesh.echo("2001:db8::1".parse().unwrap(), Duration::from_millis(300)).unwrap_or(false), false);
     }
 }

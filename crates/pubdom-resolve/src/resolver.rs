@@ -65,6 +65,8 @@ pub struct ResolverConfig {
     pub step3_timeout: Duration,
     pub tcp_timeout: Duration,
     pub register_timeout: Duration,
+    /// Budget for the echo to a node other than the domain's server.
+    pub reach_timeout: Duration,
 }
 
 impl Default for ResolverConfig {
@@ -87,6 +89,7 @@ impl Default for ResolverConfig {
             step3_timeout: Duration::from_secs(1),
             tcp_timeout: Duration::from_secs(3),
             register_timeout: Duration::from_secs(1),
+            reach_timeout: Duration::from_millis(1500),
         }
     }
 }
@@ -121,6 +124,9 @@ pub struct Resolver<T: TxtSource, C: ClaimSource> {
     decisions: TtlCache<String, CachedDecision>,
     step3: TtlCache<String, CachedStep3>,
     registered: TtlCache<Npub, ()>,
+    /// Nodes that answered an echo recently: the check is per name target
+    /// and would otherwise run on every uncached lookup.
+    reachable: TtlCache<Npub, ()>,
     /// Single-flight per domain: a browser's first visit fires A, AAAA and
     /// HTTPS queries at once, and only one of them should pay for the TXT
     /// and relay round trips (and write the pin).
@@ -139,6 +145,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             decisions: TtlCache::new(4096),
             step3: TtlCache::new(4096),
             registered: TtlCache::new(1024),
+            reachable: TtlCache::new(1024),
             inflight: Mutex::new(HashMap::new()),
         }
     }
@@ -170,6 +177,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         self.decisions.clear();
         self.step3.clear();
         self.registered.clear();
+        self.reachable.clear();
     }
 
     /// The whole of spec §5–§7 for one application query.
@@ -383,10 +391,33 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             }
         };
         let target = cached?;
-        // The answer names a node; make it routable and, when it is not the
-        // server we just talked to, take the registration as the reachability
-        // check (spec §7).
-        if self.ensure_registered(target).await { Some(target) } else { None }
+        // The answer names a node; make it routable. When it is the server
+        // we just talked to, step 3 succeeding proved it reachable; another
+        // node has to answer an echo before the application gets its
+        // address (spec §7) — a name must never be made unreachable.
+        if !self.ensure_registered(target).await {
+            return None;
+        }
+        if target == binding.npub || self.ensure_reachable(target).await {
+            Some(target)
+        } else {
+            tracing::info!(name = %q.name, npub = %target, "target node not reachable through the local fips node; using the legacy answer");
+            None
+        }
+    }
+
+    async fn ensure_reachable(&self, npub: Npub) -> bool {
+        let now = crate::now();
+        if self.reachable.get(&npub, now).is_some() {
+            return true;
+        }
+        let mesh = self.mesh.clone();
+        let t = self.cfg.reach_timeout;
+        let ok = tokio::task::spawn_blocking(move || mesh.reachable(npub, t)).await.unwrap_or(false);
+        if ok {
+            self.reachable.put(npub, (), Duration::from_secs(120), now);
+        }
+        ok
     }
 
     async fn ensure_registered(&self, npub: Npub) -> bool {
@@ -468,6 +499,9 @@ mod tests {
         }
         fn register(&self, npub: Npub, _: Duration) -> bool {
             self.registered.lock().unwrap().push(npub);
+            true
+        }
+        fn reachable(&self, npub: Npub, _: Duration) -> bool {
             !self.unreachable.contains(&npub)
         }
     }

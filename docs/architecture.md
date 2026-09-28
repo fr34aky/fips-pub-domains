@@ -70,9 +70,12 @@ lookup(query)
   │   apply PinUpdate
   └
   step3(name, binding)  [cached per name]
-      register binding.npub with fips's responder   (also the reachability check)
+      register binding.npub with fips's responder
       UDP query to [fd…]:port over the mesh, one retry; TCP on TC
-      CNAME <npub>.fips  → register that npub too (reachability, spec §7)
+      CNAME <npub>.fips  → register that npub; if it is not the server just
+                           answered, an ICMPv6 echo must come back within
+                           1.5 s (spec §7) — fips drops traffic for unknown
+                           nodes silently, so nothing else distinguishes them
       NXDOMAIN           → NotOverFips → Passthrough
   answer: CNAME + AAAA fd… for AAAA/ANY; CNAME only for A; NODATA for HTTPS/SVCB
 ```

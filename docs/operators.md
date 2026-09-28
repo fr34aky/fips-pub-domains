@@ -6,6 +6,7 @@ firewall rule, and the running server (which publishes the claim).
 
 ## Prerequisites
 
+- `fips-pubdom-server` built and installed ([install.md](install.md)).
 - A fips node with a persistent identity (`/etc/fips/fips.key`; the user
   running the server must be able to read it — it is group `fips`).
 - Control of the domain's DNS. DNSSEC on the zone is optional but makes the

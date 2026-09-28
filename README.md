@@ -67,6 +67,15 @@ registered and the [NIP](docs/nip.md) is a draft. See
 
 ## Quick start
 
+Build and install first — [docs/install.md](docs/install.md) covers
+prerequisites, `cargo build --release`, and where each binary and unit goes
+for each role. In short:
+
+```sh
+cargo build --release
+sudo install -m755 target/release/fips-pubdom{,d,-server} /usr/bin/
+```
+
 ### Serve a domain
 
 On the fips node that should answer for `example.org`
@@ -109,6 +118,7 @@ default). [docs/android.md](docs/android.md).
 
 | | |
 |---|---|
+| [docs/install.md](docs/install.md) | building and installing each component; upgrading; uninstalling |
 | [docs/spec.md](docs/spec.md) | the protocol: events, records, verification precedence, wire format, OS integration, security |
 | [docs/nip.md](docs/nip.md) | the Nostr NIP draft (kinds 37197–37199, placeholders) |
 | [docs/architecture.md](docs/architecture.md) | crates, data flow, the decisions behind them |
@@ -123,7 +133,7 @@ default). [docs/android.md](docs/android.md).
 ## Building
 
 ```sh
-cargo build --release          # Rust stable; no system libraries
+cargo build --release          # Rust stable; no system libraries — see docs/install.md
 cargo test --workspace         # 50 tests, no network needed
 ```
 

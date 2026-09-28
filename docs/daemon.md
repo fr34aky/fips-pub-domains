@@ -8,6 +8,8 @@ unchanged. On Android the same logic lives inside fips2go
 
 ## Install (Linux, systemd-resolved)
 
+Prerequisites and the build are in [install.md](install.md); in short:
+
 ```sh
 cargo build --release
 sudo install -m755 target/release/fips-pubdomd target/release/fips-pubdom /usr/bin/

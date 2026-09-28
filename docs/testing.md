@@ -138,7 +138,29 @@ a TXT record naming the pinned server — a policy gap, since a pin is a
 verified binding (spec §5.1 step 2). Reproduced on the desktop first, fixed
 in `pubdom-core` with a test, then re-tested on the device.
 
-Not yet run on the phone: first-visit discovery (needs the claim on a relay
-the phone can reach, i.e. a public one) and the offline case (needs a LAN
-mesh link to the serving node so the Internet can be cut without losing
-the mesh: LAN mDNS on both sides, same Wi-Fi).
+**First-visit discovery** on the phone, once the claim was on a public relay
+the phone's relay list included (with no pin file present):
+
+```
+I pubdom_resolve::resolver: binding verified and pinned domain="example.org" npub=npub1uyut… method=Dnssec
+I fips_android::dns: public name answered over fips qname=www.example.org qtype=28
+```
+
+The TXT record was DNSSEC-validated by hickory on the device through the
+phone's own upstreams, the claim fetched from the relay, the pin written
+by the app.
+
+**Offline** on the phone: app restarted (caches empty), the phone's
+Internet blocked at the router (LAN intact, so the direct mesh link to the
+serving node survived). The name answered from the pin with every relay
+logging `Connection refused` and the TXT upstreams unreachable; the browser
+reached the serving node over the mesh; `https://github.com/` did not load.
+
+Things this level found: with the claim only on a relay inside the mesh
+the phone could not discover the domain at all (mesh relays are desktop-only
+for now, see [android.md](android.md)); the publisher sent before the relay
+handshake had finished ("relay not connected") and now waits; two default
+relays were too few once one banned the publisher's address and the other
+was unreachable — four now. A CI debug APK is signed with a throwaway key
+per run, so device installs are re-signed with one local key to update in
+place.

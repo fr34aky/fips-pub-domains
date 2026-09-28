@@ -392,19 +392,21 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         }
         // Once an hour per domain and outcome: a lasting dispute is
         // re-decided every TXT_DISPUTED_TTL.
-        let then = if matches!(outcome.decision, Decision::Bound(_)) {
-            "keeping the pins"
-        } else {
-            "not over fips"
-        };
-        let logged_key = format!("{d} {then}");
-        if disputed && self.disputes_logged.get(&logged_key, now).is_none() {
-            self.disputes_logged
-                .put(logged_key, (), Duration::from_secs(3600), now);
-            tracing::info!(
-                domain = d,
-                "upstream resolvers disagree on the TXT record, or it failed DNSSEC validation; {then}"
-            );
+        if disputed {
+            let then = if matches!(outcome.decision, Decision::Bound(_)) {
+                "keeping the pins"
+            } else {
+                "not over fips"
+            };
+            let logged_key = format!("{d} {then}");
+            if self.disputes_logged.get(&logged_key, now).is_none() {
+                self.disputes_logged
+                    .put(logged_key, (), Duration::from_secs(3600), now);
+                tracing::info!(
+                    domain = d,
+                    "upstream resolvers disagree on the TXT record; {then}"
+                );
+            }
         }
         let (cached, ttl) = match outcome.decision {
             Decision::Bound(b) => {
@@ -598,12 +600,11 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
     fn mark_down(&self, npub: Npub, now: u64) {
         // The streak is forgotten once the entry expires: a server that has
         // not failed for a whole maximum window starts over.
-        // Whatever its last answer or echo proved no longer holds. A failed
-        // echo stays cached: concurrent lookups must not each wait it out.
+        // Whatever its last answer or a successful echo proved no longer
+        // holds. A failed echo stays cached: concurrent lookups must not
+        // each wait it out.
         self.answered.remove(&npub);
-        if self.reachable.get(&npub, now) == Some(true) {
-            self.reachable.remove(&npub);
-        }
+        self.reachable.remove_if(&npub, now, |ok| *ok);
         let prev = self.down.get(&npub, now);
         if prev.is_some_and(|d| now < d.retry_at) {
             // Already marked for this outage by a concurrent lookup of
@@ -1376,6 +1377,13 @@ mod tests {
         // count once.
         r.mark_down(npub(1), now - 1);
         assert_eq!(r.down.get(&npub(1), now).unwrap().retry_at, now);
+        // A failed echo survives a step 3 failure, a successful one not.
+        r.reachable.put(npub(2), false, REACHABLE_TTL, now);
+        r.reachable.put(npub(3), true, REACHABLE_TTL, now);
+        r.mark_down(npub(2), now);
+        r.mark_down(npub(3), now);
+        assert_eq!(r.reachable.get(&npub(2), now), Some(false));
+        assert_eq!(r.reachable.get(&npub(3), now), None);
         // An answer clears the streak.
         r.down.remove(&npub(1));
         r.mark_down(npub(1), now);

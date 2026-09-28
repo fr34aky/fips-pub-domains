@@ -13,8 +13,10 @@
 //! wins. Without validated answers the largest group of records wins, and
 //! records outrank denials (a stale negative cache must not hide a fresh
 //! record). A tie is `Disputed`: list order must never pick between an
-//! honest and a poisoned resolver. A record that failed validation (bogus)
-//! counts as a failed upstream.
+//! honest and a poisoned resolver. An answer that failed validation (bogus)
+//! is not counted; with no validated answer beside it, the lookup is
+//! `Disputed` — the zone is signed, so the unvalidated answers cannot be
+//! trusted, and tampering is not an outage.
 //!
 //! A miss is a miss only if every upstream that answered said so; an
 //! upstream that failed (timeout, SERVFAIL) is simply not counted, and if
@@ -122,9 +124,16 @@ impl TxtVerifier {
 
     async fn one(r: &TokioResolver, name: &str) -> One {
         match r.lookup(name, RecordType::TXT).await {
-            // A record that failed validation is not evidence of anything —
-            // least of all against a signed zone. (A denial that fails
-            // validation surfaces from hickory as an error: `Failed`.)
+            // An answer that failed validation: hickory reports it as an
+            // error (records and denials alike), or rarely as a bogus record.
+            Err(NetError::Dns(DnsError::DnssecBogus))
+            | Err(NetError::Dns(DnsError::Nsec {
+                proof: Proof::Bogus,
+                ..
+            })) => {
+                tracing::debug!(%name, "TXT answer failed DNSSEC validation");
+                One::Bogus
+            }
             Ok(lookup) if lookup.answers().iter().any(|r| r.proof == Proof::Bogus) => {
                 tracing::debug!(%name, "TXT answer failed DNSSEC validation");
                 One::Bogus
@@ -194,19 +203,30 @@ fn combine(answers: &[One]) -> (TxtLookup, Option<u32>) {
     }
     // Once anything validated, only validated answers count: an
     // unvalidated one that contradicts a signed zone is forged or stale.
+    // A bogus answer proves the zone is signed, too: without a validated
+    // answer beside it, the unvalidated ones cannot be trusted either.
     // Deliberately so for a validated denial against unvalidated records
     // too: at worst a replayed signed denial unpins the domain until the
     // next validated lookup pins it again, whereas letting forged records
     // outvote it could keep a retired key in use.
     let validated = answered.iter().any(secure);
+    if !validated && answers.iter().any(|a| matches!(a, One::Bogus)) {
+        return (TxtLookup::Disputed, None);
+    }
     let counted: Vec<&One> = if validated {
         answered.into_iter().filter(secure).collect()
     } else {
         answered
     };
-    // Group the records by their set of npubs: (key, records, count,
-    // shortest TTL — so list order decides nothing).
-    let mut groups: Vec<(Vec<Npub>, &Vec<TxtRecord>, usize, u32)> = Vec::new();
+    // Group the records by their set of npubs.
+    struct Group<'a> {
+        key: Vec<Npub>,
+        records: &'a Vec<TxtRecord>,
+        count: usize,
+        /// The shortest, so list order decides nothing.
+        ttl: u32,
+    }
+    let mut groups: Vec<Group> = Vec::new();
     let mut misses = 0;
     for a in &counted {
         match a {
@@ -214,20 +234,25 @@ fn combine(answers: &[One]) -> (TxtLookup, Option<u32>) {
                 let mut key: Vec<Npub> = records.iter().map(|r| r.npub).collect();
                 key.sort();
                 key.dedup();
-                match groups.iter_mut().find(|g| g.0 == key) {
+                match groups.iter_mut().find(|g| g.key == key) {
                     Some(g) => {
-                        g.2 += 1;
-                        g.3 = g.3.min(*ttl);
+                        g.count += 1;
+                        g.ttl = g.ttl.min(*ttl);
                     }
-                    None => groups.push((key, records, 1, *ttl)),
+                    None => groups.push(Group {
+                        key,
+                        records,
+                        count: 1,
+                        ttl: *ttl,
+                    }),
                 }
             }
             One::Miss { .. } => misses += 1,
             One::Bogus | One::Failed => {}
         }
     }
-    let top = groups.iter().map(|g| g.2).max().unwrap_or(0);
-    let tied: Vec<_> = groups.iter().filter(|g| g.2 == top).collect();
+    let top = groups.iter().map(|g| g.count).max().unwrap_or(0);
+    let tied: Vec<&Group> = groups.iter().filter(|g| g.count == top).collect();
     // Validated, a denial is one more group: a replayed signed record must
     // not outvote the zone's signed denials. Unvalidated, records outrank
     // denials — a stale negative cache must not hide a fresh record.
@@ -246,7 +271,7 @@ fn combine(answers: &[One]) -> (TxtLookup, Option<u32>) {
         };
         return (TxtLookup::Miss { method }, None);
     }
-    let [(_, records, count, ttl)] = tied.as_slice() else {
+    let [best] = tied.as_slice() else {
         return (TxtLookup::Disputed, None);
     };
     if validated && misses == top {
@@ -254,17 +279,17 @@ fn combine(answers: &[One]) -> (TxtLookup, Option<u32>) {
     }
     let method = if validated {
         Method::Dnssec
-    } else if *count >= 2 {
+    } else if best.count >= 2 {
         Method::Dns
     } else {
         Method::DnsSingle
     };
     (
         TxtLookup::Hit {
-            records: (*records).clone(),
+            records: best.records.clone(),
             method,
         },
-        Some(*ttl),
+        Some(best.ttl),
     )
 }
 
@@ -396,6 +421,16 @@ mod tests {
         );
         // Only bogus answers: disputed, never the offline path.
         assert_eq!(combine(&[One::Bogus, One::Failed]).0, TxtLookup::Disputed);
+        // A bogus answer beside unvalidated ones: the zone is signed, so
+        // they cannot be trusted — disputed, whatever they say.
+        assert_eq!(
+            combine(&[One::Bogus, One::Miss { secure: false }]).0,
+            TxtLookup::Disputed
+        );
+        assert_eq!(
+            combine(&[One::Bogus, hit(&[1], false)]).0,
+            TxtLookup::Disputed
+        );
         // A bogus record does not count against a validated denial.
         assert_eq!(
             combine(&[One::Bogus, One::Miss { secure: true }]).0,

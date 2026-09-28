@@ -239,6 +239,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         self.registered.clear();
         self.reachable.clear();
         self.answered.clear();
+        self.disputes_logged.clear();
         self.zones.clear();
         self.down.clear();
     }
@@ -389,19 +390,20 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
                 }
             }
         }
-        // Once an hour per domain: a lasting dispute is re-decided every
-        // TXT_DISPUTED_TTL.
-        if disputed && self.disputes_logged.get(&d.to_string(), now).is_none() {
+        // Once an hour per domain and outcome: a lasting dispute is
+        // re-decided every TXT_DISPUTED_TTL.
+        let then = if matches!(outcome.decision, Decision::Bound(_)) {
+            "keeping the pins"
+        } else {
+            "not over fips"
+        };
+        let logged_key = format!("{d} {then}");
+        if disputed && self.disputes_logged.get(&logged_key, now).is_none() {
             self.disputes_logged
-                .put(d.to_string(), (), Duration::from_secs(3600), now);
-            let then = if matches!(outcome.decision, Decision::Bound(_)) {
-                "keeping the pins"
-            } else {
-                "not over fips"
-            };
+                .put(logged_key, (), Duration::from_secs(3600), now);
             tracing::info!(
                 domain = d,
-                "upstream resolvers disagree on the TXT record; {then}"
+                "upstream resolvers disagree on the TXT record, or it failed DNSSEC validation; {then}"
             );
         }
         let (cached, ttl) = match outcome.decision {
@@ -596,9 +598,12 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
     fn mark_down(&self, npub: Npub, now: u64) {
         // The streak is forgotten once the entry expires: a server that has
         // not failed for a whole maximum window starts over.
-        // Whatever its last answer or echo proved no longer holds.
+        // Whatever its last answer or echo proved no longer holds. A failed
+        // echo stays cached: concurrent lookups must not each wait it out.
         self.answered.remove(&npub);
-        self.reachable.remove(&npub);
+        if self.reachable.get(&npub, now) == Some(true) {
+            self.reachable.remove(&npub);
+        }
         let prev = self.down.get(&npub, now);
         if prev.is_some_and(|d| now < d.retry_at) {
             // Already marked for this outage by a concurrent lookup of
@@ -621,8 +626,9 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
 
     /// No domain server answered: resolve `q` from a published zone record
     /// instead (spec §3.3, §6) — the newest by any of the domain's servers.
-    /// Every target has to answer an echo, since nothing proved any of them
-    /// reachable.
+    /// Every target has to be proven reachable — by an echo, or by having
+    /// answered step 3 for itself moments ago — since the zone record says
+    /// nothing about which nodes are up.
     async fn via_zone_record(&self, q: &Query, servers: &[Binding]) -> Option<Npub> {
         let first = servers.first()?;
         let dom = &first.domain;

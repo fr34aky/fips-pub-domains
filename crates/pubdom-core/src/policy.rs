@@ -7,11 +7,11 @@
 //! legacy passthrough when online and into the ordinary offline failure
 //! otherwise (spec §5.1, §7).
 
-use crate::claim::{Claim, Event};
+use crate::claim::{Claim, Event, ZoneRecord};
 use crate::domain::is_claimable;
 use crate::pins::{Binding, Method, PinStore, SeenKey};
 use crate::txt::TxtRecord;
-use crate::{KIND_CLAIM, MAX_FUTURE_SECS};
+use crate::{KIND_CLAIM, KIND_ZONE, MAX_FUTURE_SECS};
 
 /// What the legacy DNS said about `_fips-dns.<domain>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -261,6 +261,44 @@ pub fn ingest_claims(store: &dyn PinStore, domain: &str, events: &[Event], now: 
         }
     }
     out
+}
+
+/// The newest zone record for `domain` by `author` (the pinned server),
+/// with the same future and rollback filters as claims (spec §3.3, §8).
+/// Records by anyone else are ignored: only the domain's server may say
+/// which nodes serve its names.
+pub fn ingest_zone(
+    store: &dyn PinStore,
+    domain: &str,
+    author: crate::Npub,
+    events: &[Event],
+    now: u64,
+) -> Option<ZoneRecord> {
+    let mut best: Option<ZoneRecord> = None;
+    for ev in events {
+        let Ok(zone) = ZoneRecord::parse(ev) else {
+            continue;
+        };
+        if zone.domain != domain || zone.author != author || zone.created_at > now + MAX_FUTURE_SECS
+        {
+            continue;
+        }
+        let key = SeenKey {
+            kind: KIND_ZONE,
+            author,
+            domain: domain.to_owned(),
+        };
+        if let Some(seen) = store.newest_seen(&key)
+            && zone.created_at < seen
+        {
+            continue;
+        }
+        store.note_seen(key, zone.created_at);
+        if best.as_ref().is_none_or(|b| b.created_at < zone.created_at) {
+            best = Some(zone);
+        }
+    }
+    best
 }
 
 #[cfg(test)]
@@ -528,6 +566,39 @@ mod tests {
             proofs: &NoProofs,
         });
         assert_eq!(o.decision, Decision::NotOverFips(Reason::PublicSuffix));
+    }
+
+    #[test]
+    fn ingest_zone_takes_the_servers_newest_and_ignores_others() {
+        use crate::claim::Target;
+        let store = MemoryPinStore::new();
+        let ev = |author: u8, created_at: u64, target: u8| Event {
+            kind: crate::KIND_ZONE,
+            pubkey: npub(author).to_hex(),
+            created_at,
+            tags: ZoneRecord::tags("example.org", &[("git".into(), Target::Node(npub(target)))]),
+        };
+        let z = ingest_zone(
+            &store,
+            "example.org",
+            npub(1),
+            &[ev(1, 10, 2), ev(1, 20, 3), ev(9, 99, 4)],
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(
+            z.lookup("git"),
+            Some(npub(3)),
+            "newest by the server; a stranger's record is ignored"
+        );
+        assert!(
+            ingest_zone(&store, "example.org", npub(1), &[ev(1, 15, 5)], NOW).is_none(),
+            "rollback"
+        );
+        assert!(
+            ingest_zone(&store, "example.org", npub(1), &[ev(1, NOW + 3600, 5)], NOW).is_none(),
+            "future"
+        );
     }
 
     #[test]

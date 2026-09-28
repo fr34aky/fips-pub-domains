@@ -146,6 +146,29 @@ names pointing at the phone itself and at another desktop node resolve
 over the mesh. A negative verdict is remembered for 30 s so a browser's
 A/AAAA/HTTPS trio waits out one echo budget, not three.
 
+## Level 4b — the domain's server is down
+
+The server publishes its zone record with the claim (`publish` sends
+both; `serve --publish` re-sends on start, every 24 h, and on a zone
+change). With the server process stopped and the resolver's step 3 getting
+no answer:
+
+```
+$ fips-pubdom lookup home.example.org     # 485 ms
+domain server unreachable; answering from its zone record name=home.example.org npub=npub1…
+home.example.org: over fips, rcode NoError
+$ fips-pubdom lookup www.example.org      # the server's own node, still up: echo answers
+www.example.org: over fips, rcode NoError
+$ fips-pubdom lookup mail.example.org     # `legacy` in the zone
+mail.example.org: not over fips (legacy passthrough)
+$ fips-pubdom zone example.org
+example.org: zone record by npub1… created_at …
+  home         Node(…)   mail  Legacy   pixel  Node(…)   www  Author
+```
+
+Every target answered from the record has to pass the echo, the server's
+own node included — nothing else has proved any of them reachable.
+
 ## Level 5 — the phone
 
 Run on a Pixel 9 Pro with fips2go's `names` branch (a debug build from

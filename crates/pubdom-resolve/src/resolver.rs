@@ -11,7 +11,7 @@ use crate::mesh::MeshDns;
 use crate::relay::{RelayClient, RelayScope};
 use crate::txt::TxtVerifier;
 use pubdom_core::cache::{self, TtlCache};
-use pubdom_core::claim::Event;
+use pubdom_core::claim::{Event, ZoneRecord};
 use pubdom_core::policy::{self, Decision, Input, NoProofs, PinUpdate, Reason, TxtLookup};
 use pubdom_core::synth::{self, Query, Step3Outcome};
 use pubdom_core::{ANSWER_TTL_SECS, Binding, Npub, PinStore, domain};
@@ -27,11 +27,20 @@ pub trait TxtSource: Send + Sync {
     fn lookup(&self, domain: &str) -> impl Future<Output = (TxtLookup, Option<u32>)> + Send;
 }
 
-/// Where claims come from — relays in production, a table in tests.
+/// Where claims and zone records come from — relays in production, a
+/// table in tests.
 pub trait ClaimSource: Send + Sync {
     fn fetch_claims(
         &self,
         domain: &str,
+        scope: RelayScope,
+    ) -> impl Future<Output = Vec<Event>> + Send;
+
+    /// The zone record (kind 37199) for `domain` by `author`.
+    fn fetch_zone(
+        &self,
+        domain: &str,
+        author: Npub,
         scope: RelayScope,
     ) -> impl Future<Output = Vec<Event>> + Send;
 }
@@ -45,6 +54,9 @@ impl TxtSource for TxtVerifier {
 impl ClaimSource for RelayClient {
     async fn fetch_claims(&self, domain: &str, scope: RelayScope) -> Vec<Event> {
         RelayClient::fetch_claims(self, domain, scope).await
+    }
+    async fn fetch_zone(&self, domain: &str, author: Npub, scope: RelayScope) -> Vec<Event> {
+        RelayClient::fetch_zone(self, domain, &author, scope).await
     }
 }
 
@@ -132,6 +144,9 @@ pub struct Resolver<T: TxtSource, C: ClaimSource> {
     /// (negative, 30 s): a browser asks A, AAAA and HTTPS for one name, and
     /// each would otherwise wait out the full echo budget.
     reachable: TtlCache<Npub, bool>,
+    /// Zone records by domain, for names asked while the domain's server is
+    /// unreachable (spec §3.3, §6). `None` = the server published none.
+    zones: TtlCache<String, Option<ZoneRecord>>,
     /// Single-flight per domain: a browser's first visit fires A, AAAA and
     /// HTTPS queries at once, and only one of them should pay for the TXT
     /// and relay round trips (and write the pin).
@@ -157,6 +172,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             step3: TtlCache::new(4096),
             registered: TtlCache::new(1024),
             reachable: TtlCache::new(1024),
+            zones: TtlCache::new(1024),
             inflight: Mutex::new(HashMap::new()),
         }
     }
@@ -189,6 +205,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         self.step3.clear();
         self.registered.clear();
         self.reachable.clear();
+        self.zones.clear();
     }
 
     /// The whole of spec §5–§7 for one application query.
@@ -414,12 +431,12 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
                         return None;
                     }
                     Ok(other) => {
-                        tracing::debug!(name = %q.name, ?other, "step 3 failed");
-                        return None;
+                        tracing::debug!(name = %q.name, ?other, "step 3 failed; trying the zone record");
+                        return self.from_zone(q, binding).await;
                     }
                     Err(e) => {
-                        tracing::debug!(name = %q.name, error = %e, "step 3 failed");
-                        return None;
+                        tracing::debug!(name = %q.name, error = %e, "step 3 failed; trying the zone record");
+                        return self.from_zone(q, binding).await;
                     }
                 }
             }
@@ -429,10 +446,59 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         // we just talked to, step 3 succeeding proved it reachable; another
         // node has to answer an echo before the application gets its
         // address (spec §7) — a name must never be made unreachable.
+        self.deliverable(q, target, target == binding.npub).await
+    }
+
+    /// The domain's server did not answer: resolve `q` from its published
+    /// zone record instead (spec §3.3, §6). Every target — the server
+    /// itself included — has to answer an echo, since nothing proved any of
+    /// them reachable.
+    async fn from_zone(&self, q: &Query, binding: &Binding) -> Option<Npub> {
+        let now = crate::now();
+        let zone = match self.zones.get(&binding.domain, now) {
+            Some(z) => z,
+            None => {
+                // The domain was vouched for when it was pinned, so asking
+                // relays about it discloses nothing new (spec §8).
+                let scope = if self.is_online() {
+                    RelayScope::AfterHit
+                } else {
+                    RelayScope::Offline
+                };
+                let events = self
+                    .claims
+                    .fetch_zone(&binding.domain, binding.npub, scope)
+                    .await;
+                let z = policy::ingest_zone(
+                    self.pins.as_ref(),
+                    &binding.domain,
+                    binding.npub,
+                    &events,
+                    now,
+                );
+                let ttl = if z.is_some() {
+                    cache::CLAIM_TTL
+                } else {
+                    cache::RELAY_MISS_TTL
+                };
+                self.zones.put(binding.domain.clone(), z.clone(), ttl, now);
+                z
+            }
+        };
+        let zone = zone?;
+        let label = domain::relative_label(&q.name, &binding.domain)?;
+        let target = zone.lookup(label)?;
+        tracing::info!(name = %q.name, npub = %target, "domain server unreachable; answering from its zone record");
+        self.deliverable(q, target, false).await
+    }
+
+    /// Register `target` with the local node and, unless `proven` (the
+    /// node just answered step 3), require an echo reply.
+    async fn deliverable(&self, q: &Query, target: Npub, proven: bool) -> Option<Npub> {
         if !self.ensure_registered(target).await {
             return None;
         }
-        if target == binding.npub || self.ensure_reachable(target).await {
+        if proven || self.ensure_reachable(target).await {
             Some(target)
         } else {
             tracing::info!(name = %q.name, npub = %target, "target node not reachable through the local fips node; using the legacy answer");
@@ -519,7 +585,22 @@ mod tests {
             self.1.lock().unwrap().push((domain.into(), scope));
             self.0
                 .iter()
-                .filter(|e| e.tags[0][1] == domain)
+                .filter(|e| e.kind == KIND_CLAIM && e.tags[0][1] == domain)
+                .cloned()
+                .collect()
+        }
+        async fn fetch_zone(&self, domain: &str, author: Npub, scope: RelayScope) -> Vec<Event> {
+            self.1
+                .lock()
+                .unwrap()
+                .push((format!("zone:{domain}"), scope));
+            self.0
+                .iter()
+                .filter(|e| {
+                    e.kind == pubdom_core::KIND_ZONE
+                        && e.tags[0][1] == domain
+                        && e.pubkey == author.to_hex()
+                })
                 .cloned()
                 .collect()
         }
@@ -532,6 +613,8 @@ mod tests {
         registered: Mutex<Vec<Npub>>,
         echoes: Mutex<Vec<Npub>>,
         unreachable: Vec<Npub>,
+        /// The domain server's DNS does not answer (the node may still ping).
+        server_down: bool,
     }
     impl MeshDns for FakeMesh {
         fn query_udp(
@@ -541,6 +624,12 @@ mod tests {
             _: Duration,
         ) -> std::io::Result<Vec<u8>> {
             self.queries.lock().unwrap().push(server);
+            if self.server_down {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "no answer",
+                ));
+            }
             assert_eq!(server.ip(), &npub(1).fips_address());
             let q = synth::parse_query(msg).unwrap();
             let target = match q.name.as_str() {
@@ -584,6 +673,7 @@ mod tests {
             registered: Mutex::new(vec![]),
             echoes: Mutex::new(vec![]),
             unreachable,
+            server_down: false,
         });
         let cfg = ResolverConfig {
             allow_unverified_offline: allow_unverified,
@@ -657,6 +747,7 @@ mod tests {
             registered: Mutex::new(vec![]),
             echoes: Mutex::new(vec![]),
             unreachable: vec![],
+            server_down: false,
         });
         let r = Resolver::new(
             ResolverConfig::default(),
@@ -838,5 +929,129 @@ mod tests {
         let p = simple_dns::Packet::parse(&a).unwrap();
         assert!(p.answers.is_empty());
         assert_eq!(p.rcode(), simple_dns::RCODE::NoError);
+    }
+
+    fn zone_event(
+        author: Npub,
+        domain: &str,
+        names: &[(&str, pubdom_core::claim::Target)],
+    ) -> Event {
+        let names: Vec<(String, pubdom_core::claim::Target)> = names
+            .iter()
+            .map(|(l, t)| (l.to_string(), t.clone()))
+            .collect();
+        Event {
+            kind: pubdom_core::KIND_ZONE,
+            pubkey: author.to_hex(),
+            created_at: crate::now() - 10,
+            tags: pubdom_core::claim::ZoneRecord::tags(domain, &names),
+        }
+    }
+
+    #[tokio::test]
+    async fn server_down_resolves_from_the_zone_record() {
+        use pubdom_core::claim::Target;
+        let pins: Arc<MemoryPinStore> = Arc::new(MemoryPinStore::new());
+        pins.put(Binding {
+            domain: "example.org".into(),
+            npub: npub(1),
+            port: 5355,
+            method: Method::Dnssec,
+            verified_at: 1,
+        });
+        let mesh = Arc::new(FakeMesh {
+            queries: Mutex::new(vec![]),
+            registered: Mutex::new(vec![]),
+            echoes: Mutex::new(vec![]),
+            unreachable: vec![npub(1)], // the server's node is gone entirely
+            server_down: true,
+        });
+        let events = vec![zone_event(
+            npub(1),
+            "example.org",
+            &[
+                ("git", Target::Node(npub(2))),
+                ("www", Target::Author),
+                ("mail", Target::Legacy),
+            ],
+        )];
+        let r = Resolver::new(
+            ResolverConfig::default(),
+            pins,
+            FakeTxt(Mutex::new(HashMap::new())),
+            FakeClaims(events, Mutex::new(vec![])),
+            mesh.clone(),
+        );
+        r.set_online(false);
+        // git → another node, which answers an echo: over fips.
+        let q = build_query(1, "git.example.org", QTYPE_AAAA).unwrap();
+        let LookupResult::Answer(a) = r.lookup(&q).await else {
+            panic!("git should resolve from the zone record")
+        };
+        assert_eq!(
+            parse_step3_reply(&a, 1),
+            Step3Outcome::Node {
+                npub: npub(2),
+                ttl: ANSWER_TTL_SECS
+            }
+        );
+        assert!(
+            mesh.echoes.lock().unwrap().contains(&npub(2)),
+            "zone targets must answer an echo"
+        );
+        // www → the server itself, which is down: legacy.
+        let q = build_query(2, "www.example.org", QTYPE_AAAA).unwrap();
+        assert_eq!(r.lookup(&q).await, LookupResult::Passthrough);
+        // mail → legacy by the zone; unknown → not in the zone.
+        assert_eq!(
+            r.lookup(&build_query(3, "mail.example.org", QTYPE_AAAA).unwrap())
+                .await,
+            LookupResult::Passthrough
+        );
+        assert_eq!(
+            r.lookup(&build_query(4, "other.example.org", QTYPE_AAAA).unwrap())
+                .await,
+            LookupResult::Passthrough
+        );
+        // One relay fetch for the zone, in the offline scope.
+        let asked = r.claims.1.lock().unwrap().clone();
+        assert_eq!(
+            asked
+                .iter()
+                .filter(|(d, _)| d == "zone:example.org")
+                .count(),
+            1
+        );
+        assert!(asked.iter().all(|(_, s)| *s == RelayScope::Offline));
+    }
+
+    #[tokio::test]
+    async fn nxdomain_from_a_live_server_never_consults_the_zone_record() {
+        use pubdom_core::claim::Target;
+        let events = vec![
+            claim_event(npub(1), "example.org"),
+            zone_event(npub(1), "example.org", &[("mail", Target::Node(npub(2)))]),
+        ];
+        let (r, _) = resolver(
+            HashMap::from([("example.org".to_string(), hit(npub(1)))]),
+            events,
+            Arc::new(MemoryPinStore::new()),
+            vec![],
+            false,
+        );
+        let q = build_query(1, "mail.example.org", QTYPE_AAAA).unwrap();
+        assert_eq!(
+            r.lookup(&q).await,
+            LookupResult::Passthrough,
+            "the live server's NXDOMAIN wins"
+        );
+        assert!(
+            !r.claims
+                .1
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(d, _)| d.starts_with("zone:"))
+        );
     }
 }

@@ -10,12 +10,14 @@
 - fips2go: resolver in the VPN's DNS proxy, UDP over smoltcp, Settings
   switch (PR open; device-verified: pinned, first-visit discovery, offline).
 - Live tests through level 5 ([testing.md](testing.md)).
+- Zone records (kind 37199): published by the server with the claim, used
+  by the resolver when the server does not answer.
 
 ## Next
 
 1. **fips2go PR review and merge** (#55). Every path is device-verified;
    what the phone lacks is discovery through relays inside the mesh (item
-   7).
+   6).
 2. **Registration and the NIP** — submitted 2026-09-28:
    [registry-of-kinds #16](https://github.com/nostr-protocol/registry-of-kinds/pull/16)
    and [nips #2487](https://github.com/nostr-protocol/nips/pull/2487)
@@ -34,15 +36,13 @@
    ones keep working); and the root trust anchor rollover (KSK-2024) needs
    current software — RFC 5011 automatic updates are not implemented, and
    `dnssec: false` is the emergency switch back to multi-resolver DNS.
-4. **Zone records** (kind 37199) so a client can resolve while the domain's
-   server is unreachable.
-5. **Attestations** (kind 37198) and the trust setting *k*; default
+4. **Attestations** (kind 37198) and the trust setting *k*; default
    witnesses = the user's synced trusted nodes, opt-in.
-6. **Daemon backends**: dnsmasq / NetworkManager, plain `resolv.conf`,
+5. **Daemon backends**: dnsmasq / NetworkManager, plain `resolv.conf`,
    then macOS (launchd + `networksetup`) and Windows (service + adapter
    DNS); restricted per-domain mode on all three; OpenWrt and pfSense
    packaging. Network-change watchers instead of the 30 s poll.
-7. **Phone gaps**: TCP fallback for step 3 over the smoltcp stack; a way to
+6. **Phone gaps**: TCP fallback for step 3 over the smoltcp stack; a way to
    reach mesh relays from the app (a websocket client over smoltcp, or a
    local proxy in the shim) so offline discovery works there too; an
    explicit online flag from the VpnService.

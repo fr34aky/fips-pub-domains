@@ -27,7 +27,7 @@ use pubdom_core::claim::{Target, ZoneRecord};
 use pubdom_core::domain::{normalize, relative_label};
 use pubdom_core::txt::TxtRecord;
 use pubdom_core::{DEFAULT_SERVER_PORT, Npub, synth};
-use pubdom_resolve::relay::{claim_event_json, publish_claim};
+use pubdom_resolve::relay::{claim_event_json, publish_claim, publish_zone, zone_event_json};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
@@ -256,6 +256,9 @@ async fn serve(zones: Arc<Zones>, bind: SocketAddrV6, ttl: u32) -> Result<()> {
     Ok(())
 }
 
+/// The claim and the zone record for every zone (spec §3.1, §3.3): the
+/// claim says who serves the domain, the zone record which names — so a
+/// client can still resolve them while this server is unreachable.
 async fn publish_all(keys: &Keys, zones: &[Zone], relays: &[String]) {
     for z in zones {
         match publish_claim(
@@ -271,7 +274,36 @@ async fn publish_all(keys: &Keys, zones: &[Zone], relays: &[String]) {
             Ok(ok) => tracing::info!(domain = %z.record.domain, relays = ?ok, "claim published"),
             Err(e) => tracing::error!(domain = %z.record.domain, error = %e, "claim not published"),
         }
+        match publish_zone(
+            keys.clone(),
+            relays,
+            &z.record.domain,
+            &z.record.names,
+            Duration::from_secs(10),
+        )
+        .await
+        {
+            Ok(ok) => {
+                tracing::info!(domain = %z.record.domain, names = z.record.names.len(), relays = ?ok, "zone record published")
+            }
+            Err(e) => {
+                tracing::error!(domain = %z.record.domain, error = %e, "zone record not published")
+            }
+        }
     }
+}
+
+/// A snapshot of the zones as last loaded — what `publish_all` sends.
+fn snapshot(zones: &Zones) -> Vec<Zone> {
+    let g = zones.zones.read().unwrap();
+    g.iter()
+        .map(|z| Zone {
+            path: z.path.clone(),
+            mtime: z.mtime,
+            port: z.port,
+            record: z.record.clone(),
+        })
+        .collect()
 }
 
 #[tokio::main]
@@ -314,6 +346,11 @@ async fn main() -> Result<()> {
                     println!(
                         "{}",
                         claim_event_json(&keys, &z.record.domain, z.port, None)
+                            .map_err(|e| anyhow!(e))?
+                    );
+                    println!(
+                        "{}",
+                        zone_event_json(&keys, &z.record.domain, &z.record.names)
                             .map_err(|e| anyhow!(e))?
                     );
                 }
@@ -359,20 +396,26 @@ async fn main() -> Result<()> {
                 }
                 let (k, zs, rl) = (keys.clone(), zones.clone(), relay.clone());
                 tokio::spawn(async move {
+                    // At start, every 24 h, and whenever a zone file changed:
+                    // the zone record must say what the server would answer.
+                    let mut last: Vec<Zone> = Vec::new();
+                    let mut last_publish =
+                        std::time::Instant::now() - Duration::from_secs(24 * 3600);
                     loop {
-                        let snapshot: Vec<Zone> = {
-                            let g = zs.zones.read().unwrap();
-                            g.iter()
-                                .map(|z| Zone {
-                                    path: z.path.clone(),
-                                    mtime: z.mtime,
-                                    port: z.port,
-                                    record: z.record.clone(),
-                                })
-                                .collect()
-                        };
-                        publish_all(&k, &snapshot, &rl).await;
-                        tokio::time::sleep(Duration::from_secs(24 * 3600)).await;
+                        zs.check_reload();
+                        let now = snapshot(&zs);
+                        let changed = now
+                            .iter()
+                            .map(|z| (&z.record.domain, &z.record.names, z.port))
+                            .ne(last
+                                .iter()
+                                .map(|z| (&z.record.domain, &z.record.names, z.port)));
+                        if changed || last_publish.elapsed() >= Duration::from_secs(24 * 3600) {
+                            publish_all(&k, &now, &rl).await;
+                            last = now;
+                            last_publish = std::time::Instant::now();
+                        }
+                        tokio::time::sleep(Duration::from_secs(30)).await;
                     }
                 });
             }

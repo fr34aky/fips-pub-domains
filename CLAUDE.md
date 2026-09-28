@@ -103,8 +103,19 @@ end across two nodes:
   deps pinned by rev — the repo is private, so fips2go's CI cannot fetch
   them until it has a token or the repo is public. Nothing built for
   Android or run on a device yet (no rustup/Android target on this host).
-- Not published anywhere: no claim on public relays, no kind registration,
-  no NIP submission (user instruction 2026-09-28).
+- Level 1+2 of the test ladder passed 2026-09-28: a real peer (`home`,
+  Ubuntu) queried the server over the mesh (UDP, TCP, wildcard,
+  `legacy` carve-out with hot reload); the claim is published on the
+  user's **mesh-only strfry relay** (`ws://npub1c8n8….fips:80`, see memory);
+  from this node `verify` → `Bound(Dnssec)`, `lookup` pins and answers,
+  offline `lookup` answers from the pin, offline-unpinned is refused unless
+  `allow_unverified_offline` (then answered with the WARN marker), and
+  `mail.example.org` / `www.github.com` pass through. Nothing on public
+  relays; no kind registration; no NIP submission (user instruction).
+- Known gap: mesh relays are desktop-only — on the phone nostr-sdk needs a
+  kernel socket to an `fd…` address, which the app's UID cannot open, so
+  Android offline = pinned domains only until a websocket-over-smoltcp
+  path exists.
 
 ## Next steps
 

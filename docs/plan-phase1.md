@@ -220,7 +220,11 @@ phase 3 enabler and costs nothing now.
 
 - smoltcp UDP through `MeshLink` is the least-known piece; do it early in
   milestone 3 and fall back to TCP-only step 3 on the phone if UDP costs more
-  than a week.
+  than a week. (Done: `meshudp.rs`; the TCP fallback is what is missing.)
+- Mesh relays on the phone: nostr-sdk dials with kernel sockets, which the
+  app's UID cannot point at `fd…`. Offline on Android therefore means
+  pinned domains only, until a websocket client runs over the smoltcp
+  stack (or the relay is reached through a local proxy in the shim).
 - Two independent upstream resolvers are not always available on a phone
   (one DHCP-provided resolver is common). Phase 1 then verifies with one
   and records `method: dns-single`; the pin-upgrade rule (§5.4) means a

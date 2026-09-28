@@ -8,6 +8,8 @@ repository.workspace = true
 [dependencies]
 names-core.workspace = true
 names-resolve.workspace = true
+nostr-sdk = { version = "0.44", default-features = false }
+simple-dns = "0.11"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde.workspace = true

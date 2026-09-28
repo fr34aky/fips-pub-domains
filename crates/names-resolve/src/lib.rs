@@ -11,12 +11,14 @@
 //!
 //! No `cfg(target_os)` here (docs/plan-platforms.md §1).
 
+pub mod config;
 pub mod mesh;
 pub mod pins;
 pub mod relay;
 pub mod resolver;
 pub mod txt;
 
+pub use config::{Config, ProdResolver};
 pub use mesh::{KernelMeshDns, MeshDns};
 pub use pins::FilePinStore;
 pub use relay::RelayClient;

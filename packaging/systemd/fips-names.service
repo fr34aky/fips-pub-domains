@@ -1,0 +1,23 @@
+[Unit]
+Description=fips-names resolver: public domain names over fips
+Documentation=https://github.com/fr34aky/fips-names
+After=network-online.target fips.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/fips-namesd run
+Restart=on-failure
+RestartSec=2
+# Loopback listener, pin file under /var/lib, nothing else.
+StateDirectory=fips-names
+ConfigurationDirectory=fips-names
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/fips-names
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target

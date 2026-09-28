@@ -1,0 +1,21 @@
+[Unit]
+Description=fips-names domain server: answers step 3 for the zones in /etc/fips-names/zones
+Documentation=https://github.com/fr34aky/fips-names
+After=fips.service
+Requires=fips.service
+
+[Service]
+Type=simple
+# Reads the node key (group fips), listens on the node's fips address.
+Group=fips
+ExecStart=/bin/sh -c 'exec /usr/bin/fips-names-server --key /etc/fips/fips.key serve $(for z in /etc/fips-names/zones/*.yaml; do printf -- "--zone %s " "$z"; done)'
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target

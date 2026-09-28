@@ -1,0 +1,25 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace
+  portable:
+    # docs/plan-platforms.md §1: the library crates carry no target-specific code.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          if grep -rn 'cfg(target_os\|cfg(unix\|cfg(windows' crates/names-core crates/names-resolve; then
+            echo "platform-specific code in a library crate" >&2; exit 1
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - run: cargo check -p names-core -p names-resolve --target aarch64-linux-android

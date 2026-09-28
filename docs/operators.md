@@ -100,17 +100,19 @@ that proof alone. The server collects the chain from the system's
 resolvers, then 9.9.9.9 and 1.1.1.1 (`--dns <ip>` to choose; a local stub
 that strips DNSSEC records does not work), checks it as a client would, and
 re-publishes before its signatures expire: halfway through their remaining
-validity, every 24 h at the latest. If collecting fails (a resolver timing
-out), the last chain is kept while it has more than an hour left and the
-server tries again in an hour — after a restart too, taken from its own
-claim on the relays. Once the record no longer names this server's key (a
-key rotation, or a record set up for another node), the claim goes out
-without a proof and a warning says so — an older proof would be evidence
-for a retired key. Each zone is scheduled on its own. `publish --dry-run`
-collects the chain but never contacts a relay — so while DNS fails it shows
-the claim without the proof a real run would restore from the relays. The log line `claim published … dnssec_proof_until=…`
-shows it; for an unsigned zone the claim goes out without a proof and a
-warning says so. `--no-dnssec-proof` turns it off.
+validity, every 24 h at the latest. The log line `claim published …
+dnssec_proof_until=…` shows it; for an unsigned zone the claim goes out
+without a proof and a warning says so. `--no-dnssec-proof` turns it off.
+
+If collecting fails (a resolver timing out), the last chain is kept while
+it has more than an hour left and the server tries again in an hour —
+after a restart too, taken from its own newest claim on the relays. Once
+the record no longer names this server's key (a key rotation, or a record
+set up for another node), the claim goes out without a proof, hourly, with
+a warning — an older proof would be evidence for a retired key. Each zone
+is scheduled on its own. `publish --dry-run` collects the chain but never
+contacts a relay, so while DNS fails it shows the claim without the proof
+a real run would restore.
 
 `packaging/systemd/fips-pubdom-server.service` runs one `serve` for all the
 zones in `/etc/fips-pubdom/zones/` (same port for all) as group `fips`;

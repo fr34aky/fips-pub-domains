@@ -167,6 +167,8 @@ pub struct Resolver<T: TxtSource, C: ClaimSource> {
     /// REACHABLE_TTL: proof of reachability without an echo. Separate from
     /// `reachable` so an echo never passes for a step 3 answer.
     answered: TtlCache<Npub, ()>,
+    /// Domains whose dispute was logged within the hour.
+    disputes_logged: TtlCache<String, ()>,
     /// Zone records by domain, for names asked while the domain's servers
     /// are unreachable (spec §3.3, §6). `None` = no server published one.
     zones: TtlCache<String, Option<ZoneRecord>>,
@@ -201,6 +203,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             registered: TtlCache::new(1024),
             reachable: TtlCache::new(1024),
             answered: TtlCache::new(1024),
+            disputes_logged: TtlCache::new(256),
             zones: TtlCache::new(1024),
             down: TtlCache::new(1024),
             inflight: Mutex::new(HashMap::new()),
@@ -235,6 +238,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         self.step3.clear();
         self.registered.clear();
         self.reachable.clear();
+        self.answered.clear();
         self.zones.clear();
         self.down.clear();
     }
@@ -385,7 +389,11 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
                 }
             }
         }
-        if disputed {
+        // Once an hour per domain: a lasting dispute is re-decided every
+        // TXT_DISPUTED_TTL.
+        if disputed && self.disputes_logged.get(&d.to_string(), now).is_none() {
+            self.disputes_logged
+                .put(d.to_string(), (), Duration::from_secs(3600), now);
             let then = if matches!(outcome.decision, Decision::Bound(_)) {
                 "keeping the pins"
             } else {
@@ -588,8 +596,9 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
     fn mark_down(&self, npub: Npub, now: u64) {
         // The streak is forgotten once the entry expires: a server that has
         // not failed for a whole maximum window starts over.
-        // Whatever its last answer proved no longer holds.
+        // Whatever its last answer or echo proved no longer holds.
         self.answered.remove(&npub);
+        self.reachable.remove(&npub);
         let prev = self.down.get(&npub, now);
         if prev.is_some_and(|d| now < d.retry_at) {
             // Already marked for this outage by a concurrent lookup of
@@ -660,7 +669,10 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         if !self.ensure_registered(target).await {
             return None;
         }
-        if proven || self.ensure_reachable(target).await {
+        // A node that just answered step 3 for itself is reachable, whatever
+        // name it is the target of now.
+        let answered = self.answered.get(&target, crate::now()).is_some();
+        if proven || answered || self.ensure_reachable(target).await {
             Some(target)
         } else {
             tracing::info!(name = %q.name, npub = %target, "target node not reachable through the local fips node; using the legacy answer");

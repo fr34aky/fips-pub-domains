@@ -50,6 +50,9 @@ enum One {
     Miss {
         secure: bool,
     },
+    /// Failed DNSSEC validation: not counted, but not "unreachable"
+    /// either — someone answered, and it was wrong.
+    Bogus,
     Failed,
 }
 
@@ -120,16 +123,11 @@ impl TxtVerifier {
     async fn one(r: &TokioResolver, name: &str) -> One {
         match r.lookup(name, RecordType::TXT).await {
             // A record that failed validation is not evidence of anything —
-            // least of all against a signed zone.
+            // least of all against a signed zone. (A denial that fails
+            // validation surfaces from hickory as an error: `Failed`.)
             Ok(lookup) if lookup.answers().iter().any(|r| r.proof == Proof::Bogus) => {
                 tracing::debug!(%name, "TXT answer failed DNSSEC validation");
-                One::Failed
-            }
-            Err(NetError::Dns(DnsError::NoRecordsFound(nr)))
-                if nr.soa.as_ref().is_some_and(|soa| soa.proof == Proof::Bogus) =>
-            {
-                tracing::debug!(%name, "TXT denial failed DNSSEC validation");
-                One::Failed
+                One::Bogus
             }
             Ok(lookup) => {
                 let mut records = Vec::new();
@@ -183,42 +181,53 @@ fn combine(answers: &[One]) -> (TxtLookup, Option<u32>) {
     };
     let answered: Vec<&One> = answers
         .iter()
-        .filter(|a| !matches!(a, One::Failed))
+        .filter(|a| !matches!(a, One::Failed | One::Bogus))
         .collect();
     if answered.is_empty() {
-        return (TxtLookup::Unreachable, None);
+        // Only bogus answers: tampering or broken signatures, not an
+        // outage — it must not take the offline path.
+        return if answers.iter().any(|a| matches!(a, One::Bogus)) {
+            (TxtLookup::Disputed, None)
+        } else {
+            (TxtLookup::Unreachable, None)
+        };
     }
     // Once anything validated, only validated answers count: an
     // unvalidated one that contradicts a signed zone is forged or stale.
+    // Deliberately so for a validated denial against unvalidated records
+    // too: at worst a replayed signed denial unpins the domain until the
+    // next validated lookup pins it again, whereas letting forged records
+    // outvote it could keep a retired key in use.
     let validated = answered.iter().any(secure);
     let counted: Vec<&One> = if validated {
         answered.into_iter().filter(secure).collect()
     } else {
         answered
     };
-    // Group the records by their set of npubs.
-    let mut groups: Vec<(Vec<Npub>, Vec<&One>)> = Vec::new();
+    // Group the records by their set of npubs: (key, records, count,
+    // shortest TTL — so list order decides nothing).
+    let mut groups: Vec<(Vec<Npub>, &Vec<TxtRecord>, usize, u32)> = Vec::new();
+    let mut misses = 0;
     for a in &counted {
-        if let One::Hit { records, .. } = a {
-            let mut key: Vec<Npub> = records.iter().map(|r| r.npub).collect();
-            key.sort();
-            key.dedup();
-            match groups.iter_mut().find(|(k, _)| *k == key) {
-                Some((_, v)) => v.push(a),
-                None => groups.push((key, vec![a])),
+        match a {
+            One::Hit { records, ttl, .. } => {
+                let mut key: Vec<Npub> = records.iter().map(|r| r.npub).collect();
+                key.sort();
+                key.dedup();
+                match groups.iter_mut().find(|g| g.0 == key) {
+                    Some(g) => {
+                        g.2 += 1;
+                        g.3 = g.3.min(*ttl);
+                    }
+                    None => groups.push((key, records, 1, *ttl)),
+                }
             }
+            One::Miss { .. } => misses += 1,
+            One::Bogus | One::Failed => {}
         }
     }
-    let misses = counted
-        .iter()
-        .filter(|a| matches!(a, One::Miss { .. }))
-        .count();
-    let top = groups.iter().map(|(_, v)| v.len()).max().unwrap_or(0);
-    let tied: Vec<&Vec<&One>> = groups
-        .iter()
-        .map(|(_, v)| v)
-        .filter(|v| v.len() == top)
-        .collect();
+    let top = groups.iter().map(|g| g.2).max().unwrap_or(0);
+    let tied: Vec<_> = groups.iter().filter(|g| g.2 == top).collect();
     // Validated, a denial is one more group: a replayed signed record must
     // not outvote the zone's signed denials. Unvalidated, records outrank
     // denials — a stale negative cache must not hide a fresh record.
@@ -227,7 +236,6 @@ fn combine(answers: &[One]) -> (TxtLookup, Option<u32>) {
     } else {
         groups.is_empty()
     };
-    let denial_ties = validated && misses > 0 && misses == top;
     if denial_wins {
         let method = if validated {
             Method::Dnssec
@@ -238,36 +246,25 @@ fn combine(answers: &[One]) -> (TxtLookup, Option<u32>) {
         };
         return (TxtLookup::Miss { method }, None);
     }
-    let [best] = tied.as_slice() else {
+    let [(_, records, count, ttl)] = tied.as_slice() else {
         return (TxtLookup::Disputed, None);
     };
-    if denial_ties {
+    if validated && misses == top {
         return (TxtLookup::Disputed, None);
     }
     let method = if validated {
         Method::Dnssec
-    } else if best.len() >= 2 {
+    } else if *count >= 2 {
         Method::Dns
     } else {
         Method::DnsSingle
     };
-    // The shortest TTL of the group, so list order decides nothing.
-    let ttl = best
-        .iter()
-        .filter_map(|a| match a {
-            One::Hit { ttl, .. } => Some(*ttl),
-            _ => None,
-        })
-        .min();
-    let One::Hit { records, .. } = best[0] else {
-        unreachable!("groups hold hits")
-    };
     (
         TxtLookup::Hit {
-            records: records.clone(),
+            records: (*records).clone(),
             method,
         },
-        ttl,
+        Some(*ttl),
     )
 }
 
@@ -393,6 +390,15 @@ mod tests {
         // withdrew it, a forged answer must not keep the old key in use.
         assert_eq!(
             combine(&[One::Miss { secure: true }, hit(&[1], false)]).0,
+            TxtLookup::Miss {
+                method: Method::Dnssec
+            }
+        );
+        // Only bogus answers: disputed, never the offline path.
+        assert_eq!(combine(&[One::Bogus, One::Failed]).0, TxtLookup::Disputed);
+        // A bogus record does not count against a validated denial.
+        assert_eq!(
+            combine(&[One::Bogus, One::Miss { secure: true }]).0,
             TxtLookup::Miss {
                 method: Method::Dnssec
             }

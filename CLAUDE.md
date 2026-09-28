@@ -39,10 +39,13 @@ the Android-specific parts that already live there (`shim/src/names.rs`,
 - No `cfg(target_os)` in `pubdom-core` or `pubdom-resolve` (CI enforces).
 - `cargo test --workspace` must stay green; the policy tables in
   `pubdom-core` are the place to add a case before changing behaviour.
-- **Every PR gets a code review before it merges** (`/code-review high`
-  on the branch; findings fixed on the branch or listed in the PR body).
-  Merge only when the checks *and* the review are clean — user rule,
-  2026-09-28.
+- **Every PR gets one code review before it merges** (`/code-review high`
+  on the branch). Real bugs it finds are fixed on the branch; everything
+  else — polish, docs, deliberate trade-offs, pre-existing issues — is
+  listed in the PR body as deferred or declined. Then merge when the checks
+  are green. No review-fix-review loop: a high-effort review never comes
+  back empty, and repeated rounds started reversing each other. User rule,
+  2026-09-28 (revised the same day after 12 rounds on one PR).
 
 ## Layout
 

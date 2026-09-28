@@ -30,11 +30,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   zone; a tie is no longer broken by list order but treated as disputed —
   pins keep resolving, an unpinned domain stays legacy and is asked again a
   minute later.
-- A TXT denial counted as DNSSEC-validated whenever its SOA validated,
-  which also holds for an unsigned domain under a signed TLD: one bad
-  upstream replaying the TLD's signed SOA could fake a validated denial and
-  unpin every server of an unsigned domain. A denial is validated only by a
-  validated NSEC/NSEC3 record now.
+- DNSSEC status was judged from single records: a TXT denial counted as
+  validated whenever its SOA did, and a record whenever any TXT record did.
+  For an unsigned domain, one bad upstream could then fake a validated
+  answer — replaying the TLD's signed SOA or opt-out NSEC3, or putting an
+  unvalidated CNAME in front of a signed name — and bind an attacker's key
+  at DNSSEC strength or unpin every server. Answers are now judged as a
+  whole, and a validated denial must be for the name asked and proven by a
+  validated NSEC/NSEC3 without opt-out.
 - A denial from a signed zone using more NSEC3 iterations than the
   validator accepts (insecure by RFC 9276) counted as a failed upstream,
   sending the domain down the offline path; it is an unvalidated denial.

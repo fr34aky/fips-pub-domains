@@ -195,6 +195,8 @@ claim for a public suffix (`ch`, `co.uk`) — use a bundled Public Suffix List.
 ### 5.4 Pinning
 
 - A binding verified once is pinned (domain → npub, verified_at, method).
+  `verified_at` is when the binding took its current form; re-verifying an
+  unchanged binding does not rewrite the pin.
 - A **changed** binding is accepted only through a fresh verification of
   equal or stronger method (DNSSEC ≥ multi-resolver DNS ≥ single-resolver
   DNS ≥ attestation). A pinned binding is never replaced by an unverified
@@ -208,7 +210,14 @@ claim for a public suffix (`ch`, `co.uk`) — use a bundled Public Suffix List.
   verified the pin. A weaker denial — a captive portal's NXDOMAIN — leaves
   the pin in place but unused while DNS says no; it resolves again offline
   or once DNS answers properly. With several servers the rule applies per
-  server.
+  server, and it applies whether or not the claim of the server the record
+  names instead reached us — else a retired key would stay pinned and
+  answer the next offline lookup.
+- **Resolvers that disagree** on the record: the answer most of them gave
+  counts; a tie between different answers is no answer (as if DNS were
+  unreachable, so the pins decide) unless exactly one side validated under
+  DNSSEC — list order must never choose between an honest and a poisoned
+  resolver.
 
 ### 5.5 No public Internet: the claim *is* the TXT record
 
@@ -314,6 +323,10 @@ Browsers never ask for TXT and are never changed. The machine's resolver is:
 For a name with a binding and a reachable npub, the resolver:
 
 - answers AAAA with the synthesized `fd…` address,
+- answers only the address types (A, AAAA, ANY, CNAME) from the mesh,
+  HTTPS/SVCB with NODATA (their hints could steer to the legacy path), and
+  passes every other type — MX, TXT, SRV, NS … — to legacy DNS untouched,
+  so mail and SPF keep working under a wildcard zone,
 - answers A with NODATA and **suppresses the public AAAA** — address sorting
   (RFC 6724, used by bionic, glibc and Chromium) ranks `fd00::/8` below both
   IPv4 and global IPv6, so returning both would almost never use the mesh,

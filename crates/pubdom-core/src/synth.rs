@@ -14,6 +14,8 @@ use simple_dns::{
 pub const QTYPE_A: u16 = 1;
 pub const QTYPE_CNAME: u16 = 5;
 pub const QTYPE_AAAA: u16 = 28;
+pub const QTYPE_SVCB: u16 = 64;
+pub const QTYPE_HTTPS: u16 = 65;
 pub const QTYPE_ANY: u16 = 255;
 
 /// The one question of a query, as the resolver needs it.

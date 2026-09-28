@@ -238,8 +238,15 @@ async fn serve(zones: Arc<Zones>, bind: SocketAddrV6, ttl: u32) -> Result<()> {
     let udp_task = tokio::spawn(async move {
         let mut buf = [0u8; 1500];
         loop {
-            let Ok((n, from)) = udp.recv_from(&mut buf).await else {
-                continue;
+            let (n, from) = match udp.recv_from(&mut buf).await {
+                Ok(v) => v,
+                Err(e) => {
+                    // A persistent error (EMFILE, a vanished interface) must
+                    // not turn this loop into a busy spin.
+                    tracing::warn!(error = %e, "receive failed");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
             };
             if let Some(r) = reply(&z_udp, &buf[..n], ttl) {
                 let _ = udp.send_to(&r, from).await;
@@ -248,8 +255,15 @@ async fn serve(zones: Arc<Zones>, bind: SocketAddrV6, ttl: u32) -> Result<()> {
     });
     let tcp_task = tokio::spawn(async move {
         loop {
-            let Ok((mut s, _)) = tcp.accept().await else {
-                continue;
+            let (mut s, _) = match tcp.accept().await {
+                Ok(v) => v,
+                Err(e) => {
+                    // A persistent error (EMFILE, a vanished interface) must
+                    // not turn this loop into a busy spin.
+                    tracing::warn!(error = %e, "accept failed");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
             };
             let z = zones.clone();
             tokio::spawn(async move {

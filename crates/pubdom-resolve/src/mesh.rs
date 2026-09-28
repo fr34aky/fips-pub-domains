@@ -165,7 +165,8 @@ impl KernelMeshDns {
             let start = std::time::Instant::now();
             while start.elapsed() < wait {
                 sock.set_read_timeout(Some(
-                    (wait - start.elapsed()).max(Duration::from_millis(10)),
+                    wait.saturating_sub(start.elapsed())
+                        .max(Duration::from_millis(10)),
                 ))?;
                 match sock.recv_from(&mut buf) {
                     Ok((n, from)) => {

@@ -119,6 +119,7 @@ after the stub points at us.
   ranks `fd00::/8` below IPv4 and global IPv6; returning both would almost
   never use the mesh. A bound name gets the CNAME + `fd…` AAAA, NODATA for
   A, NODATA for HTTPS/SVCB (their hints could steer to the legacy path).
+  Every other type (MX, TXT, SRV, …) stays legacy DNS.
 - **UDP first.** fips authenticates the source address, so the spoofing
   problem that motivates TCP on the Internet does not exist; UDP saves a
   round trip. TCP remains for truncation (RFC 7766).

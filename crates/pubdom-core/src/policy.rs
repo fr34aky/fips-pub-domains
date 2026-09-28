@@ -121,21 +121,43 @@ pub fn decide(input: Input<'_>) -> Outcome {
                 .iter()
                 .filter(|c| named.contains(&c.author))
                 .collect();
+            // A pinned server the record no longer names: dropping it is a
+            // binding change, accepted only with a verification at least as
+            // strong as its pin — whether or not a claim reached us, else a
+            // retired key would stay pinned for the next offline lookup. A
+            // weaker record leaves it pinned, after the named ones.
+            let mut unnamed_kept = Vec::new();
+            let mut changes = Vec::new();
+            for pin in input.pins.iter().filter(|p| !named.contains(&p.npub)) {
+                if *method >= pin.method {
+                    changes.push(PinChange::Forget(pin.npub));
+                } else {
+                    unnamed_kept.push(pin.clone());
+                }
+            }
             if matching.is_empty() {
                 // DNS says the domain participates but no reachable relay
                 // carries a claim. Pins the record still names resolve (spec
                 // §5.1 step 2): their claims were verified when they were
                 // pinned, and the record vouches for the same keys today.
-                // Otherwise not over fips, and the pins stay.
+                // Otherwise not over fips.
                 if !pinned_named.is_empty() {
-                    return keep(Decision::Bound(pinned_named.into_iter().cloned().collect()));
+                    let mut servers: Vec<Binding> = pinned_named.into_iter().cloned().collect();
+                    servers.extend(unnamed_kept);
+                    return Outcome {
+                        decision: Decision::Bound(servers),
+                        changes,
+                    };
                 }
                 let reason = if input.claims.is_empty() {
                     Reason::NoClaim
                 } else {
                     Reason::ClaimMismatch
                 };
-                return keep(Decision::NotOverFips(reason));
+                return Outcome {
+                    decision: Decision::NotOverFips(reason),
+                    changes,
+                };
             }
 
             // Every key the record names and that claims the domain is a
@@ -149,16 +171,16 @@ pub fn decide(input: Input<'_>) -> Outcome {
                 (None, None) => b.created_at.cmp(&a.created_at),
             });
             let mut servers = Vec::new();
-            let mut changes = Vec::new();
             for claim in matching {
                 let existing = input.pins.iter().find(|p| p.npub == claim.author);
                 if let Some(pin) = existing
-                    && *method < pin.method
+                    && (*method < pin.method || (*method == pin.method && claim.port == pin.port))
                 {
                     // Weaker than what the pin rests on (spec §5.4): the
                     // binding is not downgraded — else an unsigned replay of
                     // the real record would lower the bar for the change
-                    // that follows.
+                    // that follows. Equal and unchanged: nothing to write;
+                    // `verified_at` records when the binding took this form.
                     servers.push(pin.clone());
                     continue;
                 }
@@ -172,22 +194,13 @@ pub fn decide(input: Input<'_>) -> Outcome {
                 servers.push(fresh.clone());
                 changes.push(PinChange::Put(fresh));
             }
-            // A pinned server the record no longer names: dropping it is a
-            // binding change, accepted only with a verification at least
-            // as strong as its pin. A weaker record leaves it pinned, after
-            // the named ones.
-            for pin in &input.pins {
-                if named.contains(&pin.npub) {
-                    if !servers.iter().any(|s| s.npub == pin.npub) {
-                        // Named, but no claim reached us: still a server.
-                        servers.push(pin.clone());
-                    }
-                } else if *method >= pin.method {
-                    changes.push(PinChange::Forget(pin.npub));
-                } else {
-                    servers.push(pin.clone());
+            // Named, but no claim reached us: still a server.
+            for pin in &pinned_named {
+                if !servers.iter().any(|s| s.npub == pin.npub) {
+                    servers.push((*pin).clone());
                 }
             }
+            servers.extend(unnamed_kept);
             Outcome {
                 decision: Decision::Bound(servers),
                 changes,
@@ -407,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn online_hit_without_matching_claim_is_legacy_and_keeps_pin() {
+    fn online_hit_without_matching_claim_is_legacy_and_drops_unnamed_pin() {
         let o = run(
             vec![pin(1, Method::Dns)],
             txt(&[2], Method::Dns),
@@ -415,6 +428,17 @@ mod tests {
             false,
         );
         assert_eq!(o.decision, Decision::NotOverFips(Reason::ClaimMismatch));
+        // The record no longer names the pinned key, as strongly as the pin
+        // was made: the key is retired even though the new one's claim did
+        // not reach us — else it would answer the next offline lookup.
+        assert_eq!(o.changes, vec![PinChange::Forget(npub(1))]);
+        // A weaker record does not.
+        let o = run(
+            vec![pin(1, Method::Dnssec)],
+            txt(&[2], Method::Dns),
+            &[claim(1, 5)],
+            false,
+        );
         assert!(o.changes.is_empty());
         let o = run(vec![], txt(&[2], Method::Dns), &[], false);
         assert_eq!(o.decision, Decision::NotOverFips(Reason::NoClaim));
@@ -441,6 +465,30 @@ mod tests {
             false,
         );
         assert_eq!(o.decision, Decision::NotOverFips(Reason::NoClaim));
+        assert_eq!(o.changes, vec![PinChange::Forget(npub(1))]);
+        // One named pin resolves, an unnamed one is retired meanwhile.
+        let o = run(
+            vec![pin(1, Method::Dns), pin(3, Method::Dns)],
+            txt(&[1, 2], Method::Dns),
+            &[],
+            false,
+        );
+        assert_eq!(npubs(&o), vec![npub(1)]);
+        assert_eq!(o.changes, vec![PinChange::Forget(npub(3))]);
+    }
+
+    #[test]
+    fn unchanged_reverification_writes_nothing() {
+        // Every TXT cache expiry re-verifies; an unchanged binding must not
+        // rewrite the pin file each time.
+        let o = run(
+            vec![pin(1, Method::Dns)],
+            txt(&[1], Method::Dns),
+            &[claim(1, 5)],
+            false,
+        );
+        assert_eq!(npubs(&o), vec![npub(1)]);
+        assert!(o.changes.is_empty());
     }
 
     #[test]

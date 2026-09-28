@@ -137,11 +137,10 @@ impl Config {
             .collect()
     }
 
-    pub fn resolver_config(&self, upstreams: Vec<IpAddr>) -> ResolverConfig {
+    pub fn resolver_config(&self) -> ResolverConfig {
         ResolverConfig {
             public_relays: self.public_relays.clone(),
             mesh_relays: self.mesh_relays.clone(),
-            upstreams,
             dnssec: self.dnssec,
             allow_unverified_offline: self.allow_unverified_offline,
             ..ResolverConfig::default()
@@ -151,7 +150,7 @@ impl Config {
     /// The production resolver: hickory + nostr-sdk + kernel sockets + the
     /// pin file. `upstreams` empty means "no legacy DNS": mesh-only node.
     pub async fn build_resolver(&self, upstreams: Vec<IpAddr>) -> Result<ProdResolver, String> {
-        let rc = self.resolver_config(upstreams.clone());
+        let rc = self.resolver_config();
         let txt = MaybeTxt::new(&upstreams, self.dnssec, rc.txt_timeout)?;
         let relays =
             RelayClient::new(&self.public_relays, &self.mesh_relays, rc.relay_timeout).await;

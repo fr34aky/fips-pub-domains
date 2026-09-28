@@ -52,7 +52,7 @@ Build only what you need with `cargo build --release -p pubdom-server`
 (or `-p pubdom-daemon -p pubdom-cli`). The first build fetches and compiles
 the dependencies (a few minutes); later builds are incremental.
 
-Run the tests with `cargo test --workspace` — 50 tests, no network needed.
+Run the tests with `cargo test --workspace` — no network needed.
 
 ## Install: the domain server
 

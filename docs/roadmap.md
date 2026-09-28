@@ -65,6 +65,12 @@
 - On systemd-resolved, a link search domain equal to a bound domain shadows
   the daemon ([daemon.md](daemon.md), Troubleshooting).
 - Mesh relays are desktop-only; on Android offline means pinned domains.
+- When DNS fails while the node believes it is online (every upstream
+  timing out, or answers failing DNSSEC validation — a router stripping
+  DNSSEC records does that for every signed zone), an unpinned domain is
+  looked up on the mesh relays and the decision is cached for an hour.
+  A shorter retry would recover sooner from a hiccup but ask the relays
+  more often; the balance is open.
 - Online verification is unaffected by DNSSEC key rollovers done properly
   (every lookup validates the live chain; the pin stores no key). A broken
   rollover makes validation *bogus*, which counts as an unreachable

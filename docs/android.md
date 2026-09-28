@@ -11,7 +11,7 @@ the phone can: the mesh transport and the responder registration.
 | fips2go file | role |
 |---|---|
 | `shim/src/names.rs` | builds the resolver over the engine's `MeshLink`, runs it from the DNS proxy's blocking per-query thread on a one-worker tokio runtime, implements `MeshDns` |
-| `shim/src/meshudp.rs` | one UDP request/response over the mesh from the node's own address through a smoltcp socket — the UDP twin of `meshhttp.rs`; `Divert` claims UDP flows for it |
+| `shim/src/meshudp.rs` | one UDP request/response over the mesh from the node's own address through a smoltcp socket — the UDP twin of `meshhttp.rs`; and the ICMPv6 echo that confirms a target node is reachable. `Divert` claims UDP flows and echo replies (by identifier) for it |
 | `shim/src/dns.rs` | the proxy asks the resolver for every non-`.fips` name before the upstreams; `None` means "not over fips" and the query goes upstream unchanged |
 | `shim/src/config.rs` | knobs `names_pins_path` (set = on), `names_mesh_relays`, `names_allow_unverified_offline` |
 | `ConfigStore.kt` / `SettingsFragment.kt` | Settings → *Public domain names over fips* (`public_names`, default on) decides whether the pin path is sent |

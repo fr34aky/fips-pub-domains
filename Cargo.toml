@@ -5,7 +5,7 @@ members = ["crates/pubdom-core", "crates/pubdom-resolve", "crates/pubdom-server"
 [workspace.package]
 # One version for every crate and binary; a release is this number, a
 # CHANGELOG entry and an annotated tag vX.Y.Z on main (CONTRIBUTING.md).
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/fr34aky/fips-pub-domains"

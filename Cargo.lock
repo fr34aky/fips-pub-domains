@@ -1395,7 +1395,7 @@ checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
 
 [[package]]
 name = "pubdom-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1413,7 +1413,7 @@ dependencies = [
 
 [[package]]
 name = "pubdom-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bech32",
  "hex",
@@ -1427,7 +1427,7 @@ dependencies = [
 
 [[package]]
 name = "pubdom-daemon"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1445,7 +1445,7 @@ dependencies = [
 
 [[package]]
 name = "pubdom-resolve"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64",
  "futures",
@@ -1465,7 +1465,7 @@ dependencies = [
 
 [[package]]
 name = "pubdom-server"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",

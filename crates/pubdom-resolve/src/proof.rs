@@ -227,7 +227,13 @@ impl Validator<'_> {
             return Err(format!("no {ty} at {name}"));
         }
         let mut why = format!("no RRSIG over {name} {ty}");
-        for sig in self.sigs(name, ty) {
+        // Newest first: the first that verifies gives the RRset's latest
+        // inception, which is how two proofs are ordered.
+        let mut sigs = self.sigs(name, ty);
+        sigs.sort_by_key(|s| std::cmp::Reverse(s.input().sig_inception.get()));
+        // A DNSKEY RRset's trust points, worked out once for all its RRSIGs.
+        let mut anchored: Option<Result<(Vec<&DNSKEY>, u64), String>> = None;
+        for sig in sigs {
             let input = sig.input();
             let signer = &input.signer_name;
             // The signer is the zone owning the name: an ancestor (or the
@@ -261,10 +267,10 @@ impl Validator<'_> {
             let (keys, below) = if ty == RecordType::DNSKEY {
                 // The zone's own key set, self-signed: the signing key must be
                 // anchored (root) or covered by a validated DS.
-                match self.anchored_keys(name) {
-                    Ok(k) => k,
+                match anchored.get_or_insert_with(|| self.anchored_keys(name)) {
+                    Ok((k, e)) => (k.clone(), *e),
                     Err(e) => {
-                        why = e;
+                        why = e.clone();
                         continue;
                     }
                 }
@@ -817,9 +823,10 @@ mod tests {
             }
         }
         let chain = encode_chain(&recs).unwrap();
-        let start = std::time::Instant::now();
-        assert!(verify_chain(&chain, "example.org", NOW, &w.anchors).is_err());
-        assert!(start.elapsed() < Duration::from_secs(2));
+        match verify_chain(&chain, "example.org", NOW, &w.anchors) {
+            Err(ProofError::Unsigned(e)) => assert!(e.contains("too many signatures"), "{e}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

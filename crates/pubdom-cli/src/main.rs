@@ -146,7 +146,7 @@ async fn main() -> Result<()> {
             let dnssec = pubdom_resolve::proof::DnssecProofs::default();
             let now = pubdom_resolve::now();
             // Each proof checked once, for the listing and the decision.
-            let mut checked = Checked(Vec::new());
+            let mut checked = Checked(Default::default());
             for c in &claims {
                 let result = c.dnssec.as_ref().map(|_| dnssec.check(c, now));
                 let proof = match &result {
@@ -162,7 +162,8 @@ async fn main() -> Result<()> {
                     c.author, c.port, c.created_at
                 );
                 let shown = result.and_then(Result::ok).map(Into::into);
-                checked.0.push((c.author, c.created_at, shown));
+                // `ingest_claims` keeps one claim per author.
+                checked.0.insert(c.author, shown);
             }
             let proofs: &dyn ProofVerifier = if cfg.dnssec { &checked } else { &NoProofs };
             let out = policy::decide(Input {
@@ -170,7 +171,7 @@ async fn main() -> Result<()> {
                 pins: pinned,
                 txt,
                 claims: &claims,
-                now: pubdom_resolve::now(),
+                now,
                 allow_unverified_offline: cfg.allow_unverified_offline,
                 proofs,
             });
@@ -250,14 +251,12 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Proofs already checked for `verify`'s listing, by (author, created_at).
-struct Checked(Vec<(pubdom_core::Npub, u64, Option<ProvenRecord>)>);
+/// Proofs already checked for `verify`'s listing — at the same `now` the
+/// decision uses — by author.
+struct Checked(std::collections::HashMap<pubdom_core::Npub, Option<ProvenRecord>>);
 
 impl ProofVerifier for Checked {
     fn verify(&self, claim: &Claim, _now: u64) -> Option<ProvenRecord> {
-        self.0
-            .iter()
-            .find(|(a, t, _)| *a == claim.author && *t == claim.created_at)
-            .and_then(|(_, _, p)| p.clone())
+        self.0.get(&claim.author).cloned().flatten()
     }
 }

@@ -250,38 +250,50 @@ pub fn decide(input: Input<'_>) -> Outcome {
         }
 
         TxtLookup::Unreachable => {
+            // Offline, a proof carried in a claim stands in for the record
+            // (spec §5.5). Proofs may show different versions of it — a
+            // retired key's claim can carry a chain signed before the change
+            // and still valid — so the newest proven record decides, as the
+            // live record would online.
+            let newest = match newest_proof(&input) {
+                Ok(n) => n,
+                // Two different records signed at the same time: nothing to
+                // tell them apart by.
+                Err(()) if input.pins.is_empty() => {
+                    return keep(Decision::NotOverFips(Reason::Conflict));
+                }
+                Err(()) => None,
+            };
             if !input.pins.is_empty() {
-                return keep(Decision::Bound(input.pins.clone()));
+                let Some(record) = newest else {
+                    return keep(Decision::Bound(input.pins.clone()));
+                };
+                // A pin resting on evidence older than the newest proven
+                // record, which no longer names it, is retired; everything
+                // else stays, and keys the record names that have a claim
+                // join as servers.
+                let mut servers = Vec::new();
+                let mut changes = Vec::new();
+                for pin in &input.pins {
+                    if record.named.contains(&pin.npub) || pin.verified_at >= record.signed_at {
+                        servers.push(pin.clone());
+                    } else {
+                        changes.push(PinChange::Forget(pin.npub));
+                    }
+                }
+                for b in proven_servers(&input, &record) {
+                    if !servers.iter().any(|s| s.npub == b.npub) {
+                        changes.push(PinChange::Put(b.clone()));
+                        servers.push(b);
+                    }
+                }
+                return Outcome {
+                    decision: Decision::Bound(servers),
+                    changes,
+                };
             }
-            // Offline and unpinned: only a proof carried in the claim can
-            // verify it (spec §5.5). Proofs may show different versions of
-            // the record — a retired key's claim can carry a chain signed
-            // before the change and still valid — so the newest proven
-            // record decides, as the live record would online: every key it
-            // names that has a claim is a server, newest claim first.
-            let newest = input
-                .claims
-                .iter()
-                .filter(|c| c.dnssec.is_some())
-                .filter_map(|c| input.proofs.verify(c, input.now))
-                .max_by_key(|p| p.signed_at);
             if let Some(record) = newest {
-                let mut named: Vec<&Claim> = input
-                    .claims
-                    .iter()
-                    .filter(|c| record.named.contains(&c.author))
-                    .collect();
-                named.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-                let servers: Vec<Binding> = named
-                    .into_iter()
-                    .map(|c| Binding {
-                        domain: input.domain.to_owned(),
-                        npub: c.author,
-                        port: c.port,
-                        method: Method::Dnssec,
-                        verified_at: input.now,
-                    })
-                    .collect();
+                let servers = proven_servers(&input, &record);
                 return Outcome {
                     changes: servers.iter().cloned().map(PinChange::Put).collect(),
                     decision: Decision::Bound(servers),
@@ -313,6 +325,52 @@ pub fn decide(input: Input<'_>) -> Outcome {
             }))
         }
     }
+}
+
+/// The newest record any claim's proof shows (by its signature's
+/// inception). `Err` when two different records share that time.
+fn newest_proof(input: &Input<'_>) -> Result<Option<ProvenRecord>, ()> {
+    let mut proven: Vec<ProvenRecord> = input
+        .claims
+        .iter()
+        .filter(|c| c.dnssec.is_some())
+        .filter_map(|c| input.proofs.verify(c, input.now))
+        .map(|mut p| {
+            p.named.sort();
+            p.named.dedup();
+            p
+        })
+        .collect();
+    let Some(top) = proven.iter().map(|p| p.signed_at).max() else {
+        return Ok(None);
+    };
+    proven.retain(|p| p.signed_at == top);
+    if proven.iter().any(|p| p.named != proven[0].named) {
+        return Err(());
+    }
+    Ok(proven.pop())
+}
+
+/// Every key `record` names that has a claim, as a DNSSEC binding, newest
+/// claim first. `verified_at` is when the record was signed: the age of the
+/// evidence, so a newer proven record can supersede it later.
+fn proven_servers(input: &Input<'_>, record: &ProvenRecord) -> Vec<Binding> {
+    let mut named: Vec<&Claim> = input
+        .claims
+        .iter()
+        .filter(|c| record.named.contains(&c.author))
+        .collect();
+    named.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    named
+        .into_iter()
+        .map(|c| Binding {
+            domain: input.domain.to_owned(),
+            npub: c.author,
+            port: c.port,
+            method: Method::Dnssec,
+            verified_at: record.signed_at,
+        })
+        .collect()
 }
 
 /// Parse claim events for `domain`, drop what fails the limits, what is
@@ -742,6 +800,65 @@ mod tests {
             proofs: &Yes,
         });
         assert_eq!(npubs(&o), vec![npub(2)]);
+        // Already pinned to the retired key from its older proof (evidence
+        // signed at 50): the newer record retires it and brings in 2.
+        let mut retired_pin = pin(5, Method::Dnssec);
+        retired_pin.verified_at = 50;
+        let mut current = claim(2, 5);
+        current.dnssec = Some("AAAA".into());
+        let o = decide(Input {
+            domain: "example.org",
+            pins: vec![retired_pin.clone()],
+            txt: TxtLookup::Unreachable,
+            claims: &[claim(5, 20), current.clone()],
+            now: NOW,
+            allow_unverified_offline: false,
+            proofs: &Yes,
+        });
+        assert_eq!(npubs(&o), vec![npub(2)]);
+        assert!(o.changes.contains(&PinChange::Forget(npub(5))));
+        assert_eq!(bound(&o)[0].verified_at, 100, "the evidence's age");
+        // A pin verified online after that record was signed stays.
+        retired_pin.verified_at = 150;
+        let o = decide(Input {
+            domain: "example.org",
+            pins: vec![retired_pin],
+            txt: TxtLookup::Unreachable,
+            claims: &[claim(5, 20), current],
+            now: NOW,
+            allow_unverified_offline: false,
+            proofs: &Yes,
+        });
+        assert_eq!(npubs(&o), vec![npub(5), npub(2)]);
+    }
+
+    #[test]
+    fn proofs_of_different_records_signed_at_once_conflict() {
+        // Signers that align inception (PowerDNS: the start of the week)
+        // give two versions of the record the same time: refuse, rather
+        // than let the relay's order pick.
+        struct Tie;
+        impl ProofVerifier for Tie {
+            fn verify(&self, c: &Claim, _: u64) -> Option<ProvenRecord> {
+                Some(ProvenRecord {
+                    signed_at: 100,
+                    named: vec![c.author],
+                })
+            }
+        }
+        let (mut a, mut b) = (claim(1, 5), claim(2, 6));
+        a.dnssec = Some("AAAA".into());
+        b.dnssec = Some("AAAA".into());
+        let o = decide(Input {
+            domain: "example.org",
+            pins: vec![],
+            txt: TxtLookup::Unreachable,
+            claims: &[a, b],
+            now: NOW,
+            allow_unverified_offline: true,
+            proofs: &Tie,
+        });
+        assert_eq!(o.decision, Decision::NotOverFips(Reason::Conflict));
     }
 
     #[test]

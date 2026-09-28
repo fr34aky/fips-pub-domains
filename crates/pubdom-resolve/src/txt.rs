@@ -14,9 +14,9 @@
 //! records outrank denials (a stale negative cache must not hide a fresh
 //! record). A tie is `Disputed`: list order must never pick between an
 //! honest and a poisoned resolver. An answer that failed validation (bogus)
-//! is not counted; with no validated answer beside it, the lookup is
-//! `Disputed` — the zone is signed, so the unvalidated answers cannot be
-//! trusted, and tampering is not an outage.
+//! counts like a failed upstream: hickory cannot tell tampering from a lost
+//! sub-query or a DNSSEC-stripping router, and an attacker able to forge an
+//! answer can drop it anyway.
 //!
 //! A miss is a miss only if every upstream that answered said so; an
 //! upstream that failed (timeout, SERVFAIL) is simply not counted, and if
@@ -52,9 +52,6 @@ enum One {
     Miss {
         secure: bool,
     },
-    /// Failed DNSSEC validation: not counted, but not "unreachable"
-    /// either — someone answered, and it was wrong.
-    Bogus,
     Failed,
 }
 
@@ -124,19 +121,15 @@ impl TxtVerifier {
 
     async fn one(r: &TokioResolver, name: &str) -> One {
         match r.lookup(name, RecordType::TXT).await {
-            // An answer that failed validation: hickory reports it as an
-            // error (records and denials alike), or rarely as a bogus record.
-            Err(NetError::Dns(DnsError::DnssecBogus))
-            | Err(NetError::Dns(DnsError::Nsec {
-                proof: Proof::Bogus,
-                ..
-            })) => {
-                tracing::debug!(%name, "TXT answer failed DNSSEC validation");
-                One::Bogus
-            }
+            // An answer that failed validation counts like no answer. It is
+            // not evidence of tampering — hickory also reports a lost
+            // sub-query or a DNSSEC-stripping router as bogus — and treating
+            // it as more would give an attacker nothing: one who can forge an
+            // answer can also drop it. (hickory reports it as an error, which
+            // the arm below covers; a bogus record inside Ok is rare.)
             Ok(lookup) if lookup.answers().iter().any(|r| r.proof == Proof::Bogus) => {
                 tracing::debug!(%name, "TXT answer failed DNSSEC validation");
-                One::Bogus
+                One::Failed
             }
             Ok(lookup) => {
                 let mut records = Vec::new();
@@ -190,29 +183,18 @@ fn combine(answers: &[One]) -> (TxtLookup, Option<u32>) {
     };
     let answered: Vec<&One> = answers
         .iter()
-        .filter(|a| !matches!(a, One::Failed | One::Bogus))
+        .filter(|a| !matches!(a, One::Failed))
         .collect();
     if answered.is_empty() {
-        // Only bogus answers: tampering or broken signatures, not an
-        // outage — it must not take the offline path.
-        return if answers.iter().any(|a| matches!(a, One::Bogus)) {
-            (TxtLookup::Disputed, None)
-        } else {
-            (TxtLookup::Unreachable, None)
-        };
+        return (TxtLookup::Unreachable, None);
     }
     // Once anything validated, only validated answers count: an
     // unvalidated one that contradicts a signed zone is forged or stale.
-    // A bogus answer proves the zone is signed, too: without a validated
-    // answer beside it, the unvalidated ones cannot be trusted either.
     // Deliberately so for a validated denial against unvalidated records
     // too: at worst a replayed signed denial unpins the domain until the
     // next validated lookup pins it again, whereas letting forged records
     // outvote it could keep a retired key in use.
     let validated = answered.iter().any(secure);
-    if !validated && answers.iter().any(|a| matches!(a, One::Bogus)) {
-        return (TxtLookup::Disputed, None);
-    }
     let counted: Vec<&One> = if validated {
         answered.into_iter().filter(secure).collect()
     } else {
@@ -248,7 +230,7 @@ fn combine(answers: &[One]) -> (TxtLookup, Option<u32>) {
                 }
             }
             One::Miss { .. } => misses += 1,
-            One::Bogus | One::Failed => {}
+            One::Failed => {}
         }
     }
     let top = groups.iter().map(|g| g.count).max().unwrap_or(0);
@@ -415,25 +397,6 @@ mod tests {
         // withdrew it, a forged answer must not keep the old key in use.
         assert_eq!(
             combine(&[One::Miss { secure: true }, hit(&[1], false)]).0,
-            TxtLookup::Miss {
-                method: Method::Dnssec
-            }
-        );
-        // Only bogus answers: disputed, never the offline path.
-        assert_eq!(combine(&[One::Bogus, One::Failed]).0, TxtLookup::Disputed);
-        // A bogus answer beside unvalidated ones: the zone is signed, so
-        // they cannot be trusted — disputed, whatever they say.
-        assert_eq!(
-            combine(&[One::Bogus, One::Miss { secure: false }]).0,
-            TxtLookup::Disputed
-        );
-        assert_eq!(
-            combine(&[One::Bogus, hit(&[1], false)]).0,
-            TxtLookup::Disputed
-        );
-        // A bogus record does not count against a validated denial.
-        assert_eq!(
-            combine(&[One::Bogus, One::Miss { secure: true }]).0,
             TxtLookup::Miss {
                 method: Method::Dnssec
             }

@@ -30,11 +30,10 @@ pub enum TxtLookup {
     Miss { method: Method },
     /// No upstream could be asked: offline, or every upstream failed.
     Unreachable,
-    /// Upstreams answered, but nothing can be concluded: no majority among
-    /// the answers that count (the validated ones, when there are any), or
-    /// answers that failed DNSSEC validation with no validated one beside
-    /// them. Online, so not the offline path — no relay is asked and nothing
-    /// unverified is used; pins keep resolving.
+    /// Upstreams answered but disagree, with no majority among the answers
+    /// that count (the validated ones, when there are any). Online, so not
+    /// the offline path — no relay is asked and nothing unverified is used;
+    /// pins keep resolving.
     Disputed,
 }
 

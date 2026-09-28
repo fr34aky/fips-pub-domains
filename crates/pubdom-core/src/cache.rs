@@ -58,6 +58,15 @@ impl<K: Eq + Hash + Clone, V: Clone> TtlCache<K, V> {
         self.inner.lock().unwrap().remove(key);
     }
 
+    /// Remove the entry only if it is live and `pred` holds for its value,
+    /// atomically.
+    pub fn remove_if(&self, key: &K, now: u64, pred: impl FnOnce(&V) -> bool) {
+        let mut g = self.inner.lock().unwrap();
+        if g.get(key).is_some_and(|(exp, v)| *exp > now && pred(v)) {
+            g.remove(key);
+        }
+    }
+
     pub fn clear(&self) {
         self.inner.lock().unwrap().clear();
     }

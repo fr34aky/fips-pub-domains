@@ -29,7 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   included), so a forged or stale unsigned answer cannot outvote a signed
   zone; a tie is no longer broken by list order but treated as disputed —
   pins keep resolving, an unpinned domain stays legacy and is asked again a
-  minute later. A record that fails validation counts as no answer.
+  minute later.
 - Re-verifying an unchanged binding no longer rewrites the pin file and
   logs "binding verified and pinned" each time.
 - The reachability echo could panic on a scheduling delay; the daemon's

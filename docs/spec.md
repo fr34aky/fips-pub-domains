@@ -276,8 +276,7 @@ proof validates at the current time is a verified binding (method
 the record — a retired key's claim can carry a chain signed before the
 change and still valid — so the newest proven record (by its signature's
 inception) decides, as the live record would online: every key it names
-that has a claim is a server, newest claim first. Such a binding's
-`verified_at` is the record's signing time, the age of the evidence. Two
+that has a claim is a server, newest claim first. Two
 different records signed at the same time are a conflict: the domain is
 refused rather than decided by relay order. Proofs only matter for a
 domain that is not pinned: offline, pins answer without any relay, so

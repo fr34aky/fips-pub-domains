@@ -45,17 +45,17 @@ Binaries: `fips-pubdom-server`, `fips-pubdomd`, `fips-pubdom`. Config
 `/etc/fips-pubdom/`, pins `/var/lib/fips-pubdom/pins.json`, daemon on
 loopback 5356, server on the node's fips address 5355.
 
-## Environment notes (this machine)
+## Environment notes
 
-- This host (`serving-node`) is the node serving the demo domain `example.org`; its
-  key is `/etc/fips/fips.key` (group `fips`, the user is a member). The
-  second test node `home` has no SSH access from here; the user runs
-  commands there. A strfry relay reachable only over the mesh serves as the
-  mesh relay. Details are in Claude's memory for this project.
-- `cargo clippy` is unavailable here (no rustup default toolchain).
+- The demo domain, the serving node, the client node and the mesh relay
+  used for the live tests are private; they are recorded in Claude's memory
+  for this project, not in the repository. Documents use `example.org` and
+  placeholder npubs/addresses for them.
+- `cargo clippy` is unavailable on the reference machine (no rustup default
+  toolchain).
 - fips2go host tests: `cd ~/fips2go/shim && FIPS_LIBCLANG_PATH=/usr/lib
   CARGO_NET_GIT_FETCH_WITH_CLI=true source ../android-env.sh && cargo test`.
-  No Android target on this host; the `.so` is built elsewhere.
+  No Android target on the reference machine; the `.so` is built elsewhere.
 
 ## State and next steps
 

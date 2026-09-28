@@ -1,9 +1,9 @@
 # Testing
 
 Unit tests first, then a ladder of live checks, cheapest first. Each level
-catches a different class of problem. The live levels were run on
-2026-09-28 against the demo domain `example.org` (server node `serving-node`,
-client node `home`, a strfry relay reachable only over the mesh).
+catches a different class of problem. The live levels were run
+against a real domain (shown here as `example.org`) (a serving node, a
+client node, a strfry relay reachable only over the mesh).
 
 ## Unit tests
 
@@ -69,7 +69,7 @@ relays.
 
 ## Level 3 — the daemon on a second node
 
-On `home` (Ubuntu, systemd-resolved): install, `sudo fips-pubdomd
+On the client node (systemd-resolved): install, `sudo fips-pubdomd
 setup`, `systemctl enable --now fips-pubdom`.
 
 ```
@@ -93,7 +93,7 @@ domain under test until removed from the link ([daemon.md](daemon.md)).
 
 ## Level 4 — offline
 
-On `home`, with legacy DNS blocked but the mesh intact
+On the client node, with legacy DNS blocked but the mesh intact
 (`iptables -I OUTPUT ! -o lo -p udp --dport 53 -j DROP` and `ip6tables`):
 
 ```

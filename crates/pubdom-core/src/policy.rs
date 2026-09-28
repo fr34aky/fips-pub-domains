@@ -105,9 +105,18 @@ pub fn decide(input: Input<'_>) -> Outcome {
             let mut matching: Vec<&Claim> =
                 input.claims.iter().filter(|c| named.contains(&c.author)).collect();
             if matching.is_empty() {
+                // DNS says the domain participates but no reachable relay
+                // carries the claim. If we are pinned to a key the record
+                // still names, the pin resolves (spec §5.1 step 2): the claim
+                // was verified when the pin was made, and the record vouches
+                // for the same server today. Otherwise not over fips, and the
+                // pin, if any, stays.
+                if let Some(pin) = &input.pin
+                    && named.contains(&pin.npub)
+                {
+                    return keep(Decision::Bound(pin.clone()));
+                }
                 let reason = if input.claims.is_empty() { Reason::NoClaim } else { Reason::ClaimMismatch };
-                // DNS says the domain participates; the claim may simply not
-                // have reached this relay set yet. The pin, if any, stays.
                 return keep(Decision::NotOverFips(reason));
             }
             // Prefer the author we are already pinned to, then the newest.
@@ -276,6 +285,19 @@ mod tests {
         assert_eq!(o.decision, Decision::NotOverFips(Reason::ClaimMismatch));
         assert_eq!(o.pin_update, PinUpdate::Keep);
         let o = run(None, txt(&[2], Method::Dns), &[], false);
+        assert_eq!(o.decision, Decision::NotOverFips(Reason::NoClaim));
+    }
+
+    #[test]
+    fn pinned_server_still_named_by_txt_resolves_without_a_claim() {
+        // Found on the phone: its relays did not carry the claim (it lived on
+        // a relay inside the mesh), but the pin plus a TXT naming the same
+        // key is a verified binding.
+        let o = run(Some(pin(1, Method::Dnssec)), txt(&[1], Method::Dnssec), &[], false);
+        assert_eq!(bound(&o).npub, npub(1));
+        assert_eq!(o.pin_update, PinUpdate::Keep);
+        // …but not when the record names someone else.
+        let o = run(Some(pin(1, Method::Dnssec)), txt(&[2], Method::Dnssec), &[], false);
         assert_eq!(o.decision, Decision::NotOverFips(Reason::NoClaim));
     }
 

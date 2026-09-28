@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Zone records** (kind 37199, spec §3.3): the domain server publishes the
+  names it serves next to its claim — at start, every 24 h, and whenever a
+  zone file changes — and a client whose step 3 gets no answer from the
+  server resolves the name from that record instead, so names pointing at
+  other nodes keep working while the domain's server is down. Every target
+  reached this way has to answer an echo, the server's own node included.
+  `fips-pubdom zone <domain>` shows the record; `publish --dry-run` prints
+  both events.
+
 ## [0.1.0] - 2026-09-28
 
 ### Added

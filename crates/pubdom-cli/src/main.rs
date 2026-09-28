@@ -35,6 +35,8 @@ enum Cmd {
     Verify { domain: String },
     /// Fetch and print the claims for a domain, as the relays return them.
     Claims { domain: String },
+    /// Fetch and print the zone record the domain's pinned server published.
+    Zone { domain: String },
     /// Pinned bindings.
     Pins {
         #[command(subcommand)]
@@ -155,6 +157,39 @@ async fn main() -> Result<()> {
             };
             for ev in relays.fetch_claims(&domain, scope).await {
                 println!("{}", serde_json::to_string_pretty(&ev)?);
+            }
+            relays.shutdown().await;
+        }
+        Cmd::Zone { domain } => {
+            let domain =
+                pubdom_core::domain::normalize(&domain).ok_or_else(|| anyhow!("bad domain"))?;
+            let pins = FilePinStore::open(&cfg.pins)?;
+            let Some(pin) = pins.get(&domain) else {
+                println!(
+                    "{domain}: not pinned; a zone record is only trusted from the pinned server"
+                );
+                return Ok(());
+            };
+            let relays =
+                RelayClient::new(&cfg.public_relays, &cfg.mesh_relays, Duration::from_secs(3))
+                    .await;
+            let scope = if cli.offline {
+                RelayScope::Offline
+            } else {
+                RelayScope::AfterHit
+            };
+            let events = relays.fetch_zone(&domain, &pin.npub, scope).await;
+            match policy::ingest_zone(&pins, &domain, pin.npub, &events, pubdom_resolve::now()) {
+                Some(z) => {
+                    println!(
+                        "{domain}: zone record by {} created_at {}",
+                        z.author, z.created_at
+                    );
+                    for (label, target) in &z.names {
+                        println!("  {label:<12} {target:?}");
+                    }
+                }
+                None => println!("{domain}: no zone record from {}", pin.npub),
             }
             relays.shutdown().await;
         }

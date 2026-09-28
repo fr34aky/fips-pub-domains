@@ -81,10 +81,14 @@ fips-pubdom-server --key /etc/fips/fips.key serve \
 
 `serve` listens on the node's own fips address, UDP and TCP, port 5355.
 `--publish` signs the claim (kind 37197: `d=example.org`,
-`service fips-dns 5355`) with the node key and sends it to every `--relay`
-at start and every 24 h; it is an addressable event, so a re-publish
-replaces the previous one. `publish --dry-run` prints the signed event
-instead, for other tooling. A relay may gate writes on a pubkey allowlist —
+`service fips-dns 5355`) **and the zone record** (kind 37199: the `names`
+of the zone file) with the node key and sends them to every `--relay` — at
+start, every 24 h, and whenever a zone file changes. Both are addressable
+events, so a re-publish replaces the previous one. The zone record is what
+lets a client resolve `git.example.org` to the node serving it while this
+server is unreachable; without it a name resolves only while the server
+answers. `publish --dry-run` prints both signed events instead, for other
+tooling. A relay may gate writes on a pubkey allowlist —
 strfry's write-policy plugin, for instance — in which case the node's hex
 pubkey must be on it.
 

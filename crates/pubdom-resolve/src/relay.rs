@@ -1,17 +1,18 @@
-//! Claims from Nostr relays (spec §3, §5.5), and publishing them.
+//! Claims and zone records from Nostr relays (spec §3, §5.5), and
+//! publishing them.
 //!
 //! Two relay sets: the node's public relays, and "mesh relays" — relays on
-//! fips nodes, `ws://[fd…]:port`, reachable without Internet. Online, only
-//! the public set is asked and only after a TXT hit (the privacy gate,
-//! spec §8); offline, the mesh set first. fips exposes no generic event
-//! fetch, so this is our own small nostr-sdk client.
+//! fips nodes, `ws://<npub>.fips:port`, reachable without Internet. Online,
+//! both sets are asked, but only after a TXT hit (the privacy gate, spec
+//! §8); offline, the mesh set first. fips exposes no generic event fetch,
+//! so this is our own small nostr-sdk client.
 
 use nostr_sdk::prelude::*;
-use pubdom_core::claim::Event as CoreEvent;
-use pubdom_core::{Claim, KIND_CLAIM};
+use pubdom_core::claim::{Event as CoreEvent, Target, ZoneRecord};
+use pubdom_core::{Claim, KIND_CLAIM, KIND_ZONE, Npub};
 use std::time::Duration;
 
-/// Which relays a claim fetch may touch (spec §8, the privacy gate).
+/// Which relays a fetch may touch (spec §8, the privacy gate).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelayScope {
     /// After a TXT hit: the domain already opted in via DNS, so both sets.
@@ -48,10 +49,35 @@ impl RelayClient {
     /// the public ones are tried afterwards in case a path exists.
     /// Signatures are verified by the pool.
     pub async fn fetch_claims(&self, domain: &str, scope: RelayScope) -> Vec<CoreEvent> {
-        let filter = Filter::new()
-            .kind(Kind::from(KIND_CLAIM))
+        self.fetch(KIND_CLAIM, domain, None, scope).await
+    }
+
+    /// The zone record (kind 37199) for `domain` by its server (spec §3.3).
+    pub async fn fetch_zone(
+        &self,
+        domain: &str,
+        author: &Npub,
+        scope: RelayScope,
+    ) -> Vec<CoreEvent> {
+        self.fetch(KIND_ZONE, domain, Some(author), scope).await
+    }
+
+    async fn fetch(
+        &self,
+        kind: u16,
+        domain: &str,
+        author: Option<&Npub>,
+        scope: RelayScope,
+    ) -> Vec<CoreEvent> {
+        let mut filter = Filter::new()
+            .kind(Kind::from(kind))
             .identifier(domain)
             .limit(32);
+        if let Some(a) = author
+            && let Ok(pk) = PublicKey::from_hex(&a.to_hex())
+        {
+            filter = filter.author(pk);
+        }
         match scope {
             RelayScope::AfterHit => {
                 let (a, b) = futures::join!(
@@ -134,6 +160,42 @@ pub async fn publish_claim(
     dnssec: Option<&str>,
     timeout: Duration,
 ) -> Result<Vec<String>, String> {
+    publish(
+        keys,
+        relays,
+        KIND_CLAIM,
+        Claim::tags(domain, port, dnssec),
+        timeout,
+    )
+    .await
+}
+
+/// Publish the zone record (kind 37199) for `domain`: the names it serves,
+/// so clients can resolve them while the server itself is unreachable.
+pub async fn publish_zone(
+    keys: Keys,
+    relays: &[String],
+    domain: &str,
+    names: &[(String, Target)],
+    timeout: Duration,
+) -> Result<Vec<String>, String> {
+    publish(
+        keys,
+        relays,
+        KIND_ZONE,
+        ZoneRecord::tags(domain, names),
+        timeout,
+    )
+    .await
+}
+
+async fn publish(
+    keys: Keys,
+    relays: &[String],
+    kind: u16,
+    tags: Vec<Vec<String>>,
+    timeout: Duration,
+) -> Result<Vec<String>, String> {
     let client = Client::builder().signer(keys).build();
     for u in relays {
         client.add_relay(u).await.map_err(|e| format!("{u}: {e}"))?;
@@ -142,24 +204,26 @@ pub async fn publish_claim(
     // before the handshake is "relay not connected".
     client.connect().await;
     client.wait_for_connection(timeout).await;
-    let tags: Vec<Tag> = Claim::tags(domain, port, dnssec)
-        .into_iter()
-        .map(|t| Tag::parse(t).map_err(|e| e.to_string()))
-        .collect::<Result<_, _>>()?;
-    let builder = EventBuilder::new(Kind::from(KIND_CLAIM), "").tags(tags);
+    let builder = EventBuilder::new(Kind::from(kind), "").tags(parse_tags(tags)?);
     let out = tokio::time::timeout(timeout, client.send_event_builder(builder))
         .await
         .map_err(|_| "timed out publishing".to_string())?
         .map_err(|e| e.to_string())?;
     let ok: Vec<String> = out.success.iter().map(|u| u.to_string()).collect();
     for (u, why) in &out.failed {
-        tracing::warn!(relay = %u, reason = %why, "relay rejected the claim");
+        tracing::warn!(relay = %u, kind, reason = %why, "relay rejected the event");
     }
     client.disconnect().await;
     if ok.is_empty() {
-        return Err("no relay accepted the claim".into());
+        return Err(format!("no relay accepted the kind {kind} event"));
     }
     Ok(ok)
+}
+
+fn parse_tags(tags: Vec<Vec<String>>) -> Result<Vec<Tag>, String> {
+    tags.into_iter()
+        .map(|t| Tag::parse(t).map_err(|e| e.to_string()))
+        .collect()
 }
 
 /// The claim event as JSON without sending it — for `--dry-run` and for
@@ -170,12 +234,21 @@ pub fn claim_event_json(
     port: u16,
     dnssec: Option<&str>,
 ) -> Result<String, String> {
-    let tags: Vec<Tag> = Claim::tags(domain, port, dnssec)
-        .into_iter()
-        .map(|t| Tag::parse(t).map_err(|e| e.to_string()))
-        .collect::<Result<_, _>>()?;
-    let ev = EventBuilder::new(Kind::from(KIND_CLAIM), "")
-        .tags(tags)
+    signed_json(keys, KIND_CLAIM, Claim::tags(domain, port, dnssec))
+}
+
+/// The zone record as JSON without sending it.
+pub fn zone_event_json(
+    keys: &Keys,
+    domain: &str,
+    names: &[(String, Target)],
+) -> Result<String, String> {
+    signed_json(keys, KIND_ZONE, ZoneRecord::tags(domain, names))
+}
+
+fn signed_json(keys: &Keys, kind: u16, tags: Vec<Vec<String>>) -> Result<String, String> {
+    let ev = EventBuilder::new(Kind::from(kind), "")
+        .tags(parse_tags(tags)?)
         .sign_with_keys(keys)
         .map_err(|e| e.to_string())?;
     ev.try_as_pretty_json().map_err(|e| e.to_string())
@@ -196,5 +269,21 @@ mod tests {
         assert_eq!(claim.domain, "example.org");
         assert_eq!(claim.port, 5355);
         assert_eq!(claim.author.to_hex(), keys.public_key().to_hex());
+    }
+
+    #[test]
+    fn signed_zone_record_parses_back_through_core() {
+        let keys = Keys::generate();
+        let names = vec![
+            ("www".to_string(), Target::Author),
+            ("mail".to_string(), Target::Legacy),
+        ];
+        let json = zone_event_json(&keys, "example.org", &names).unwrap();
+        let ev = Event::from_json(&json).unwrap();
+        ev.verify().unwrap();
+        let z = ZoneRecord::parse(&convert(ev)).unwrap();
+        assert_eq!(z.names, names);
+        assert_eq!(z.lookup("www"), Some(z.author));
+        assert_eq!(z.lookup("mail"), None);
     }
 }

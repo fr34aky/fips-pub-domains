@@ -262,7 +262,10 @@ so this is accepted; the online rule (TXT first, §8) is unchanged.
   also exists in the public DNS, so a zone must name exactly the names that
   are on the mesh — a wildcard sends *every* name under the domain to the
   node, including those that exist only on the Internet.
-- Server offline → fall back to the zone record (§3.3).
+- Server offline (no answer, as opposed to NXDOMAIN) → fall back to the
+  newest zone record (§3.3) by the pinned server. Nothing has then proved
+  any node reachable, so every target — the server's own node included —
+  must answer an echo before its address is handed out (§7).
 
 ### 6.1 The server
 

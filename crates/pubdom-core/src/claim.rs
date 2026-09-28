@@ -168,6 +168,21 @@ impl ZoneRecord {
         })
     }
 
+    /// The tags of a zone record for `domain` — what the server publishes.
+    /// `names` are (label, target) as in [`ZoneRecord::names`].
+    pub fn tags(domain: &str, names: &[(String, Target)]) -> Vec<Vec<String>> {
+        let mut tags = vec![vec!["d".into(), domain.into()]];
+        for (label, target) in names {
+            let value = match target {
+                Target::Node(n) => n.to_string(),
+                Target::Author => "self".into(),
+                Target::Legacy => "legacy".into(),
+            };
+            tags.push(vec!["name".into(), label.clone(), value]);
+        }
+        tags
+    }
+
     /// Resolve `label` (relative, see `domain::relative_label`) to a node,
     /// applying the wildcard. `None` = not over fips.
     pub fn lookup(&self, label: &str) -> Option<Npub> {
@@ -276,6 +291,13 @@ mod tests {
         };
         let z = ZoneRecord::parse(&ev).unwrap();
         assert_eq!(z.names.len(), 3);
+        // The builder round-trips through the parser.
+        let again = ZoneRecord::parse(&Event {
+            tags: ZoneRecord::tags(&z.domain, &z.names),
+            ..ev.clone()
+        })
+        .unwrap();
+        assert_eq!(again.names, z.names);
         assert_eq!(z.lookup("www"), None, "legacy beats the wildcard");
         assert_eq!(z.lookup("git"), Some(other));
         assert_eq!(z.lookup("anything"), Some(z.author));

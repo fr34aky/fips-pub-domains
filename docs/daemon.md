@@ -71,7 +71,8 @@ fips-pubdom pins list                 # example.org  npub…:5355  Dnssec  verif
 journalctl -u fips-pubdom | grep pinned
 ```
 
-`fips-pubdom verify <domain>` prints every input to the decision — pin, TXT
+`fips-pubdom zone <domain>` prints the zone record the pinned server
+published. `fips-pubdom verify <domain>` prints every input to the decision — pin, TXT
 result and method, claims — and the decision itself, without applying it.
 `fips-pubdom --offline lookup <name>` runs a lookup as if no upstream
 existed.
@@ -85,6 +86,7 @@ existed.
 | TXT present, claim missing or by another key | the legacy answer; the pin, if any, stays |
 | TXT removed | the legacy answer; the pin is forgotten |
 | name bound but not in the zone, or `legacy` | the legacy answer |
+| the domain's server does not answer | its published zone record, if any: names pointing at nodes that answer an echo resolve over the mesh, the rest get the legacy answer |
 | target node unreachable through the local fips node | the legacy answer |
 | offline, domain pinned | the mesh answer, no DNS, no relays |
 | offline, unpinned, claim on a mesh relay | refused (legacy fails too) — unless `allow_unverified_offline` |

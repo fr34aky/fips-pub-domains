@@ -1452,6 +1452,7 @@ dependencies = [
  "hickory-resolver",
  "nostr-sdk",
  "pubdom-core",
+ "rand 0.8.8",
  "serde",
  "serde_json",
  "serde_yaml",

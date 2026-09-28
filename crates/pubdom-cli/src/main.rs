@@ -4,7 +4,8 @@
 
 use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
-use pubdom_core::policy::{self, Input, NoProofs, ProofVerifier, TxtLookup};
+use pubdom_core::Claim;
+use pubdom_core::policy::{self, Input, NoProofs, ProofVerifier, ProvenRecord, TxtLookup};
 use pubdom_core::{PinStore, synth};
 use pubdom_resolve::relay::RelayScope;
 use pubdom_resolve::{Config, FilePinStore, LookupResult, RelayClient, TxtVerifier};
@@ -144,18 +145,26 @@ async fn main() -> Result<()> {
             let claims = policy::ingest_claims(&pins, &domain, &events, pubdom_resolve::now());
             let dnssec = pubdom_resolve::proof::DnssecProofs::default();
             let now = pubdom_resolve::now();
+            // Each proof checked once, for the listing and the decision.
+            let mut checked = Checked(Vec::new());
             for c in &claims {
-                let proof = match (&c.dnssec, dnssec.check(c, now)) {
-                    (None, _) => "no DNSSEC proof".to_string(),
-                    (Some(_), Ok(p)) => format!("DNSSEC proof valid until {}", p.expires),
-                    (Some(_), Err(e)) => format!("DNSSEC proof {e}"),
+                let result = c.dnssec.as_ref().map(|_| dnssec.check(c, now));
+                let proof = match &result {
+                    None => "no DNSSEC proof".to_string(),
+                    Some(Ok(p)) => format!(
+                        "DNSSEC proof signed at {}, valid until {}",
+                        p.signed_at, p.expires
+                    ),
+                    Some(Err(e)) => format!("DNSSEC proof {e}"),
                 };
                 println!(
                     "  claim by {} port {} created_at {}: {proof}",
                     c.author, c.port, c.created_at
                 );
+                let shown = result.and_then(Result::ok).map(Into::into);
+                checked.0.push((c.author, c.created_at, shown));
             }
-            let proofs: &dyn ProofVerifier = if cfg.dnssec { &dnssec } else { &NoProofs };
+            let proofs: &dyn ProofVerifier = if cfg.dnssec { &checked } else { &NoProofs };
             let out = policy::decide(Input {
                 domain: &domain,
                 pins: pinned,
@@ -239,4 +248,16 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Proofs already checked for `verify`'s listing, by (author, created_at).
+struct Checked(Vec<(pubdom_core::Npub, u64, Option<ProvenRecord>)>);
+
+impl ProofVerifier for Checked {
+    fn verify(&self, claim: &Claim, _now: u64) -> Option<ProvenRecord> {
+        self.0
+            .iter()
+            .find(|(a, t, _)| *a == claim.author && *t == claim.created_at)
+            .and_then(|(_, _, p)| p.clone())
+    }
 }

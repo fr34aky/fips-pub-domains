@@ -89,8 +89,10 @@ Published by the server that serves a domain.
   as RFC 4035 prescribes, offline: the root DNSKEY RRset signed by a key in
   the built-in trust anchors, each child's DNSKEY RRset signed by a key its
   validated DS covers, every RRSIG current and made by the zone owning the
-  name (DS by the parent, DNSKEY by the zone itself); wildcard expansions
-  are not accepted. The proof is only as good as its shortest-lived
+  name (DS by a zone above it, DNSKEY by the zone itself); wildcard
+  expansions are not accepted. A signature's inception may lie up to an
+  hour in the future (offline nodes often lack NTP); expiration is strict.
+  Validation checks at most 64 signatures, so a crafted chain stays cheap. The proof is only as good as its shortest-lived
   signature — typically one to four weeks — so the server re-publishes the
   claim with a fresh chain halfway through the remaining validity, and
   every 24 h at the latest.
@@ -270,8 +272,11 @@ so it replaces it. Relays consulted offline are whatever is reachable:
 Verification offline follows §5.1 without step 2's DNS: pinned > DNSSEC
 proof in the claim > attestations > unverified. A claim whose `dnssec`
 proof validates at the current time is a verified binding (method
-`dnssec`) and is pinned like one; every such claim is a server, newest
-first. A domain whose claims carry no valid proof and that was **never
+`dnssec`) and is pinned like one. Proofs may show different versions of
+the record — a retired key's claim can carry a chain signed before the
+change and still valid — so the newest proven record (by its signature's
+inception) decides, as the live record would online: every key it names
+that has a claim is a server, newest claim first. A domain whose claims carry no valid proof and that was **never
 seen online is refused offline** unless the user enabled
 `allow_unverified_offline`, which resolves it with a visible "unverified"
 marker (§5.1 step 5, never silent).

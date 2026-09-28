@@ -82,15 +82,23 @@ pub struct Outcome {
 /// trust anchor (spec §3.1, §5.5); `pubdom-resolve::proof` implements it.
 /// [`NoProofs`] is the `dnssec: false` switch.
 pub trait ProofVerifier {
-    /// `true` if the claim's proof shows a `_fips-dns` TXT record naming the
-    /// claim's author, and it validates at `now` (signatures expire).
-    fn verify(&self, claim: &Claim, now: u64) -> bool;
+    /// The record the claim's proof shows, if it validates at `now`
+    /// (signatures expire) and names the claim's author.
+    fn verify(&self, claim: &Claim, now: u64) -> Option<ProvenRecord>;
+}
+
+/// What a valid proof shows: the `_fips-dns` record's npubs, and when its
+/// signature was made — of two valid proofs, the newer record counts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvenRecord {
+    pub signed_at: u64,
+    pub named: Vec<Npub>,
 }
 
 pub struct NoProofs;
 impl ProofVerifier for NoProofs {
-    fn verify(&self, _: &Claim, _: u64) -> bool {
-        false
+    fn verify(&self, _: &Claim, _: u64) -> Option<ProvenRecord> {
+        None
     }
 }
 
@@ -246,16 +254,25 @@ pub fn decide(input: Input<'_>) -> Outcome {
                 return keep(Decision::Bound(input.pins.clone()));
             }
             // Offline and unpinned: only a proof carried in the claim can
-            // verify it (spec §5.5). Every proven claim is a server, newest
-            // first — the same set the TXT record would have given online.
-            let mut proven: Vec<&Claim> = input
+            // verify it (spec §5.5). Proofs may show different versions of
+            // the record — a retired key's claim can carry a chain signed
+            // before the change and still valid — so the newest proven
+            // record decides, as the live record would online: every key it
+            // names that has a claim is a server, newest claim first.
+            let newest = input
                 .claims
                 .iter()
-                .filter(|c| c.dnssec.is_some() && input.proofs.verify(c, input.now))
-                .collect();
-            if !proven.is_empty() {
-                proven.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-                let servers: Vec<Binding> = proven
+                .filter(|c| c.dnssec.is_some())
+                .filter_map(|c| input.proofs.verify(c, input.now))
+                .max_by_key(|p| p.signed_at);
+            if let Some(record) = newest {
+                let mut named: Vec<&Claim> = input
+                    .claims
+                    .iter()
+                    .filter(|c| record.named.contains(&c.author))
+                    .collect();
+                named.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                let servers: Vec<Binding> = named
                     .into_iter()
                     .map(|c| Binding {
                         domain: input.domain.to_owned(),
@@ -662,9 +679,21 @@ mod tests {
     fn offline_proof_verifies_and_pins() {
         struct Yes;
         impl ProofVerifier for Yes {
-            fn verify(&self, c: &Claim, now: u64) -> bool {
+            fn verify(&self, c: &Claim, now: u64) -> Option<ProvenRecord> {
                 assert_eq!(now, NOW, "signatures are checked at the decision's time");
-                c.author == npub(2) || c.author == npub(4)
+                // Author 2's proof shows the record naming 2 and 4, signed
+                // at 100; author 5's an older one naming only 5.
+                match c.author {
+                    a if a == npub(2) || a == npub(4) => Some(ProvenRecord {
+                        signed_at: 100,
+                        named: vec![npub(2), npub(4)],
+                    }),
+                    a if a == npub(5) => Some(ProvenRecord {
+                        signed_at: 50,
+                        named: vec![npub(5)],
+                    }),
+                    _ => None,
+                }
             }
         }
         let mut proven = claim(2, 5);
@@ -697,6 +726,22 @@ mod tests {
         });
         assert_eq!(npubs(&o), vec![npub(4), npub(2)]);
         assert_eq!(o.changes.len(), 2);
+        // A retired key whose claim carries an older, still valid proof is
+        // not a server: the newer record no longer names it.
+        let mut retired = claim(5, 20);
+        retired.dnssec = Some("AAAA".into());
+        let mut current = claim(2, 5);
+        current.dnssec = Some("AAAA".into());
+        let o = decide(Input {
+            domain: "example.org",
+            pins: vec![],
+            txt: TxtLookup::Unreachable,
+            claims: &[retired, current],
+            now: NOW,
+            allow_unverified_offline: false,
+            proofs: &Yes,
+        });
+        assert_eq!(npubs(&o), vec![npub(2)]);
     }
 
     #[test]

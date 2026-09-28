@@ -112,6 +112,16 @@ end across two nodes:
   `allow_unverified_offline` (then answered with the WARN marker), and
   `mail.example.org` / `www.github.com` pass through. Nothing on public
   relays; no kind registration; no NIP submission (user instruction).
+- Levels 3+4 passed on `home` (client-node, Ubuntu, see memory): `sudo
+  fips-namesd setup` + the unit; `resolvectl query www.example.org` →
+  `fdd9:…:8f4d` via `CNAME npub1uyut….fips` (2.1 s cold, pinned Dnssec);
+  `curl http://www.example.org:8321/` served this node's fips-ui over the
+  mesh by public name; with legacy DNS blocked the pin answered in 5 ms
+  and `github.com` failed as it should; `teardown` restored the LAN
+  resolver. Found and handled: resolved merges global drop-ins into one
+  pool (daemon now forwards `.fips` itself, drop-in `zz-fips-names.conf`
+  resets the lists), and a link search domain equal to a bound domain
+  shadows the daemon (startup warning; fix on the link).
 - Known gap: mesh relays are desktop-only — on the phone nostr-sdk needs a
   kernel socket to an `fd…` address, which the app's UID cannot open, so
   Android offline = pinned domains only until a websocket-over-smoltcp

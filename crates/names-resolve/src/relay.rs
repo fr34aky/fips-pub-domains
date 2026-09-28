@@ -1,0 +1,153 @@
+//! Claims from Nostr relays (spec §3, §5.5), and publishing them.
+//!
+//! Two relay sets: the node's public relays, and "mesh relays" — relays on
+//! fips nodes, `ws://[fd…]:port`, reachable without Internet. Online, only
+//! the public set is asked and only after a TXT hit (the privacy gate,
+//! spec §8); offline, the mesh set first. fips exposes no generic event
+//! fetch, so this is our own small nostr-sdk client.
+
+use names_core::claim::Event as CoreEvent;
+use names_core::{Claim, KIND_CLAIM};
+use nostr_sdk::prelude::*;
+use std::time::Duration;
+
+pub struct RelayClient {
+    public: Option<Client>,
+    mesh: Option<Client>,
+    timeout: Duration,
+}
+
+impl RelayClient {
+    /// Clients are created connected-lazily: `connect()` returns at once and
+    /// relays that are unreachable simply never answer within `timeout`.
+    pub async fn new(public: &[String], mesh: &[String], timeout: Duration) -> Self {
+        Self { public: make(public).await, mesh: make(mesh).await, timeout }
+    }
+
+    /// Claims for `domain` (kind 37197, `d=<domain>`), from the public relays
+    /// when `online`, from the mesh relays (then the public ones, in case a
+    /// path exists) when not. Signatures are verified by the pool.
+    pub async fn fetch_claims(&self, domain: &str, online: bool) -> Vec<CoreEvent> {
+        let filter = Filter::new().kind(Kind::from(KIND_CLAIM)).identifier(domain).limit(32);
+        let order: Vec<&Client> = if online {
+            self.public.iter().collect()
+        } else {
+            self.mesh.iter().chain(self.public.iter()).collect()
+        };
+        let mut out = Vec::new();
+        for client in order {
+            match client.fetch_events(filter.clone(), self.timeout).await {
+                Ok(events) => {
+                    out.extend(events.into_iter().map(convert));
+                    if !out.is_empty() {
+                        break;
+                    }
+                }
+                Err(e) => tracing::debug!(domain, error = %e, "relay fetch failed"),
+            }
+        }
+        out
+    }
+
+    pub async fn shutdown(&self) {
+        for c in self.public.iter().chain(self.mesh.iter()) {
+            c.disconnect().await;
+        }
+    }
+}
+
+async fn make(urls: &[String]) -> Option<Client> {
+    if urls.is_empty() {
+        return None;
+    }
+    let client = Client::default();
+    let mut any = false;
+    for u in urls {
+        match client.add_relay(u).await {
+            Ok(_) => any = true,
+            Err(e) => tracing::warn!(relay = u, error = %e, "ignoring relay"),
+        }
+    }
+    if !any {
+        return None;
+    }
+    client.connect().await;
+    Some(client)
+}
+
+fn convert(ev: Event) -> CoreEvent {
+    CoreEvent {
+        kind: ev.kind.as_u16(),
+        pubkey: ev.pubkey.to_hex(),
+        created_at: ev.created_at.as_secs(),
+        tags: ev.tags.iter().map(|t| t.clone().to_vec()).collect(),
+    }
+}
+
+/// Publish a claim for `domain` signed with `keys` to `relays`. Addressable:
+/// a later claim replaces the earlier one on conforming relays. Returns the
+/// relays that accepted it.
+pub async fn publish_claim(
+    keys: Keys,
+    relays: &[String],
+    domain: &str,
+    port: u16,
+    dnssec: Option<&str>,
+    timeout: Duration,
+) -> Result<Vec<String>, String> {
+    let client = Client::builder().signer(keys).build();
+    for u in relays {
+        client.add_relay(u).await.map_err(|e| format!("{u}: {e}"))?;
+    }
+    client.connect().await;
+    let tags: Vec<Tag> = Claim::tags(domain, port, dnssec)
+        .into_iter()
+        .map(|t| Tag::parse(t).map_err(|e| e.to_string()))
+        .collect::<Result<_, _>>()?;
+    let builder = EventBuilder::new(Kind::from(KIND_CLAIM), "").tags(tags);
+    let out = tokio::time::timeout(timeout, client.send_event_builder(builder))
+        .await
+        .map_err(|_| "timed out publishing".to_string())?
+        .map_err(|e| e.to_string())?;
+    let ok: Vec<String> = out.success.iter().map(|u| u.to_string()).collect();
+    for (u, why) in &out.failed {
+        tracing::warn!(relay = %u, reason = %why, "relay rejected the claim");
+    }
+    client.disconnect().await;
+    if ok.is_empty() {
+        return Err("no relay accepted the claim".into());
+    }
+    Ok(ok)
+}
+
+/// The claim event as JSON without sending it — for `--dry-run` and for
+/// operators who publish through other tooling.
+pub fn claim_event_json(keys: &Keys, domain: &str, port: u16, dnssec: Option<&str>) -> Result<String, String> {
+    let tags: Vec<Tag> = Claim::tags(domain, port, dnssec)
+        .into_iter()
+        .map(|t| Tag::parse(t).map_err(|e| e.to_string()))
+        .collect::<Result<_, _>>()?;
+    let ev = EventBuilder::new(Kind::from(KIND_CLAIM), "")
+        .tags(tags)
+        .sign_with_keys(keys)
+        .map_err(|e| e.to_string())?;
+    ev.try_as_pretty_json().map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signed_claim_parses_back_through_core() {
+        let keys = Keys::generate();
+        let json = claim_event_json(&keys, "example.org", 5355, None).unwrap();
+        let ev = Event::from_json(&json).unwrap();
+        ev.verify().unwrap();
+        let core = convert(ev);
+        let claim = Claim::parse(&core).unwrap();
+        assert_eq!(claim.domain, "example.org");
+        assert_eq!(claim.port, 5355);
+        assert_eq!(claim.author.to_hex(), keys.public_key().to_hex());
+    }
+}

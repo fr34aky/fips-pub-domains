@@ -1,0 +1,22 @@
+[package]
+name = "names-resolve"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Client I/O for fips-names: relay fetch, legacy TXT verification, step 3 over the mesh"
+
+# Rule (docs/plan-platforms.md §1): no cfg(target_os) here either. The mesh
+# transport is a trait; the phone implements it over smoltcp, the daemon over
+# a kernel socket.
+[dependencies]
+names-core.workspace = true
+futures = "0.3"
+hickory-resolver = { version = "0.26", default-features = false, features = ["tokio", "system-config", "dnssec-ring"] }
+nostr-sdk = { version = "0.44", default-features = false }
+serde.workspace = true
+simple-dns = "0.11"
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = ["rt", "sync", "time", "net", "macros", "fs"] }
+tracing.workspace = true

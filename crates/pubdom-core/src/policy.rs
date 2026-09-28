@@ -332,7 +332,7 @@ fn proven_servers(input: &Input<'_>, record: &ProvenRecord) -> Vec<Binding> {
         .iter()
         .filter(|c| record.named.contains(&c.author))
         .collect();
-    named.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    named.sort_by_key(|c| std::cmp::Reverse(c.created_at));
     named
         .into_iter()
         .map(|c| Binding {

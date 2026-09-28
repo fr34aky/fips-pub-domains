@@ -88,7 +88,7 @@ names:
   www: self          # this node
   git: npub1…        # another node
   mail: legacy       # stays on the public Internet
-  "*": self
+  # no wildcard: every other name stays wherever it is today
 ```
 
 ```sh

@@ -31,7 +31,12 @@ names:
 
 Rules: labels follow hostname syntax (≤ 63 characters, letters, digits,
 hyphens), `@` is the apex, `*` the wildcard, and a label may not look like
-an npub. `legacy` is how a site keeps `www` on the public Internet while
+an npub. **Use the wildcard only if everything under the domain really is
+on the mesh**: it makes the server claim every name, including
+`cloud.example.org` that lives only on the public Internet, and clients
+will then send that name to your node and fail. A site with a few mesh
+services lists them and leaves the wildcard out; a site that wants the
+wildcard carves the Internet-only names out with `legacy`. `legacy` is how a site keeps `www` on the public Internet while
 putting `git` on the mesh: the server answers NXDOMAIN, and the client
 turns that into an ordinary legacy lookup. The file is re-read whenever its
 mtime changes; a broken edit keeps the last good zone.

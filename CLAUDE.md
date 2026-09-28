@@ -83,23 +83,36 @@ move it into one of those repos.
   resolver brings its own relay client (nostr-sdk) using the node's relay
   list.
 
+## State (2026-09-28)
+
+Milestones 1–3 of `docs/plan-phase1.md` are coded, not yet demoed end to
+end across two nodes:
+
+- Workspace: `names-core` (35 tests), `names-resolve` (14), `names-server`,
+  `names-daemon` (`fips-namesd`, Linux/systemd-resolved full mode),
+  `names-cli`. `cargo test --workspace` is green. Clippy is not usable on
+  this host (no rustup default toolchain).
+- Verified live: the `_fips-dns.example.org` TXT record validates under
+  DNSSEC through hickory; the server signs a claim with this host's node
+  key (`/etc/fips/fips.key`, group `fips`); a single-node offline lookup
+  with a pinned binding runs step 3 over the node's fips address and
+  synthesizes the AAAA.
+- fips2go: branch `names` in `~/fips2go` (commit on top of 0.8.0) adds
+  `shim/src/names.rs` + `meshudp.rs`, the proxy hook, three shim knobs and
+  the Settings switch; host suite 38 green. The fips-names crates are git
+  deps pinned by rev — the repo is private, so fips2go's CI cannot fetch
+  them until it has a token or the repo is public. Nothing built for
+  Android or run on a device yet (no rustup/Android target on this host).
+- Not published anywhere: no claim on public relays, no kind registration,
+  no NIP submission (user instruction 2026-09-28).
+
 ## Next steps
 
-Phase 1 is planned in `docs/plan-phase1.md` (2026-09-28): a Rust workspace
-in this repo — `names-core` (policy, no I/O), `names-resolve` (relay/TXT/mesh
-adapters behind a `MeshDns` trait), `names-server` (step 3 server + claim
-publisher), `names-daemon` (`fips-namesd`), `names-cli`. Milestones:
-core+tests → server + Linux daemon over the mesh → fips2go integration →
-kind registration → macOS/Windows → full-resolver mode and routers.
-Nothing is coded yet.
-
-Platform rule (`docs/plan-platforms.md`): the resolver is a **separate
-daemon** on every desktop/server OS and **embedded in fips2go** on Android;
-no `cfg(target_os)` in `names-core`/`names-resolve`. Default on every
-platform: the resolver is in the path for **all names** and discovers
-domains by asking public DNS for the `_fips-dns` TXT first (user decision
-2026-09-28); relays are only asked after a TXT hit. With no upstream
-reachable, the claim is fetched from relays directly (mesh relays on fips
-nodes first) — the claim replaces the TXT record (spec §5.5). Opt-in
-restricted mode routes only known domains via per-domain OS routing and
-gives up discovery.
+1. Two-node demo (plan-phase1 §8 M2): publish the claim for `example.org`
+   from this node (`fips-names-server serve --publish`), run `fips-namesd`
+   on a second Linux node, `fips-names verify` / `lookup www.example.org`.
+2. Phone: build the shim for arm64 on a machine with the Android toolchain,
+   verify the Settings switch and a lookup on a device, open the PR from
+   branch `names`.
+3. Phase 2: DNSSEC proofs in claims; zone records; TCP fallback on the
+   phone; network-change watchers; macOS/Windows daemon.

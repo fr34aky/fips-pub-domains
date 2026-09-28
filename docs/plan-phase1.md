@@ -1,6 +1,7 @@
 # Phase 1 plan: MVP of domain binding over fips
 
-Status: **plan**, nothing implemented. Spec: [domain-binding.md](domain-binding.md)
+Status: **milestones 1–3 coded** (2026-09-28), two-node demo pending; see
+CLAUDE.md "State". Spec: [domain-binding.md](domain-binding.md)
 §9 phase 1 — claim + TXT verification + pinning + step 3 over UDP with
 CNAME, unverified refused, phone integration in the fips2go shim.
 

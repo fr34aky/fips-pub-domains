@@ -443,6 +443,9 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
 
     async fn step3_uncached(&self, q: &Query, servers: &[Binding]) -> Option<Npub> {
         let now = crate::now();
+        // A cached self-answer whose proof lapsed: kept for when asking
+        // again does not work out.
+        let mut lapsed = None;
         match self.step3.get(&q.name, now) {
             // Another node: the echo rule applies.
             Some(CachedStep3::Node(n, false)) => return self.deliverable(q, n, false).await,
@@ -452,8 +455,9 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             Some(CachedStep3::Node(n, true)) if self.reachable.get(&n, now) == Some(true) => {
                 return self.deliverable(q, n, true).await;
             }
+            Some(CachedStep3::Node(n, true)) => lapsed = Some(n),
             Some(CachedStep3::NotOverFips) => return None,
-            Some(CachedStep3::Node(_, true)) | None => {}
+            None => {}
         }
         // Ask the servers in pin order, skipping those in their backoff
         // window (spec §5.3): the primary stays the primary while it
@@ -517,6 +521,14 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         }
         if all_skipped {
             tracing::debug!(name = %q.name, "every domain server is in its backoff window");
+        }
+        // No server answered now, but one did for this name before: its
+        // own answer beats the zone record — provided the node answers an
+        // echo (its DNS may be down while the node is up).
+        if let Some(n) = lapsed
+            && let Some(n) = self.deliverable(q, n, false).await
+        {
+            return Some(n);
         }
         self.via_zone_record(q, servers).await
     }
@@ -1371,6 +1383,27 @@ mod tests {
         assert!(matches!(r.lookup(&q).await, LookupResult::Answer(_)));
         assert!(mesh.echoes.lock().unwrap().is_empty());
         assert_eq!(mesh.queries.lock().unwrap().len(), 2, "re-asked");
+        // Re-asking fails (the server is in its backoff), but the node
+        // still answers an echo: the cached answer is used.
+        let (r, mesh) = resolver(
+            HashMap::from([("example.org".to_string(), hit(npub(1)))]),
+            vec![claim_event(npub(1), "example.org")],
+            Arc::new(MemoryPinStore::new()),
+            vec![],
+            false,
+        );
+        let q = build_query(1, "www.example.org", QTYPE_AAAA).unwrap();
+        assert!(matches!(r.lookup(&q).await, LookupResult::Answer(_)));
+        r.reachable.remove(&npub(1));
+        r.mark_down(npub(1), crate::now());
+        let q = build_query(2, "www.example.org", QTYPE_A).unwrap();
+        assert!(matches!(r.lookup(&q).await, LookupResult::Answer(_)));
+        assert_eq!(
+            mesh.queries.lock().unwrap().len(),
+            1,
+            "not re-asked in backoff"
+        );
+        assert_eq!(*mesh.echoes.lock().unwrap(), vec![npub(1)]);
         // A server that fails loses its proof: the zone-record fallback
         // must echo it.
         r.mark_down(npub(1), crate::now());

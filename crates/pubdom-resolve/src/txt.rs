@@ -7,12 +7,13 @@
 //! - `Dns` when two or more upstreams returned the same set of npubs;
 //! - `DnsSingle` when only one upstream was available or answered.
 //!
-//! Upstreams that disagree: validated answers — a validated record, else a
-//! validated denial — win over any number of unvalidated ones (those
-//! contradict a signed zone, so they are forged or stale). Among the
-//! remaining candidates the largest group wins, and a tie is `Disputed` —
-//! else list order alone would pick between an honest and a poisoned
-//! resolver.
+//! Upstreams that disagree: validated records win over any number of
+//! unvalidated ones (those contradict a signed zone, so they are forged or
+//! stale), and only validated answers are counted then; otherwise the
+//! largest group wins. A tie is `Disputed` — else list order alone would
+//! pick between an honest and a poisoned resolver — and so is a validated
+//! denial against unvalidated records (a replayed signed NSEC must not
+//! unpin anything, a stripped path must not bind anything).
 //!
 //! A miss is a miss only if every upstream that answered said so; an
 //! upstream that failed (timeout, SERVFAIL) is simply not counted, and if
@@ -112,11 +113,7 @@ impl TxtVerifier {
             }
         });
         let answers: Vec<One> = futures::future::join_all(futs).await;
-        let out = combine(&answers);
-        if out.0 == TxtLookup::Disputed {
-            tracing::warn!(%domain, ?answers, "upstream resolvers disagree on the _fips-dns record; not using it");
-        }
-        out
+        combine(&answers)
     }
 
     async fn one(r: &TokioResolver, name: &str) -> One {
@@ -169,6 +166,7 @@ fn combine(answers: &[One]) -> (TxtLookup, Option<u32>) {
     if answered == 0 {
         return (TxtLookup::Unreachable, None);
     }
+    let secure = |a: &One| matches!(a, One::Hit { secure: true, .. });
     // Group hits by their set of npubs.
     let mut groups: Vec<(Vec<Npub>, Vec<&One>)> = Vec::new();
     for a in answers {
@@ -182,53 +180,67 @@ fn combine(answers: &[One]) -> (TxtLookup, Option<u32>) {
             }
         }
     }
-    let is_secure = |v: &Vec<&One>| v.iter().any(|a| matches!(a, One::Hit { secure: true, .. }));
     let secure_miss = answers
         .iter()
         .any(|a| matches!(a, One::Miss { secure: true }));
-    // Validated answers first: an unvalidated one that contradicts a signed
-    // zone is forged or stale. Among the candidates the largest group wins;
-    // a tie is disputed.
-    let candidates: Vec<&(Vec<Npub>, Vec<&One>)> = if groups.iter().any(|(_, v)| is_secure(v)) {
-        groups.iter().filter(|(_, v)| is_secure(v)).collect()
-    } else if secure_miss {
-        return (
-            TxtLookup::Miss {
-                method: Method::Dnssec,
-            },
-            None,
-        );
-    } else {
-        groups.iter().collect()
+    let any_secure_hit = answers.iter().any(secure);
+    // Validated answers outrank unvalidated ones: those contradict a signed
+    // zone, so they are forged or stale. Only validated answers are
+    // counted then, so unvalidated resolvers cannot tip a validated split.
+    // A validated denial against unvalidated hits is disputed rather than
+    // a denial: a replayed or stale signed NSEC must not unpin anything,
+    // nor a stripped path bind anything.
+    let count = |v: &Vec<&One>| {
+        if any_secure_hit {
+            v.iter().filter(|a| secure(a)).count()
+        } else {
+            v.len()
+        }
     };
-    let top = candidates.iter().map(|(_, v)| v.len()).max().unwrap_or(0);
-    let tied: Vec<&&(Vec<Npub>, Vec<&One>)> =
-        candidates.iter().filter(|(_, v)| v.len() == top).collect();
+    if !any_secure_hit && secure_miss {
+        return if groups.is_empty() {
+            (
+                TxtLookup::Miss {
+                    method: Method::Dnssec,
+                },
+                None,
+            )
+        } else {
+            (TxtLookup::Disputed, None)
+        };
+    }
+    let top = groups.iter().map(|(_, v)| count(v)).max().unwrap_or(0);
+    let tied: Vec<&Vec<&One>> = groups
+        .iter()
+        .map(|(_, v)| v)
+        .filter(|v| top > 0 && count(v) == top)
+        .collect();
     let best = match tied.as_slice() {
-        [] => None,
-        [one] => Some(&one.1),
+        [] => {
+            let misses = answers
+                .iter()
+                .filter(|a| matches!(a, One::Miss { .. }))
+                .count();
+            let method = if misses >= 2 {
+                Method::Dns
+            } else {
+                Method::DnsSingle
+            };
+            return (TxtLookup::Miss { method }, None);
+        }
+        [one] => *one,
         _ => return (TxtLookup::Disputed, None),
     };
-    let Some(best) = best else {
-        let misses = answers
-            .iter()
-            .filter(|a| matches!(a, One::Miss { .. }))
-            .count();
-        let method = if misses >= 2 {
-            Method::Dns
-        } else {
-            Method::DnsSingle
-        };
-        return (TxtLookup::Miss { method }, None);
-    };
-    let method = if is_secure(best) {
+    let method = if any_secure_hit {
         Method::Dnssec
     } else if best.len() >= 2 {
         Method::Dns
     } else {
         Method::DnsSingle
     };
-    let (records, ttl) = match best[0] {
+    // Records and TTL from a validated member when there is one.
+    let from = best.iter().find(|a| secure(a)).unwrap_or(&best[0]);
+    let (records, ttl) = match from {
         One::Hit { records, ttl, .. } => (records.clone(), *ttl),
         _ => unreachable!(),
     };
@@ -353,13 +365,22 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        // A validated denial beats an unvalidated hit.
+        // A validated denial against an unvalidated hit: disputed.
         assert_eq!(
             combine(&[One::Miss { secure: true }, hit(&[1], false)]).0,
-            TxtLookup::Miss {
-                method: Method::Dnssec
-            }
+            TxtLookup::Disputed
         );
+        // Unvalidated resolvers do not tip a validated split.
+        assert_eq!(
+            combine(&[hit(&[1], true), hit(&[2], true), hit(&[1], false)]).0,
+            TxtLookup::Disputed
+        );
+        // Records and TTL come from the validated member.
+        let mut long = hit(&[1], false);
+        if let One::Hit { ttl, .. } = &mut long {
+            *ttl = 86400;
+        }
+        assert_eq!(combine(&[long, hit(&[1], true)]).1, Some(300));
         match combine(&[hit(&[2], true), hit(&[1], false)]).0 {
             TxtLookup::Hit { records, method } => {
                 assert_eq!(records[0].npub, Npub::from_bytes([2; 32]));

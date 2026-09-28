@@ -432,11 +432,11 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
                     }
                     Ok(other) => {
                         tracing::debug!(name = %q.name, ?other, "step 3 failed; trying the zone record");
-                        return self.from_zone(q, binding).await;
+                        return self.via_zone_record(q, binding).await;
                     }
                     Err(e) => {
                         tracing::debug!(name = %q.name, error = %e, "step 3 failed; trying the zone record");
-                        return self.from_zone(q, binding).await;
+                        return self.via_zone_record(q, binding).await;
                     }
                 }
             }
@@ -453,7 +453,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
     /// zone record instead (spec §3.3, §6). Every target — the server
     /// itself included — has to answer an echo, since nothing proved any of
     /// them reachable.
-    async fn from_zone(&self, q: &Query, binding: &Binding) -> Option<Npub> {
+    async fn via_zone_record(&self, q: &Query, binding: &Binding) -> Option<Npub> {
         let now = crate::now();
         let zone = match self.zones.get(&binding.domain, now) {
             Some(z) => z,

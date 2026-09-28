@@ -213,6 +213,9 @@ claim for a public suffix (`ch`, `co.uk`) — use a bundled Public Suffix List.
   server, and it applies whether or not the claim of the server the record
   names instead reached us — else a retired key would stay pinned and
   answer the next offline lookup.
+- A **validated denial** is one proven by a validated NSEC or NSEC3
+  record; a validated SOA alone proves nothing (an unsigned zone under a
+  signed TLD comes with one).
 - **Resolvers that disagree** on the record: once any answer validated,
   only validated answers count — an unvalidated one contradicting a signed
   zone is forged or stale — and a validated denial is one more answer; the

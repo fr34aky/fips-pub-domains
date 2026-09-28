@@ -132,9 +132,9 @@ impl TxtVerifier {
     fn classify(name: &str, result: Result<Lookup, NetError>) -> One {
         match result {
             // Every shape of bogus hickory can report is handled, including
-            // ones current hickory turns into `DnssecBogus` before we see
-            // them — a cached or future path must not let a bogus record
-            // count as an unvalidated one.
+            // ones hickory 0.26 turns into `DnssecBogus` before we see them —
+            // a later version must not let a bogus record count as an
+            // unvalidated one. The check costs one pass over the answers.
             Ok(lookup) if lookup.answers().iter().any(|r| r.proof == Proof::Bogus) => {
                 tracing::debug!(%name, "TXT answer failed DNSSEC validation");
                 One::Failed
@@ -165,17 +165,40 @@ impl TxtVerifier {
                     }
                 }
             }
-            // A denial. hickory only returns this once any NSEC/NSEC3 proof
-            // held, so it is a denial either way; it counts as validated
-            // when the SOA beside it validated too.
+            // A denial whose SOA failed validation: no answer, like every
+            // bogus one.
+            Err(NetError::Dns(DnsError::NoRecordsFound(nr)))
+                if nr.soa.as_ref().is_some_and(|soa| soa.proof == Proof::Bogus) =>
+            {
+                tracing::debug!(%name, "TXT denial failed DNSSEC validation");
+                One::Failed
+            }
+            // A denial. It is validated only if a validated NSEC/NSEC3 record
+            // proves it: hickory also returns this for a name it merely
+            // found insecure (an unsigned zone under a signed TLD), without
+            // checking any NSEC — and a replayed, genuinely signed SOA of
+            // the TLD would otherwise pass for a validated denial and unpin
+            // everything.
             Err(NetError::Dns(DnsError::NoRecordsFound(nr))) => One::Miss {
-                secure: nr.soa.as_ref().map(|soa| soa.proof) == Some(Proof::Secure),
+                secure: nr.authorities.as_deref().is_some_and(|auth| {
+                    auth.iter().any(|r| {
+                        matches!(r.record_type(), RecordType::NSEC | RecordType::NSEC3)
+                            && r.proof == Proof::Secure
+                    })
+                }),
             },
-            // A denial hickory could not validate but that is not bogus:
-            // NSEC3 with more iterations than it accepts is insecure by
-            // RFC 9276 — an unvalidated denial, not a failure.
-            Err(NetError::Dns(DnsError::Nsec { proof, .. })) if proof != Proof::Bogus => {
-                One::Miss { secure: false }
+            // Not bogus, but hickory could not validate the NSEC3 (more
+            // iterations than it accepts — insecure by RFC 9276). Without
+            // answers it is an unvalidated denial; with answers (a wildcard
+            // expansion) it is not a denial at all, and not classifiable.
+            Err(NetError::Dns(DnsError::Nsec {
+                proof, response, ..
+            })) if proof != Proof::Bogus => {
+                if response.answers.is_empty() {
+                    One::Miss { secure: false }
+                } else {
+                    One::Failed
+                }
             }
             Err(NetError::Dns(DnsError::DnssecBogus))
             | Err(NetError::Dns(DnsError::Nsec {
@@ -326,6 +349,7 @@ mod tests {
     #[test]
     fn bogus_answers_count_like_no_answer() {
         use hickory_resolver::net::NoRecords;
+        use hickory_resolver::proto::dnssec::rdata::{DNSSECRData, NSEC};
         use hickory_resolver::proto::op::{Query, ResponseCode};
         use hickory_resolver::proto::rr::rdata::{SOA, TXT};
         use hickory_resolver::proto::rr::{Name, Record};
@@ -351,23 +375,52 @@ mod tests {
             classify(Ok(lookup)),
             One::Hit { secure: true, .. }
         ));
-        // A denial: validated only with a validated SOA; one whose SOA
-        // failed is still a denial (the NSEC proof held), just unvalidated.
-        let mut nr = NoRecords::new(Query::default(), ResponseCode::NXDomain);
+        // A denial is validated only by a validated NSEC/NSEC3 record — a
+        // validated SOA alone (a replayed TLD SOA for an unsigned name)
+        // proves nothing. A bogus SOA makes it no answer.
         let mut soa = Record::from_rdata(
             Name::root(),
             60,
             SOA::new(Name::root(), Name::root(), 1, 1, 1, 1, 1),
         );
-        for (proof, secure) in [(Proof::Secure, true), (Proof::Bogus, false)] {
-            soa.proof = proof;
-            nr.soa = Some(Box::new(soa.clone()));
-            let denial = Err(NetError::Dns(DnsError::NoRecordsFound(nr.clone())));
-            assert!(
-                matches!(classify(denial), One::Miss { secure: s } if s == secure),
-                "{proof:?}"
-            );
-        }
+        let mut nsec = Record::from_rdata(
+            Name::root(),
+            60,
+            RData::DNSSEC(DNSSECRData::NSEC(NSEC::new(
+                Name::root(),
+                [RecordType::SOA],
+            ))),
+        );
+        let denial = |soa: Option<&Record<SOA>>, auth: Vec<Record>| {
+            let mut nr = NoRecords::new(Query::default(), ResponseCode::NXDomain);
+            nr.soa = soa.map(|s| Box::new(s.clone()));
+            nr.authorities = (!auth.is_empty()).then(|| auth.into());
+            Err(NetError::Dns(DnsError::NoRecordsFound(nr)))
+        };
+        assert!(matches!(
+            classify(denial(None, vec![])),
+            One::Miss { secure: false }
+        ));
+        soa.proof = Proof::Secure;
+        assert!(matches!(
+            classify(denial(Some(&soa), vec![])),
+            One::Miss { secure: false }
+        ));
+        nsec.proof = Proof::Insecure;
+        assert!(matches!(
+            classify(denial(Some(&soa), vec![nsec.clone()])),
+            One::Miss { secure: false }
+        ));
+        nsec.proof = Proof::Secure;
+        assert!(matches!(
+            classify(denial(Some(&soa), vec![nsec.clone()])),
+            One::Miss { secure: true }
+        ));
+        soa.proof = Proof::Bogus;
+        assert!(matches!(
+            classify(denial(Some(&soa), vec![nsec])),
+            One::Failed
+        ));
     }
 
     #[test]

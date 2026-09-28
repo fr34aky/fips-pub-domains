@@ -9,6 +9,9 @@ use std::time::Duration;
 pub const TXT_MISS_TTL: Duration = Duration::from_secs(6 * 3600);
 /// Legacy TXT hit: min(record TTL, this).
 pub const TXT_HIT_MAX_TTL: Duration = Duration::from_secs(3600);
+/// Upstreams disagreed on the TXT record: ask again soon, a rollover
+/// settles within the record's TTL.
+pub const TXT_DISPUTED_TTL: Duration = Duration::from_secs(60);
 /// Relay miss offline (no claim): once per domain, not per query.
 pub const RELAY_MISS_TTL: Duration = Duration::from_secs(3600);
 /// Claims fetched from relays.

@@ -129,12 +129,13 @@ enum CachedDecision {
     NotOverFips,
 }
 
+/// How long a positive echo — or a step 3 answer from the node itself —
+/// counts as proof of reachability.
+const REACHABLE_TTL: Duration = Duration::from_secs(120);
+
 #[derive(Clone)]
 enum CachedStep3 {
-    /// The node, and whether it was the server that gave the answer — its
-    /// reply proved it reachable, so no echo is needed for the other
-    /// record types of the same name.
-    Node(Npub, bool),
+    Node(Npub),
     NotOverFips,
 }
 
@@ -342,7 +343,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         let events = match &txt {
             // The privacy gate (spec §8): relays only after a TXT hit …
             TxtLookup::Hit { .. } => self.claims.fetch_claims(d, RelayScope::AfterHit).await,
-            TxtLookup::Miss { .. } => Vec::new(),
+            TxtLookup::Miss { .. } | TxtLookup::Disputed => Vec::new(),
             // … or offline, where the claim stands in for the record (§5.5) —
             // unless a pin already answers, which needs no relay at all.
             TxtLookup::Unreachable if !pins.is_empty() => Vec::new(),
@@ -355,6 +356,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         };
         let claims = policy::ingest_claims(self.pins.as_ref(), d, &events, now);
         let is_unreachable = matches!(txt, TxtLookup::Unreachable);
+        let disputed = matches!(txt, TxtLookup::Disputed);
         let outcome = policy::decide(Input {
             domain: d,
             pins,
@@ -378,6 +380,13 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             }
         }
         let (cached, ttl) = match outcome.decision {
+            _ if disputed => {
+                let cached = match outcome.decision {
+                    Decision::Bound(b) => CachedDecision::Use(b, false),
+                    _ => CachedDecision::NotOverFips,
+                };
+                (cached, cache::TXT_DISPUTED_TTL)
+            }
             Decision::Bound(b) => {
                 let ttl = txt_ttl
                     .map(|t| Duration::from_secs(t.into()).min(cache::TXT_HIT_MAX_TTL))
@@ -430,9 +439,9 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         let now = crate::now();
         if let Some(cached) = self.step3.get(&q.name, now) {
             return match cached {
-                // A node that answered step 3 itself was proven reachable
-                // then; any other target needs its echo.
-                CachedStep3::Node(n, proven) => self.deliverable(q, n, proven).await,
+                // A cached answer names a node; the echo rule applies — a
+                // server that answered for itself seeded `reachable`.
+                CachedStep3::Node(n) => self.deliverable(q, n, false).await,
                 CachedStep3::NotOverFips => None,
             };
         }
@@ -456,20 +465,28 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             all_skipped = false;
             if !self.ensure_registered(server.npub).await {
                 tracing::debug!(npub = %server.npub, "domain server not reachable through the local node");
-                self.mark_down(server.npub, now);
+                self.mark_down(server.npub, crate::now());
                 continue;
             }
             match self.ask_server(q, server, now).await {
                 Ok(Step3Outcome::Node { npub, ttl }) => {
                     self.down.remove(&server.npub);
+                    let now = crate::now();
                     let ttl = Duration::from_secs(ttl.into()).min(cache::STEP3_MAX_TTL);
                     let proven = npub == server.npub;
+                    if proven {
+                        // The reply proves the node reachable, for as long as
+                        // an echo would: the A query that follows the AAAA
+                        // must not need an echo the node may filter.
+                        self.reachable.put(npub, true, REACHABLE_TTL, now);
+                    }
                     self.step3
-                        .put(q.name.clone(), CachedStep3::Node(npub, proven), ttl, now);
+                        .put(q.name.clone(), CachedStep3::Node(npub), ttl, now);
                     return self.deliverable(q, npub, proven).await;
                 }
                 Ok(Step3Outcome::NotOverFips) => {
                     self.down.remove(&server.npub);
+                    let now = crate::now();
                     self.step3.put(
                         q.name.clone(),
                         CachedStep3::NotOverFips,
@@ -480,11 +497,11 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
                 }
                 Ok(other) => {
                     tracing::info!(name = %q.name, npub = %server.npub, ?other, "domain server failed; {then}");
-                    self.mark_down(server.npub, now);
+                    self.mark_down(server.npub, crate::now());
                 }
                 Err(e) => {
                     tracing::info!(name = %q.name, npub = %server.npub, error = %e, "domain server did not answer; {then}");
-                    self.mark_down(server.npub, now);
+                    self.mark_down(server.npub, crate::now());
                 }
             }
         }
@@ -534,7 +551,13 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
     fn mark_down(&self, npub: Npub, now: u64) {
         // The streak is forgotten once the entry expires: a server that has
         // not failed for a whole maximum window starts over.
-        let failures = self.down.get(&npub, now).map_or(0, |d| d.failures) + 1;
+        let prev = self.down.get(&npub, now);
+        if prev.is_some_and(|d| now < d.retry_at) {
+            // Already marked for this outage by a concurrent lookup of
+            // another name: one outage counts once.
+            return;
+        }
+        let failures = prev.map_or(0, |d| d.failures) + 1;
         let window = self
             .cfg
             .server_backoff
@@ -617,7 +640,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             .await
             .unwrap_or(false);
         let ttl = if ok {
-            Duration::from_secs(120)
+            REACHABLE_TTL
         } else {
             Duration::from_secs(30)
         };
@@ -1292,6 +1315,10 @@ mod tests {
             now = d.retry_at;
         }
         assert_eq!(windows, vec![300, 900, 2700, 8100, 10800, 10800]);
+        // Concurrent lookups of other names failing on the same outage
+        // count once.
+        r.mark_down(npub(1), now - 1);
+        assert_eq!(r.down.get(&npub(1), now).unwrap().retry_at, now);
         // An answer clears the streak.
         r.down.remove(&npub(1));
         r.mark_down(npub(1), now);

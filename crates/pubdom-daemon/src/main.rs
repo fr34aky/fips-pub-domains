@@ -152,10 +152,7 @@ async fn run(cfg: Config) -> Result<()> {
                 let (n, from) = match udp.recv_from(&mut buf).await {
                     Ok(v) => v,
                     Err(e) => {
-                        // A persistent error (EMFILE, a vanished interface) must
-                        // not turn this loop into a busy spin.
-                        tracing::warn!(error = %e, "receive failed");
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        pubdom_resolve::after_socket_error(&e, "receive").await;
                         continue;
                     }
                 };
@@ -173,10 +170,7 @@ async fn run(cfg: Config) -> Result<()> {
                 let (mut s, _) = match tcp.accept().await {
                     Ok(v) => v,
                     Err(e) => {
-                        // A persistent error (EMFILE, a vanished interface) must
-                        // not turn this loop into a busy spin.
-                        tracing::warn!(error = %e, "accept failed");
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        pubdom_resolve::after_socket_error(&e, "accept").await;
                         continue;
                     }
                 };

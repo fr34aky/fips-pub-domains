@@ -54,6 +54,13 @@ allow_unverified_offline: false                  # resolve unverifiable claims o
 budget_ms: 4500                                  # whole lookup; on expiry the legacy answer is used
 ```
 
+Not in the file (built-in, see the resolver's `ResolverConfig`): a server
+that does not answer step 3 is skipped for 5 minutes, tripling per
+consecutive failure up to 3 hours, then tried again.
+
+```yaml
+```
+
 **Mesh relays** are Nostr relays that run on fips nodes and are reachable
 without the Internet. Configure them by their `.fips` hostname, never as an
 `[fd…]` literal: nostr-sdk cannot dial bracketed IPv6, and resolving the
@@ -67,7 +74,7 @@ the only discovery there is.
 resolvectl query www.example.org      # → fdd9:… -- link: lo, with the CNAME npub….fips
 resolvectl query peer.fips      # .fips still resolves
 resolvectl query github.com          # legacy, untouched
-fips-pubdom pins list                 # example.org  npub…:5355  Dnssec  verified_at …
+fips-pubdom pins list                 # one line per pinned server, primary first
 journalctl -u fips-pubdom | grep pinned
 ```
 
@@ -86,7 +93,8 @@ existed.
 | TXT present, claim missing or by another key | the legacy answer; the pin, if any, stays |
 | TXT removed | the legacy answer; the pin is forgotten |
 | name bound but not in the zone, or `legacy` | the legacy answer |
-| the domain's server does not answer | its published zone record, if any: names pointing at nodes that answer an echo resolve over the mesh, the rest get the legacy answer |
+| the primary server does not answer | the next pinned server (the TXT record names several); the failed one is retried after its backoff |
+| no server answers | a published zone record, if any: names pointing at nodes that answer an echo resolve over the mesh, the rest get the legacy answer |
 | target node unreachable through the local fips node | the legacy answer |
 | offline, domain pinned | the mesh answer, no DNS, no relays |
 | offline, unpinned, claim on a mesh relay | refused (legacy fails too) — unless `allow_unverified_offline` |

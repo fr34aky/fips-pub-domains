@@ -175,13 +175,22 @@ Walk `N` from the right: `www.example.org` → try `example.org`, then
 `www.example.org` (longest claim wins). Public-suffix-aware: never accept a
 claim for a public suffix (`ch`, `co.uk`) — use a bundled Public Suffix List.
 
-### 5.3 Several claims for one domain
+### 5.3 Several claims for one domain: redundant servers
 
-- Keep only claims whose author a TXT record names (when DNS was
-  reachable) — this resolves all conflicts online.
-- Offline: a pinned binding wins; otherwise the claim with a valid DNSSEC
-  proof; otherwise the claim with the most trusted attestations. Ties or no
-  evidence → treat as unverified (§5.1 step 5).
+- Every key the TXT record names and that claims the domain is a
+  **server** of the domain — not a conflict. A domain gets redundancy by
+  publishing several TXT records and running the server on several nodes
+  with the same zone; each node publishes its own claim and zone record.
+- The client keeps all of them pinned, in the order they were first
+  pinned; the first is the primary. Step 3 asks the servers in that order
+  and fails over to the next when one does not answer (§6); a server that
+  failed is skipped for a backoff window (5 minutes, tripling per
+  consecutive failure, at most 3 hours) and tried again when it expires.
+  Zone records (§3.3) from any of the servers are accepted, newest first.
+- Claims whose author the record does *not* name are ignored (online).
+  Offline: the pinned servers; otherwise the claim with a valid DNSSEC
+  proof; otherwise the claim with the most trusted attestations. Ties or
+  no evidence → treat as unverified (§5.1 step 5).
 
 ### 5.4 Pinning
 
@@ -193,11 +202,13 @@ claim for a public suffix (`ch`, `co.uk`) — use a bundled Public Suffix List.
 - The **same** binding re-verified with a weaker method keeps the pin's
   method: an unsigned replay of the real record must not lower the bar for
   the change that follows.
-- **Forgetting** a pin (the TXT record is gone) is a binding change too and
-  takes a denial at least as strong as the pin: a DNSSEC-validated denial,
-  or as many agreeing resolvers as verified the pin. A weaker denial — a
-  captive portal's NXDOMAIN — leaves the pin in place but unused while DNS
-  says no; it resolves again offline or once DNS answers properly.
+- **Forgetting** a pin (the TXT record is gone, or no longer names that
+  server) is a binding change too and takes a denial at least as strong as
+  the pin: a DNSSEC-validated denial, or as many agreeing resolvers as
+  verified the pin. A weaker denial — a captive portal's NXDOMAIN — leaves
+  the pin in place but unused while DNS says no; it resolves again offline
+  or once DNS answers properly. With several servers the rule applies per
+  server.
 
 ### 5.5 No public Internet: the claim *is* the TXT record
 
@@ -262,8 +273,9 @@ so this is accepted; the online rule (TXT first, §8) is unchanged.
   also exists in the public DNS, so a zone must name exactly the names that
   are on the mesh — a wildcard sends *every* name under the domain to the
   node, including those that exist only on the Internet.
-- Server offline (no answer, as opposed to NXDOMAIN) → fall back to the
-  newest zone record (§3.3) by the pinned server. Nothing has then proved
+- A server that does not answer (as opposed to NXDOMAIN) → the next
+  pinned server (§5.3); none left → fall back to the newest zone record
+  (§3.3) by any of the pinned servers. Nothing has then proved
   any node reachable, so every target — the server's own node included —
   must answer an echo before its address is handed out (§7).
 

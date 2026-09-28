@@ -71,7 +71,7 @@ impl FilePinStore {
 }
 
 impl PinStore for FilePinStore {
-    fn get(&self, domain: &str) -> Option<Binding> {
+    fn get(&self, domain: &str) -> Vec<Binding> {
         self.mem.get(domain)
     }
     fn put(&self, binding: Binding) -> bool {
@@ -83,6 +83,13 @@ impl PinStore for FilePinStore {
     }
     fn forget(&self, domain: &str) -> bool {
         let changed = self.mem.forget(domain);
+        if changed {
+            self.save();
+        }
+        changed
+    }
+    fn forget_server(&self, domain: &str, npub: pubdom_core::Npub) -> bool {
+        let changed = self.mem.forget_server(domain, npub);
         if changed {
             self.save();
         }
@@ -121,7 +128,7 @@ mod tests {
             verified_at: 42,
         });
         let again = FilePinStore::open(&path).unwrap();
-        assert_eq!(again.get("example.org").unwrap().verified_at, 42);
+        assert_eq!(again.get("example.org")[0].verified_at, 42);
         again.forget("example.org");
         assert!(FilePinStore::open(&path).unwrap().list().is_empty());
         std::fs::write(&path, b"{not json").unwrap();

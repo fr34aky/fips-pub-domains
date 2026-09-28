@@ -12,7 +12,7 @@ use crate::relay::{RelayClient, RelayScope};
 use crate::txt::TxtVerifier;
 use pubdom_core::cache::{self, TtlCache};
 use pubdom_core::claim::{Event, ZoneRecord};
-use pubdom_core::policy::{self, Decision, Input, NoProofs, PinUpdate, Reason, TxtLookup};
+use pubdom_core::policy::{self, Decision, Input, NoProofs, PinChange, Reason, TxtLookup};
 use pubdom_core::synth::{self, Query, Step3Outcome};
 use pubdom_core::{ANSWER_TTL_SECS, Binding, Npub, PinStore, domain};
 use std::collections::HashMap;
@@ -83,6 +83,11 @@ pub struct ResolverConfig {
     pub register_timeout: Duration,
     /// Budget for the echo to a node other than the domain's server.
     pub reach_timeout: Duration,
+    /// A server that did not answer step 3 is skipped for this long after
+    /// the first failure, three times as long after the next, up to
+    /// `server_backoff_max`; then it is tried again.
+    pub server_backoff: Duration,
+    pub server_backoff_max: Duration,
 }
 
 impl Default for ResolverConfig {
@@ -106,6 +111,8 @@ impl Default for ResolverConfig {
             tcp_timeout: Duration::from_secs(3),
             register_timeout: Duration::from_secs(1),
             reach_timeout: Duration::from_millis(1500),
+            server_backoff: Duration::from_secs(300),
+            server_backoff_max: Duration::from_secs(3 * 3600),
         }
     }
 }
@@ -120,7 +127,9 @@ pub enum LookupResult {
 
 #[derive(Clone)]
 enum CachedDecision {
-    Use(Binding, bool),
+    /// The domain's servers, primary first, and whether the binding is the
+    /// opted-in unverified kind.
+    Use(Vec<Binding>, bool),
     NotOverFips,
 }
 
@@ -144,9 +153,13 @@ pub struct Resolver<T: TxtSource, C: ClaimSource> {
     /// (negative, 30 s): a browser asks A, AAAA and HTTPS for one name, and
     /// each would otherwise wait out the full echo budget.
     reachable: TtlCache<Npub, bool>,
-    /// Zone records by domain, for names asked while the domain's server is
-    /// unreachable (spec §3.3, §6). `None` = the server published none.
+    /// Zone records by domain, for names asked while the domain's servers
+    /// are unreachable (spec §3.3, §6). `None` = no server published one.
     zones: TtlCache<String, Option<ZoneRecord>>,
+    /// Servers that did not answer step 3, with how many times in a row:
+    /// skipped until the entry expires (a backoff that grows with the
+    /// count), then tried again — the periodic re-check of a failed server.
+    down: TtlCache<Npub, u32>,
     /// Single-flight per domain: a browser's first visit fires A, AAAA and
     /// HTTPS queries at once, and only one of them should pay for the TXT
     /// and relay round trips (and write the pin).
@@ -173,6 +186,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             registered: TtlCache::new(1024),
             reachable: TtlCache::new(1024),
             zones: TtlCache::new(1024),
+            down: TtlCache::new(1024),
             inflight: Mutex::new(HashMap::new()),
         }
     }
@@ -206,6 +220,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         self.registered.clear();
         self.reachable.clear();
         self.zones.clear();
+        self.down.clear();
     }
 
     /// The whole of spec §5–§7 for one application query.
@@ -221,9 +236,12 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         // only thing that can resolve without a relay round trip, so it is
         // taken before relays are asked about longer, unpinned candidates;
         // the pinned server's zone covers its subtree anyway.
-        let mut chosen: Option<(String, Binding, bool)> = None;
+        let mut chosen: Option<(String, Vec<Binding>, bool)> = None;
         if !self.is_online()
-            && let Some(d) = candidates.iter().rev().find(|d| self.pins.get(d).is_some())
+            && let Some(d) = candidates
+                .iter()
+                .rev()
+                .find(|d| !self.pins.get(d).is_empty())
             && let CachedDecision::Use(b, unverified) = self.decision(d).await
         {
             chosen = Some((d.clone(), b, unverified));
@@ -240,13 +258,16 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
                 CachedDecision::NotOverFips => {}
             }
         }
-        let Some((bound_domain, binding, unverified)) = chosen else {
+        let Some((bound_domain, servers, unverified)) = chosen else {
             return LookupResult::Passthrough;
         };
-        if unverified {
-            tracing::warn!(name = %q.name, domain = %bound_domain, npub = %binding.npub, "resolving through an UNVERIFIED binding (opt-in)");
+        if servers.is_empty() {
+            return LookupResult::Passthrough;
         }
-        match self.step3(&q, &binding).await {
+        if unverified {
+            tracing::warn!(name = %q.name, domain = %bound_domain, npub = %servers[0].npub, "resolving through an UNVERIFIED binding (opt-in)");
+        }
+        match self.step3(&q, &servers).await {
             Some(npub) => self.answer(&q, npub),
             None => LookupResult::Passthrough,
         }
@@ -287,7 +308,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
 
     async fn decide_uncached(&self, d: &str) -> CachedDecision {
         let now = crate::now();
-        let pin = self.pins.get(d);
+        let pins = self.pins.get(d);
         let online = self.is_online();
         let (txt, txt_ttl) = if online {
             self.txt.lookup(d).await
@@ -300,7 +321,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             TxtLookup::Miss { .. } => Vec::new(),
             // … or offline, where the claim stands in for the record (§5.5) —
             // unless a pin already answers, which needs no relay at all.
-            TxtLookup::Unreachable if pin.is_some() => Vec::new(),
+            TxtLookup::Unreachable if !pins.is_empty() => Vec::new(),
             // Believed online but DNS did not answer: a public relay must not
             // learn the domain; relays on the mesh may.
             TxtLookup::Unreachable if online => {
@@ -312,22 +333,24 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         let is_unreachable = matches!(txt, TxtLookup::Unreachable);
         let outcome = policy::decide(Input {
             domain: d,
-            pin,
+            pins,
             txt,
             claims: &claims,
             now,
             allow_unverified_offline: self.cfg.allow_unverified_offline,
             proofs: &NoProofs,
         });
-        match &outcome.pin_update {
-            PinUpdate::Keep => {}
-            PinUpdate::Put(b) => {
-                tracing::info!(domain = d, npub = %b.npub, method = ?b.method, "binding verified and pinned");
-                self.pins.put(b.clone());
-            }
-            PinUpdate::Forget => {
-                tracing::info!(domain = d, "TXT record gone: binding unpinned");
-                self.pins.forget(d);
+        for change in &outcome.changes {
+            match change {
+                PinChange::Put(b) => {
+                    if self.pins.put(b.clone()) {
+                        tracing::info!(domain = d, npub = %b.npub, method = ?b.method, "binding verified and pinned");
+                    }
+                }
+                PinChange::Forget(npub) => {
+                    tracing::info!(domain = d, %npub, "no longer named by the TXT record: server unpinned");
+                    self.pins.forget_server(d, *npub);
+                }
             }
         }
         let (cached, ttl) = match outcome.decision {
@@ -337,7 +360,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
                     .unwrap_or(cache::CLAIM_TTL);
                 (CachedDecision::Use(b, false), ttl)
             }
-            Decision::Unverified(b) => (CachedDecision::Use(b, true), cache::RELAY_MISS_TTL),
+            Decision::Unverified(b) => (CachedDecision::Use(vec![b], true), cache::RELAY_MISS_TTL),
             Decision::NotOverFips(reason) => {
                 tracing::debug!(domain = d, ?reason, "not over fips");
                 let ttl = match reason {
@@ -354,12 +377,12 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
 
     /// Step 3 (spec §6) plus the reachability rule (spec §7). `None` means
     /// "not over fips" or failure — the caller passes through either way.
-    async fn step3(&self, q: &Query, binding: &Binding) -> Option<Npub> {
+    async fn step3(&self, q: &Query, servers: &[Binding]) -> Option<Npub> {
         // Same single-flight as `decision`: one mesh query per name, however
         // many record types the application asks for at once.
         let lock = self.flight(&format!("step3:{}", q.name));
         let _flight = lock.lock().await;
-        let result = self.step3_uncached(q, binding).await;
+        let result = self.step3_uncached(q, servers).await;
         drop(_flight);
         if Arc::strong_count(&lock) == 2 {
             self.inflight
@@ -379,83 +402,119 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             .clone()
     }
 
-    async fn step3_uncached(&self, q: &Query, binding: &Binding) -> Option<Npub> {
+    async fn step3_uncached(&self, q: &Query, servers: &[Binding]) -> Option<Npub> {
         let now = crate::now();
-        let cached = match self.step3.get(&q.name, now) {
-            Some(CachedStep3::Node(n)) => Some(n),
-            Some(CachedStep3::NotOverFips) => return None,
-            None => {
-                if !self.ensure_registered(binding.npub).await {
-                    tracing::debug!(npub = %binding.npub, "domain server not reachable through the local node");
+        if let Some(cached) = self.step3.get(&q.name, now) {
+            return match cached {
+                // A cached answer names a node; the server that gave it may
+                // not be the primary any more, so the echo rule applies.
+                CachedStep3::Node(n) => self.deliverable(q, n, false).await,
+                CachedStep3::NotOverFips => None,
+            };
+        }
+        // Ask the servers in pin order, skipping those in their backoff
+        // window (spec §5.3): the primary stays the primary while it
+        // answers, and a failed server is retried once its window expires.
+        let mut all_skipped = true;
+        for server in servers {
+            if self.down.get(&server.npub, now).is_some() {
+                continue;
+            }
+            all_skipped = false;
+            if !self.ensure_registered(server.npub).await {
+                tracing::debug!(npub = %server.npub, "domain server not reachable through the local node");
+                self.mark_down(server.npub, now);
+                continue;
+            }
+            match self.ask_server(q, server, now).await {
+                Ok(Step3Outcome::Node { npub, ttl }) => {
+                    let ttl = Duration::from_secs(ttl.into()).min(cache::STEP3_MAX_TTL);
+                    self.step3
+                        .put(q.name.clone(), CachedStep3::Node(npub), ttl, now);
+                    return self.deliverable(q, npub, npub == server.npub).await;
+                }
+                Ok(Step3Outcome::NotOverFips) => {
+                    self.step3.put(
+                        q.name.clone(),
+                        CachedStep3::NotOverFips,
+                        Duration::from_secs(300),
+                        now,
+                    );
                     return None;
                 }
-                let msg = synth::build_query(query_id(&q.name, now), &q.name, synth::QTYPE_AAAA)?;
-                let id = u16::from_be_bytes([msg[0], msg[1]]);
-                let server = binding.server_addr();
-                let mesh = self.mesh.clone();
-                let (t_udp, t_tcp) = (self.cfg.step3_timeout, self.cfg.tcp_timeout);
-                let outcome = tokio::task::spawn_blocking(move || {
-                    let reply = match mesh.query_udp(server, &msg, t_udp) {
-                        Ok(r) => r,
-                        // One retry: a mesh path may still be settling.
-                        Err(_) => mesh
-                            .query_udp(server, &msg, t_udp)
-                            .map_err(|e| e.to_string())?,
-                    };
-                    let mut out = synth::parse_step3_reply(&reply, id);
-                    if out == Step3Outcome::Truncated {
-                        let reply = mesh
-                            .query_tcp(server, &msg, t_tcp)
-                            .map_err(|e| e.to_string())?;
-                        out = synth::parse_step3_reply(&reply, id);
-                    }
-                    Ok::<_, String>(out)
-                })
-                .await
-                .map_err(|e| e.to_string())
-                .and_then(|r| r);
-                match outcome {
-                    Ok(Step3Outcome::Node { npub, ttl }) => {
-                        let ttl = Duration::from_secs(ttl.into()).min(cache::STEP3_MAX_TTL);
-                        self.step3
-                            .put(q.name.clone(), CachedStep3::Node(npub), ttl, now);
-                        Some(npub)
-                    }
-                    Ok(Step3Outcome::NotOverFips) => {
-                        self.step3.put(
-                            q.name.clone(),
-                            CachedStep3::NotOverFips,
-                            Duration::from_secs(300),
-                            now,
-                        );
-                        return None;
-                    }
-                    Ok(other) => {
-                        tracing::debug!(name = %q.name, ?other, "step 3 failed; trying the zone record");
-                        return self.via_zone_record(q, binding).await;
-                    }
-                    Err(e) => {
-                        tracing::debug!(name = %q.name, error = %e, "step 3 failed; trying the zone record");
-                        return self.via_zone_record(q, binding).await;
-                    }
+                Ok(other) => {
+                    tracing::info!(name = %q.name, npub = %server.npub, ?other, "domain server failed; trying the next");
+                    self.mark_down(server.npub, now);
+                }
+                Err(e) => {
+                    tracing::info!(name = %q.name, npub = %server.npub, error = %e, "domain server did not answer; trying the next");
+                    self.mark_down(server.npub, now);
                 }
             }
-        };
-        let target = cached?;
-        // The answer names a node; make it routable. When it is the server
-        // we just talked to, step 3 succeeding proved it reachable; another
-        // node has to answer an echo before the application gets its
-        // address (spec §7) — a name must never be made unreachable.
-        self.deliverable(q, target, target == binding.npub).await
+        }
+        if all_skipped {
+            tracing::debug!(name = %q.name, "every domain server is in its backoff window");
+        }
+        self.via_zone_record(q, servers).await
     }
 
-    /// The domain's server did not answer: resolve `q` from its published
-    /// zone record instead (spec §3.3, §6). Every target — the server
-    /// itself included — has to answer an echo, since nothing proved any of
-    /// them reachable.
-    async fn via_zone_record(&self, q: &Query, binding: &Binding) -> Option<Npub> {
+    /// One step 3 exchange with `server`: UDP with one retry, TCP on
+    /// truncation.
+    async fn ask_server(
+        &self,
+        q: &Query,
+        server: &Binding,
+        now: u64,
+    ) -> Result<Step3Outcome, String> {
+        let msg = synth::build_query(query_id(&q.name, now), &q.name, synth::QTYPE_AAAA)
+            .ok_or_else(|| "unbuildable query".to_string())?;
+        let id = u16::from_be_bytes([msg[0], msg[1]]);
+        let addr = server.server_addr();
+        let mesh = self.mesh.clone();
+        let (t_udp, t_tcp) = (self.cfg.step3_timeout, self.cfg.tcp_timeout);
+        tokio::task::spawn_blocking(move || {
+            let reply = match mesh.query_udp(addr, &msg, t_udp) {
+                Ok(r) => r,
+                // One retry: a mesh path may still be settling.
+                Err(_) => mesh
+                    .query_udp(addr, &msg, t_udp)
+                    .map_err(|e| e.to_string())?,
+            };
+            let mut out = synth::parse_step3_reply(&reply, id);
+            if out == Step3Outcome::Truncated {
+                let reply = mesh
+                    .query_tcp(addr, &msg, t_tcp)
+                    .map_err(|e| e.to_string())?;
+                out = synth::parse_step3_reply(&reply, id);
+            }
+            Ok::<_, String>(out)
+        })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r)
+    }
+
+    /// Remember a failed server with a growing backoff.
+    fn mark_down(&self, npub: Npub, now: u64) {
+        // `get` only sees live entries; an expired one starts over at 0.
+        let failures = self.down.get(&npub, now).unwrap_or(0) + 1;
+        let window = self
+            .cfg
+            .server_backoff
+            .saturating_mul(3u32.saturating_pow(failures - 1))
+            .min(self.cfg.server_backoff_max);
+        self.down.put(npub, failures, window, now);
+    }
+
+    /// No domain server answered: resolve `q` from a published zone record
+    /// instead (spec §3.3, §6) — the newest by any of the domain's servers.
+    /// Every target has to answer an echo, since nothing proved any of them
+    /// reachable.
+    async fn via_zone_record(&self, q: &Query, servers: &[Binding]) -> Option<Npub> {
+        let first = servers.first()?;
+        let dom = &first.domain;
         let now = crate::now();
-        let zone = match self.zones.get(&binding.domain, now) {
+        let zone = match self.zones.get(dom, now) {
             Some(z) => z,
             None => {
                 // The domain was vouched for when it was pinned, so asking
@@ -465,28 +524,27 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
                 } else {
                     RelayScope::Offline
                 };
-                let events = self
-                    .claims
-                    .fetch_zone(&binding.domain, binding.npub, scope)
-                    .await;
-                let z = policy::ingest_zone(
-                    self.pins.as_ref(),
-                    &binding.domain,
-                    binding.npub,
-                    &events,
-                    now,
-                );
-                let ttl = if z.is_some() {
+                let mut best: Option<ZoneRecord> = None;
+                for server in servers {
+                    let events = self.claims.fetch_zone(dom, server.npub, scope).await;
+                    if let Some(z) =
+                        policy::ingest_zone(self.pins.as_ref(), dom, server.npub, &events, now)
+                        && best.as_ref().is_none_or(|b| b.created_at < z.created_at)
+                    {
+                        best = Some(z);
+                    }
+                }
+                let ttl = if best.is_some() {
                     cache::CLAIM_TTL
                 } else {
                     cache::RELAY_MISS_TTL
                 };
-                self.zones.put(binding.domain.clone(), z.clone(), ttl, now);
-                z
+                self.zones.put(dom.clone(), best.clone(), ttl, now);
+                best
             }
         };
         let zone = zone?;
-        let label = domain::relative_label(&q.name, &binding.domain)?;
+        let label = domain::relative_label(&q.name, dom)?;
         let target = zone.lookup(label)?;
         tracing::info!(name = %q.name, npub = %target, "domain server unreachable; answering from its zone record");
         self.deliverable(q, target, false).await
@@ -613,8 +671,8 @@ mod tests {
         registered: Mutex<Vec<Npub>>,
         echoes: Mutex<Vec<Npub>>,
         unreachable: Vec<Npub>,
-        /// The domain server's DNS does not answer (the node may still ping).
-        server_down: bool,
+        /// Domain servers whose DNS does not answer (the node may still ping).
+        down: Vec<Npub>,
     }
     impl MeshDns for FakeMesh {
         fn query_udp(
@@ -624,13 +682,16 @@ mod tests {
             _: Duration,
         ) -> std::io::Result<Vec<u8>> {
             self.queries.lock().unwrap().push(server);
-            if self.server_down {
+            // Any of the first few npubs may be a server; they all serve the
+            // same zone.
+            let which = (1..=4).find(|i| npub(*i).fips_address() == *server.ip());
+            let which = which.expect("a query to an address that is not a server");
+            if self.down.contains(&npub(which)) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "no answer",
                 ));
             }
-            assert_eq!(server.ip(), &npub(1).fips_address());
             let q = synth::parse_query(msg).unwrap();
             let target = match q.name.as_str() {
                 "www.example.org" => Some(npub(1)),
@@ -673,7 +734,7 @@ mod tests {
             registered: Mutex::new(vec![]),
             echoes: Mutex::new(vec![]),
             unreachable,
-            server_down: false,
+            down: vec![],
         });
         let cfg = ResolverConfig {
             allow_unverified_offline: allow_unverified,
@@ -720,7 +781,7 @@ mod tests {
                 ttl: ANSWER_TTL_SECS
             }
         );
-        let pin = pins.get("example.org").unwrap();
+        let pin = &pins.get("example.org")[0];
         assert_eq!((pin.npub, pin.method), (npub(1), Method::Dnssec));
         assert_eq!(mesh.queries.lock().unwrap().len(), 1);
         // Second lookup of the same name: served from caches, no mesh query.
@@ -747,7 +808,7 @@ mod tests {
             registered: Mutex::new(vec![]),
             echoes: Mutex::new(vec![]),
             unreachable: vec![],
-            server_down: false,
+            down: vec![],
         });
         let r = Resolver::new(
             ResolverConfig::default(),
@@ -964,7 +1025,7 @@ mod tests {
             registered: Mutex::new(vec![]),
             echoes: Mutex::new(vec![]),
             unreachable: vec![npub(1)], // the server's node is gone entirely
-            server_down: true,
+            down: vec![npub(1)],
         });
         let events = vec![zone_event(
             npub(1),
@@ -1052,6 +1113,120 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|(d, _)| d.starts_with("zone:"))
+        );
+    }
+
+    /// Two servers named by the TXT record, both claiming: both are pinned;
+    /// when the primary's DNS stops answering, the second one answers, and
+    /// the primary is skipped for its backoff window before being retried.
+    #[tokio::test]
+    async fn redundant_servers_fail_over_and_retry_after_the_backoff() {
+        let pins: Arc<MemoryPinStore> = Arc::new(MemoryPinStore::new());
+        let two = TxtLookup::Hit {
+            records: vec![
+                TxtRecord {
+                    npub: npub(1),
+                    port: Some(5355),
+                },
+                TxtRecord {
+                    npub: npub(2),
+                    port: Some(5355),
+                },
+            ],
+            method: Method::Dnssec,
+        };
+        let mesh = Arc::new(FakeMesh {
+            queries: Mutex::new(vec![]),
+            registered: Mutex::new(vec![]),
+            echoes: Mutex::new(vec![]),
+            unreachable: vec![],
+            down: vec![npub(1)],
+        });
+        let cfg = ResolverConfig {
+            server_backoff: Duration::from_secs(300),
+            ..Default::default()
+        };
+        let r = Resolver::new(
+            cfg,
+            pins.clone(),
+            FakeTxt(Mutex::new(HashMap::from([(
+                "example.org".to_string(),
+                two,
+            )]))),
+            FakeClaims(
+                vec![
+                    claim_event(npub(1), "example.org"),
+                    claim_event(npub(2), "example.org"),
+                ],
+                Mutex::new(vec![]),
+            ),
+            mesh.clone(),
+        );
+        let q = build_query(1, "www.example.org", QTYPE_AAAA).unwrap();
+        assert!(matches!(r.lookup(&q).await, LookupResult::Answer(_)));
+        let servers = pins.get("example.org");
+        assert_eq!(servers.len(), 2, "both named servers are pinned");
+        let asked: Vec<SocketAddrV6> = mesh.queries.lock().unwrap().clone();
+        assert_eq!(asked.len(), 3, "primary (udp + retry), then the second");
+        assert_eq!(asked[0].ip(), &npub(1).fips_address());
+        assert_eq!(asked[2].ip(), &npub(2).fips_address());
+        // A second name: the primary is in its backoff window and skipped.
+        let q = build_query(2, "git.example.org", QTYPE_AAAA).unwrap();
+        assert!(matches!(r.lookup(&q).await, LookupResult::Answer(_)));
+        let asked = mesh.queries.lock().unwrap().clone();
+        assert_eq!(asked.len(), 4, "one query, straight to the second server");
+        assert_eq!(asked[3].ip(), &npub(2).fips_address());
+    }
+
+    #[tokio::test]
+    async fn a_failed_server_is_retried_once_its_backoff_expires() {
+        let pins: Arc<MemoryPinStore> = Arc::new(MemoryPinStore::new());
+        pins.put(Binding {
+            domain: "example.org".into(),
+            npub: npub(1),
+            port: 5355,
+            method: Method::Dns,
+            verified_at: 1,
+        });
+        pins.put(Binding {
+            domain: "example.org".into(),
+            npub: npub(2),
+            port: 5355,
+            method: Method::Dns,
+            verified_at: 1,
+        });
+        let mesh = Arc::new(FakeMesh {
+            queries: Mutex::new(vec![]),
+            registered: Mutex::new(vec![]),
+            echoes: Mutex::new(vec![]),
+            unreachable: vec![],
+            down: vec![npub(1)],
+        });
+        // A zero backoff: the window has expired by the next lookup.
+        let cfg = ResolverConfig {
+            server_backoff: Duration::ZERO,
+            ..Default::default()
+        };
+        let r = Resolver::new(
+            cfg,
+            pins,
+            FakeTxt(Mutex::new(HashMap::new())),
+            FakeClaims(vec![], Mutex::new(vec![])),
+            mesh.clone(),
+        );
+        r.set_online(false);
+        for (i, name) in ["www.example.org", "git.example.org"].iter().enumerate() {
+            let q = build_query(i as u16 + 1, name, QTYPE_AAAA).unwrap();
+            assert!(matches!(r.lookup(&q).await, LookupResult::Answer(_)));
+        }
+        let asked = mesh.queries.lock().unwrap().clone();
+        let to_primary = asked
+            .iter()
+            .filter(|a| a.ip() == &npub(1).fips_address())
+            .count();
+        assert_eq!(
+            to_primary, 4,
+            "the primary is tried again (udp + retry) on the second lookup"
         );
     }
 }

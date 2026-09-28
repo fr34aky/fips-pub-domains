@@ -20,7 +20,7 @@ pub mod txt;
 pub use claim::{Claim, Event, ZoneRecord};
 pub use identity::Npub;
 pub use pins::{Binding, MemoryPinStore, Method, PinStore};
-pub use policy::{Decision, Outcome, PinUpdate, Reason, TxtLookup};
+pub use policy::{Decision, Outcome, PinChange, Reason, TxtLookup};
 
 /// Nostr kinds. Placeholders until registered (spec §3, `docs/nip.md`).
 pub const KIND_CLAIM: u16 = 37197;

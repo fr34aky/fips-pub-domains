@@ -1,6 +1,6 @@
-//! The verification precedence (spec §5.1), conflict rules (§5.3), pin
-//! changes (§5.4) and the offline path (§5.5), as one pure function over
-//! what the resolver gathered.
+//! The verification precedence (spec §5.1), redundant servers and conflicts
+//! (§5.3), pin changes (§5.4) and the offline path (§5.5), as one pure
+//! function over what the resolver gathered.
 //!
 //! "Refused" applies to the *binding*, never to the name: every negative
 //! outcome is [`Decision::NotOverFips`], which the resolver turns into a
@@ -9,6 +9,7 @@
 
 use crate::claim::{Claim, Event, ZoneRecord};
 use crate::domain::is_claimable;
+use crate::identity::Npub;
 use crate::pins::{Binding, Method, PinStore, SeenKey};
 use crate::txt::TxtRecord;
 use crate::{KIND_CLAIM, KIND_ZONE, MAX_FUTURE_SECS};
@@ -48,25 +49,26 @@ pub enum Reason {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
-    /// Resolve over the mesh through this binding.
-    Bound(Binding),
+    /// Resolve over the mesh through these servers, primary first. Every
+    /// entry is verified (or pinned); the resolver fails over along the list.
+    Bound(Vec<Binding>),
     /// Resolve, but only because the user opted into unverified offline
     /// bindings; must be surfaced as such (spec §5.1 step 5).
     Unverified(Binding),
     NotOverFips(Reason),
 }
 
+/// One change to the domain's pins.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PinUpdate {
-    Keep,
+pub enum PinChange {
     Put(Binding),
-    Forget,
+    Forget(Npub),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
     pub decision: Decision,
-    pub pin_update: PinUpdate,
+    pub changes: Vec<PinChange>,
 }
 
 /// Verifies the `dnssec` proof carried in a claim against the DNS root
@@ -86,7 +88,8 @@ impl ProofVerifier for NoProofs {
 
 pub struct Input<'a> {
     pub domain: &'a str,
-    pub pin: Option<Binding>,
+    /// The domain's pinned servers, primary first; empty when unpinned.
+    pub pins: Vec<Binding>,
     pub txt: TxtLookup,
     /// Claims for `domain`, already passed through [`ingest_claims`].
     pub claims: &'a [Claim],
@@ -98,7 +101,7 @@ pub struct Input<'a> {
 pub fn decide(input: Input<'_>) -> Outcome {
     let keep = |decision| Outcome {
         decision,
-        pin_update: PinUpdate::Keep,
+        changes: Vec::new(),
     };
 
     if !is_claimable(input.domain) {
@@ -107,7 +110,12 @@ pub fn decide(input: Input<'_>) -> Outcome {
 
     match &input.txt {
         TxtLookup::Hit { records, method } => {
-            let named: Vec<_> = records.iter().map(|r| r.npub).collect();
+            let named: Vec<Npub> = records.iter().map(|r| r.npub).collect();
+            let pinned_named: Vec<&Binding> = input
+                .pins
+                .iter()
+                .filter(|p| named.contains(&p.npub))
+                .collect();
             let mut matching: Vec<&Claim> = input
                 .claims
                 .iter()
@@ -115,15 +123,12 @@ pub fn decide(input: Input<'_>) -> Outcome {
                 .collect();
             if matching.is_empty() {
                 // DNS says the domain participates but no reachable relay
-                // carries the claim. If we are pinned to a key the record
-                // still names, the pin resolves (spec §5.1 step 2): the claim
-                // was verified when the pin was made, and the record vouches
-                // for the same server today. Otherwise not over fips, and the
-                // pin, if any, stays.
-                if let Some(pin) = &input.pin
-                    && named.contains(&pin.npub)
-                {
-                    return keep(Decision::Bound(pin.clone()));
+                // carries a claim. Pins the record still names resolve (spec
+                // §5.1 step 2): their claims were verified when they were
+                // pinned, and the record vouches for the same keys today.
+                // Otherwise not over fips, and the pins stay.
+                if !pinned_named.is_empty() {
+                    return keep(Decision::Bound(pinned_named.into_iter().cloned().collect()));
                 }
                 let reason = if input.claims.is_empty() {
                     Reason::NoClaim
@@ -132,55 +137,84 @@ pub fn decide(input: Input<'_>) -> Outcome {
                 };
                 return keep(Decision::NotOverFips(reason));
             }
-            // Prefer the author we are already pinned to, then the newest.
-            let pinned = input.pin.as_ref().map(|p| p.npub);
-            matching.sort_by(|a, b| {
-                let ap = Some(a.author) == pinned;
-                let bp = Some(b.author) == pinned;
-                bp.cmp(&ap).then(b.created_at.cmp(&a.created_at))
+
+            // Every key the record names and that claims the domain is a
+            // server (spec §5.3): the servers already pinned keep their
+            // place, new ones follow, newest claim first.
+            let pin_order = |npub: Npub| input.pins.iter().position(|p| p.npub == npub);
+            matching.sort_by(|a, b| match (pin_order(a.author), pin_order(b.author)) {
+                (Some(x), Some(y)) => x.cmp(&y),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => b.created_at.cmp(&a.created_at),
             });
-            let chosen = matching[0];
-            let fresh = Binding {
-                domain: input.domain.to_owned(),
-                npub: chosen.author,
-                port: chosen.port,
-                method: *method,
-                verified_at: input.now,
-            };
-            if let Some(pin) = &input.pin
-                && *method < pin.method
-            {
-                // Weaker than what the pin rests on (spec §5.4): a changed
-                // binding is not accepted, and the same binding is not
-                // downgraded either — else an unsigned replay of the real
-                // record would lower the bar for the change that follows.
-                return keep(Decision::Bound(pin.clone()));
+            let mut servers = Vec::new();
+            let mut changes = Vec::new();
+            for claim in matching {
+                let existing = input.pins.iter().find(|p| p.npub == claim.author);
+                if let Some(pin) = existing
+                    && *method < pin.method
+                {
+                    // Weaker than what the pin rests on (spec §5.4): the
+                    // binding is not downgraded — else an unsigned replay of
+                    // the real record would lower the bar for the change
+                    // that follows.
+                    servers.push(pin.clone());
+                    continue;
+                }
+                let fresh = Binding {
+                    domain: input.domain.to_owned(),
+                    npub: claim.author,
+                    port: claim.port,
+                    method: *method,
+                    verified_at: input.now,
+                };
+                servers.push(fresh.clone());
+                changes.push(PinChange::Put(fresh));
+            }
+            // A pinned server the record no longer names: dropping it is a
+            // binding change, accepted only with a verification at least
+            // as strong as its pin. A weaker record leaves it pinned, after
+            // the named ones.
+            for pin in &input.pins {
+                if named.contains(&pin.npub) {
+                    if !servers.iter().any(|s| s.npub == pin.npub) {
+                        // Named, but no claim reached us: still a server.
+                        servers.push(pin.clone());
+                    }
+                } else if *method >= pin.method {
+                    changes.push(PinChange::Forget(pin.npub));
+                } else {
+                    servers.push(pin.clone());
+                }
             }
             Outcome {
-                decision: Decision::Bound(fresh.clone()),
-                pin_update: PinUpdate::Put(fresh),
+                decision: Decision::Bound(servers),
+                changes,
             }
         }
 
         TxtLookup::Miss { method } => {
             // The operator withdrew (or never had) the record: the domain is
-            // legacy-only now. Forgetting the pin is a binding change, so it
+            // legacy-only now. Forgetting a pin is a binding change, so it
             // takes a denial at least as strong as the pin (a captive
             // portal's NXDOMAIN must not unpin a DNSSEC binding). A weaker
             // denial keeps the pin but does not use it while DNS says no.
-            let pin_update = match &input.pin {
-                Some(pin) if *method >= pin.method => PinUpdate::Forget,
-                _ => PinUpdate::Keep,
-            };
+            let changes = input
+                .pins
+                .iter()
+                .filter(|p| *method >= p.method)
+                .map(|p| PinChange::Forget(p.npub))
+                .collect();
             Outcome {
                 decision: Decision::NotOverFips(Reason::NoTxt),
-                pin_update,
+                changes,
             }
         }
 
         TxtLookup::Unreachable => {
-            if let Some(pin) = &input.pin {
-                return keep(Decision::Bound(pin.clone()));
+            if !input.pins.is_empty() {
+                return keep(Decision::Bound(input.pins.clone()));
             }
             // Offline and unpinned: only a proof carried in the claim can
             // verify it (spec §5.5).
@@ -198,8 +232,8 @@ pub fn decide(input: Input<'_>) -> Outcome {
                     verified_at: input.now,
                 };
                 return Outcome {
-                    decision: Decision::Bound(b.clone()),
-                    pin_update: PinUpdate::Put(b),
+                    decision: Decision::Bound(vec![b.clone()]),
+                    changes: vec![PinChange::Put(b)],
                 };
             }
             if input.claims.is_empty() {
@@ -263,14 +297,14 @@ pub fn ingest_claims(store: &dyn PinStore, domain: &str, events: &[Event], now: 
     out
 }
 
-/// The newest zone record for `domain` by `author` (the pinned server),
+/// The newest zone record for `domain` by `author` (a pinned server),
 /// with the same future and rollback filters as claims (spec §3.3, §8).
-/// Records by anyone else are ignored: only the domain's server may say
+/// Records by anyone else are ignored: only the domain's servers may say
 /// which nodes serve its names.
 pub fn ingest_zone(
     store: &dyn PinStore,
     domain: &str,
-    author: crate::Npub,
+    author: Npub,
     events: &[Event],
     now: u64,
 ) -> Option<ZoneRecord> {
@@ -304,7 +338,6 @@ pub fn ingest_zone(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::identity::Npub;
     use crate::pins::MemoryPinStore;
 
     const NOW: u64 = 1_790_000_000;
@@ -341,10 +374,10 @@ mod tests {
             verified_at: 1,
         }
     }
-    fn run(pin_: Option<Binding>, txt_: TxtLookup, claims: &[Claim], allow: bool) -> Outcome {
+    fn run(pins: Vec<Binding>, txt_: TxtLookup, claims: &[Claim], allow: bool) -> Outcome {
         decide(Input {
             domain: "example.org",
-            pin: pin_,
+            pins,
             txt: txt_,
             claims,
             now: NOW,
@@ -352,35 +385,38 @@ mod tests {
             proofs: &NoProofs,
         })
     }
-    fn bound(o: &Outcome) -> &Binding {
+    fn bound(o: &Outcome) -> &[Binding] {
         match &o.decision {
             Decision::Bound(b) => b,
             other => panic!("expected Bound, got {other:?}"),
         }
     }
+    fn npubs(o: &Outcome) -> Vec<Npub> {
+        bound(o).iter().map(|b| b.npub).collect()
+    }
 
     #[test]
     fn online_hit_with_matching_claim_binds_and_pins() {
-        let o = run(None, txt(&[1], Method::Dnssec), &[claim(1, 5)], false);
-        let b = bound(&o);
+        let o = run(vec![], txt(&[1], Method::Dnssec), &[claim(1, 5)], false);
+        let b = &bound(&o)[0];
         assert_eq!(
             (b.npub, b.method, b.verified_at),
             (npub(1), Method::Dnssec, NOW)
         );
-        assert_eq!(o.pin_update, PinUpdate::Put(b.clone()));
+        assert_eq!(o.changes, vec![PinChange::Put(b.clone())]);
     }
 
     #[test]
     fn online_hit_without_matching_claim_is_legacy_and_keeps_pin() {
         let o = run(
-            Some(pin(1, Method::Dns)),
+            vec![pin(1, Method::Dns)],
             txt(&[2], Method::Dns),
             &[claim(1, 5)],
             false,
         );
         assert_eq!(o.decision, Decision::NotOverFips(Reason::ClaimMismatch));
-        assert_eq!(o.pin_update, PinUpdate::Keep);
-        let o = run(None, txt(&[2], Method::Dns), &[], false);
+        assert!(o.changes.is_empty());
+        let o = run(vec![], txt(&[2], Method::Dns), &[], false);
         assert_eq!(o.decision, Decision::NotOverFips(Reason::NoClaim));
     }
 
@@ -390,16 +426,16 @@ mod tests {
         // a relay inside the mesh), but the pin plus a TXT naming the same
         // key is a verified binding.
         let o = run(
-            Some(pin(1, Method::Dnssec)),
+            vec![pin(1, Method::Dnssec)],
             txt(&[1], Method::Dnssec),
             &[],
             false,
         );
-        assert_eq!(bound(&o).npub, npub(1));
-        assert_eq!(o.pin_update, PinUpdate::Keep);
+        assert_eq!(npubs(&o), vec![npub(1)]);
+        assert!(o.changes.is_empty());
         // …but not when the record names someone else.
         let o = run(
-            Some(pin(1, Method::Dnssec)),
+            vec![pin(1, Method::Dnssec)],
             txt(&[2], Method::Dnssec),
             &[],
             false,
@@ -410,35 +446,33 @@ mod tests {
     #[test]
     fn changed_binding_needs_equal_or_stronger_verification() {
         // Pinned via DNSSEC; today's answer is unsigned and names a new key.
+        // The new key is accepted as a server (its own verification), but
+        // the pinned one is not dropped by a weaker record.
         let o = run(
-            Some(pin(1, Method::Dnssec)),
+            vec![pin(1, Method::Dnssec)],
             txt(&[2], Method::Dns),
             &[claim(2, 5)],
             false,
         );
-        assert_eq!(
-            bound(&o).npub,
-            npub(1),
-            "weaker verification cannot move the pin"
-        );
-        assert_eq!(o.pin_update, PinUpdate::Keep);
-        // Same strength: accepted.
+        assert_eq!(npubs(&o), vec![npub(2), npub(1)]);
+        assert_eq!(o.changes, vec![PinChange::Put(bound(&o)[0].clone())]);
+        // Same strength: the old server is dropped.
         let o = run(
-            Some(pin(1, Method::Dnssec)),
+            vec![pin(1, Method::Dnssec)],
             txt(&[2], Method::Dnssec),
             &[claim(2, 5)],
             false,
         );
-        assert_eq!(bound(&o).npub, npub(2));
-        assert!(matches!(o.pin_update, PinUpdate::Put(_)));
-        // Stronger than the pin: also accepted, and the pin upgrades.
+        assert_eq!(npubs(&o), vec![npub(2)]);
+        assert!(o.changes.contains(&PinChange::Forget(npub(1))));
+        // Stronger than the pin: accepted, and the pin upgrades.
         let o = run(
-            Some(pin(1, Method::DnsSingle)),
+            vec![pin(1, Method::DnsSingle)],
             txt(&[1], Method::Dnssec),
             &[claim(1, 5)],
             false,
         );
-        assert_eq!(bound(&o).method, Method::Dnssec);
+        assert_eq!(bound(&o)[0].method, Method::Dnssec);
     }
 
     #[test]
@@ -446,83 +480,97 @@ mod tests {
         // An unsigned replay of the real record must not lower the pin's
         // method, or the next unsigned answer could move the binding.
         let o = run(
-            Some(pin(1, Method::Dnssec)),
+            vec![pin(1, Method::Dnssec)],
             txt(&[1], Method::DnsSingle),
             &[claim(1, 5)],
             false,
         );
-        assert_eq!(bound(&o).method, Method::Dnssec);
-        assert_eq!(o.pin_update, PinUpdate::Keep);
+        assert_eq!(bound(&o)[0].method, Method::Dnssec);
+        assert!(o.changes.is_empty());
     }
 
     #[test]
-    fn several_named_servers_prefer_pinned_then_newest() {
-        let claims = [claim(1, 5), claim(2, 9)];
-        let o = run(None, txt(&[1, 2], Method::Dns), &claims, false);
-        assert_eq!(bound(&o).npub, npub(2), "newest claim wins without a pin");
+    fn several_named_servers_are_all_bound_pinned_first_then_newest() {
+        let claims = [claim(1, 5), claim(2, 9), claim(3, 7)];
+        let o = run(vec![], txt(&[1, 2, 3], Method::Dns), &claims, false);
+        assert_eq!(
+            npubs(&o),
+            vec![npub(2), npub(3), npub(1)],
+            "newest claim first without pins"
+        );
+        assert_eq!(o.changes.len(), 3);
+        // Already pinned servers keep their order and come first.
         let o = run(
-            Some(pin(1, Method::Dns)),
-            txt(&[1, 2], Method::Dns),
+            vec![pin(3, Method::Dns), pin(1, Method::Dns)],
+            txt(&[1, 2, 3], Method::Dns),
             &claims,
             false,
         );
-        assert_eq!(bound(&o).npub, npub(1), "the pinned author wins");
+        assert_eq!(npubs(&o), vec![npub(3), npub(1), npub(2)]);
+        // A named server whose claim did not reach us this time stays a server.
+        let o = run(
+            vec![pin(1, Method::Dns), pin(2, Method::Dns)],
+            txt(&[1, 2], Method::Dns),
+            &[claim(1, 5)],
+            false,
+        );
+        assert_eq!(npubs(&o), vec![npub(1), npub(2)]);
     }
 
     #[test]
-    fn txt_miss_forgets_the_pin_only_with_a_denial_as_strong_as_the_pin() {
+    fn txt_miss_forgets_pins_only_with_a_denial_as_strong_as_each() {
         let miss = |m| TxtLookup::Miss { method: m };
         let o = run(
-            Some(pin(1, Method::Dnssec)),
+            vec![pin(1, Method::Dnssec), pin(2, Method::Dns)],
+            miss(Method::Dns),
+            &[],
+            false,
+        );
+        assert_eq!(o.decision, Decision::NotOverFips(Reason::NoTxt));
+        assert_eq!(
+            o.changes,
+            vec![PinChange::Forget(npub(2))],
+            "the DNSSEC pin survives an unsigned denial"
+        );
+        let o = run(
+            vec![pin(1, Method::Dnssec)],
             miss(Method::Dnssec),
             &[claim(1, 5)],
             false,
         );
-        assert_eq!(o.decision, Decision::NotOverFips(Reason::NoTxt));
-        assert_eq!(o.pin_update, PinUpdate::Forget);
-        // A captive portal's unsigned NXDOMAIN: not used, but not forgotten.
-        let o = run(
-            Some(pin(1, Method::Dnssec)),
-            miss(Method::DnsSingle),
-            &[claim(1, 5)],
-            false,
-        );
-        assert_eq!(o.decision, Decision::NotOverFips(Reason::NoTxt));
-        assert_eq!(o.pin_update, PinUpdate::Keep);
-        let o = run(Some(pin(1, Method::Dns)), miss(Method::Dns), &[], false);
-        assert_eq!(o.pin_update, PinUpdate::Forget);
-        let o = run(None, miss(Method::DnsSingle), &[], false);
-        assert_eq!(o.pin_update, PinUpdate::Keep);
+        assert_eq!(o.changes, vec![PinChange::Forget(npub(1))]);
+        let o = run(vec![], miss(Method::DnsSingle), &[], false);
+        assert!(o.changes.is_empty());
     }
 
     #[test]
-    fn offline_uses_the_pin_and_refuses_the_rest() {
+    fn offline_uses_the_pins_and_refuses_the_rest() {
         let o = run(
-            Some(pin(1, Method::Dns)),
+            vec![pin(1, Method::Dns), pin(2, Method::Dns)],
             TxtLookup::Unreachable,
-            &[claim(2, 5)],
+            &[claim(3, 5)],
             false,
         );
-        assert_eq!(bound(&o).npub, npub(1));
-        assert_eq!(o.pin_update, PinUpdate::Keep);
-        let o = run(None, TxtLookup::Unreachable, &[claim(2, 5)], false);
+        assert_eq!(npubs(&o), vec![npub(1), npub(2)]);
+        assert!(o.changes.is_empty());
+        let o = run(vec![], TxtLookup::Unreachable, &[claim(2, 5)], false);
         assert_eq!(o.decision, Decision::NotOverFips(Reason::Unverified));
-        let o = run(None, TxtLookup::Unreachable, &[], false);
+        let o = run(vec![], TxtLookup::Unreachable, &[], false);
         assert_eq!(o.decision, Decision::NotOverFips(Reason::NoClaim));
     }
 
     #[test]
     fn offline_opt_in_marks_a_single_claim_and_refuses_conflicts() {
-        let o = run(None, TxtLookup::Unreachable, &[claim(2, 5)], true);
+        let o = run(vec![], TxtLookup::Unreachable, &[claim(2, 5)], true);
         match o.decision {
             Decision::Unverified(b) => {
                 assert_eq!((b.npub, b.method), (npub(2), Method::Unverified))
             }
             other => panic!("{other:?}"),
         }
-        assert_eq!(o.pin_update, PinUpdate::Keep, "unverified is never pinned");
+        assert!(o.changes.is_empty(), "unverified is never pinned");
         let o = run(
-            None,
+            vec![],
             TxtLookup::Unreachable,
             &[claim(2, 5), claim(3, 6)],
             true,
@@ -542,23 +590,23 @@ mod tests {
         proven.dnssec = Some("AAAA".into());
         let o = decide(Input {
             domain: "example.org",
-            pin: None,
+            pins: vec![],
             txt: TxtLookup::Unreachable,
             claims: &[claim(3, 9), proven],
             now: NOW,
             allow_unverified_offline: false,
             proofs: &Yes,
         });
-        let b = bound(&o);
+        let b = &bound(&o)[0];
         assert_eq!((b.npub, b.method), (npub(2), Method::Dnssec));
-        assert!(matches!(o.pin_update, PinUpdate::Put(_)));
+        assert_eq!(o.changes, vec![PinChange::Put(b.clone())]);
     }
 
     #[test]
     fn public_suffix_is_never_bound() {
         let o = decide(Input {
             domain: "ch",
-            pin: None,
+            pins: vec![],
             txt: txt(&[1], Method::Dnssec),
             claims: &[],
             now: NOW,
@@ -631,7 +679,7 @@ mod tests {
         assert!(again.is_empty(), "rollback");
         // Future-dated and foreign-domain events are dropped.
         let mut foreign = ev(3, 10);
-        foreign.tags[0][1] = "other.ch".into();
+        foreign.tags[0][1] = "other.org".into();
         let x = ingest_claims(&store, "example.org", &[ev(3, NOW + 3600), foreign], NOW);
         assert!(x.is_empty());
     }

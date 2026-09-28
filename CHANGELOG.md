@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Redundant servers** (spec §5.3): every key the TXT record names and
+  that claims the domain is pinned as a server; step 3 asks them in pin
+  order, fails over when one does not answer, and retries a failed server
+  after a backoff (5 min, tripling per failure, at most 3 h). Zone records
+  from any pinned server are accepted. `fips-pubdom verify` and `pins list`
+  show the whole set. The pin file's format is unchanged — it was already a
+  list; a file from before simply has one server per domain.
+
 - **Zone records** (kind 37199, spec §3.3): the domain server publishes the
   names it serves next to its claim — at start, every 24 h, and whenever a
   zone file changes — and a client whose step 3 gets no answer from the

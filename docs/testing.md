@@ -169,6 +169,17 @@ example.org: zone record by npub1… created_at …
 Every target answered from the record has to pass the echo, the server's
 own node included — nothing else has proved any of them reachable.
 
+## Level 4c — redundant servers
+
+Unit-tested (`redundant_servers_fail_over_and_retry_after_the_backoff`,
+`a_failed_server_is_retried_once_its_backoff_expires`): two TXT-named
+servers both claiming → both pinned; the primary's DNS silent → the second
+answers after the primary's UDP attempt and retry; the next name goes to
+the second server directly while the primary is in its backoff window; with
+the window expired the primary is asked again. An existing single-entry
+pin file loads and resolves unchanged. A live run needs a second node
+serving the same zone and a second TXT record — pending.
+
 ## Level 5 — the phone
 
 Run on a Pixel 9 Pro with fips2go's `names` branch (a debug build from

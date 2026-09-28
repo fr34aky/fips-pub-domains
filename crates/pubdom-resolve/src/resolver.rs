@@ -416,10 +416,15 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         // window (spec §5.3): the primary stays the primary while it
         // answers, and a failed server is retried once its window expires.
         let mut all_skipped = true;
-        for server in servers {
+        for (i, server) in servers.iter().enumerate() {
             if self.down.get(&server.npub, now).is_some() {
                 continue;
             }
+            let then = if i + 1 < servers.len() {
+                "trying the next"
+            } else {
+                "no other server; trying its zone record"
+            };
             all_skipped = false;
             if !self.ensure_registered(server.npub).await {
                 tracing::debug!(npub = %server.npub, "domain server not reachable through the local node");
@@ -443,11 +448,11 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
                     return None;
                 }
                 Ok(other) => {
-                    tracing::info!(name = %q.name, npub = %server.npub, ?other, "domain server failed; trying the next");
+                    tracing::info!(name = %q.name, npub = %server.npub, ?other, "domain server failed; {then}");
                     self.mark_down(server.npub, now);
                 }
                 Err(e) => {
-                    tracing::info!(name = %q.name, npub = %server.npub, error = %e, "domain server did not answer; trying the next");
+                    tracing::info!(name = %q.name, npub = %server.npub, error = %e, "domain server did not answer; {then}");
                     self.mark_down(server.npub, now);
                 }
             }

@@ -53,6 +53,17 @@ impl RelayClient {
     }
 
     /// The zone record (kind 37199) for `domain` by its server (spec §3.3).
+    /// One author's claims for `domain` — a server looking for its own,
+    /// which other keys' claims must not crowd out of the result.
+    pub async fn fetch_claims_by(
+        &self,
+        domain: &str,
+        author: &Npub,
+        scope: RelayScope,
+    ) -> Vec<CoreEvent> {
+        self.fetch(KIND_CLAIM, domain, Some(author), scope).await
+    }
+
     pub async fn fetch_zone(
         &self,
         domain: &str,

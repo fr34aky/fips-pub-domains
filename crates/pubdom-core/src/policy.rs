@@ -325,8 +325,7 @@ fn newest_proof(input: &Input<'_>) -> Result<Option<ProvenRecord>, ()> {
 }
 
 /// Every key `record` names that has a claim, as a DNSSEC binding, newest
-/// claim first. `verified_at` is when the record was signed: the age of the
-/// evidence it rests on.
+/// claim first.
 fn proven_servers(input: &Input<'_>, record: &ProvenRecord) -> Vec<Binding> {
     let mut named: Vec<&Claim> = input
         .claims
@@ -341,7 +340,7 @@ fn proven_servers(input: &Input<'_>, record: &ProvenRecord) -> Vec<Binding> {
             npub: c.author,
             port: c.port,
             method: Method::Dnssec,
-            verified_at: record.signed_at,
+            verified_at: input.now,
         })
         .collect()
 }

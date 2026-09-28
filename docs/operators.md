@@ -107,7 +107,8 @@ claim on the relays. Once the record no longer names this server's key (a
 key rotation, or a record set up for another node), the claim goes out
 without a proof and a warning says so — an older proof would be evidence
 for a retired key. Each zone is scheduled on its own. `publish --dry-run`
-collects the chain but never contacts a relay. The log line `claim published … dnssec_proof_until=…`
+collects the chain but never contacts a relay — so while DNS fails it shows
+the claim without the proof a real run would restore from the relays. The log line `claim published … dnssec_proof_until=…`
 shows it; for an unsigned zone the claim goes out without a proof and a
 warning says so. `--no-dnssec-proof` turns it off.
 

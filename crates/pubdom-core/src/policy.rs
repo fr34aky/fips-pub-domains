@@ -250,48 +250,21 @@ pub fn decide(input: Input<'_>) -> Outcome {
         }
 
         TxtLookup::Unreachable => {
-            // Offline, a proof carried in a claim stands in for the record
+            // Pins answer offline without any relay (the resolver does not
+            // even fetch claims for a pinned domain): retiring a pinned key
+            // takes an online lookup, as before proofs.
+            if !input.pins.is_empty() {
+                return keep(Decision::Bound(input.pins.clone()));
+            }
+            // Unpinned: a proof carried in a claim stands in for the record
             // (spec §5.5). Proofs may show different versions of it — a
             // retired key's claim can carry a chain signed before the change
             // and still valid — so the newest proven record decides, as the
-            // live record would online.
-            let newest = match newest_proof(&input) {
-                Ok(n) => n,
-                // Two different records signed at the same time: nothing to
-                // tell them apart by.
-                Err(()) if input.pins.is_empty() => {
-                    return keep(Decision::NotOverFips(Reason::Conflict));
-                }
-                Err(()) => None,
+            // live record would online. Two different records signed at the
+            // same time are a conflict: nothing tells them apart.
+            let Ok(newest) = newest_proof(&input) else {
+                return keep(Decision::NotOverFips(Reason::Conflict));
             };
-            if !input.pins.is_empty() {
-                let Some(record) = newest else {
-                    return keep(Decision::Bound(input.pins.clone()));
-                };
-                // A pin resting on evidence older than the newest proven
-                // record, which no longer names it, is retired; everything
-                // else stays, and keys the record names that have a claim
-                // join as servers.
-                let mut servers = Vec::new();
-                let mut changes = Vec::new();
-                for pin in &input.pins {
-                    if record.named.contains(&pin.npub) || pin.verified_at >= record.signed_at {
-                        servers.push(pin.clone());
-                    } else {
-                        changes.push(PinChange::Forget(pin.npub));
-                    }
-                }
-                for b in proven_servers(&input, &record) {
-                    if !servers.iter().any(|s| s.npub == b.npub) {
-                        changes.push(PinChange::Put(b.clone()));
-                        servers.push(b);
-                    }
-                }
-                return Outcome {
-                    decision: Decision::Bound(servers),
-                    changes,
-                };
-            }
             if let Some(record) = newest {
                 let servers = proven_servers(&input, &record);
                 return Outcome {
@@ -353,7 +326,7 @@ fn newest_proof(input: &Input<'_>) -> Result<Option<ProvenRecord>, ()> {
 
 /// Every key `record` names that has a claim, as a DNSSEC binding, newest
 /// claim first. `verified_at` is when the record was signed: the age of the
-/// evidence, so a newer proven record can supersede it later.
+/// evidence it rests on.
 fn proven_servers(input: &Input<'_>, record: &ProvenRecord) -> Vec<Binding> {
     let mut named: Vec<&Claim> = input
         .claims
@@ -800,36 +773,35 @@ mod tests {
             proofs: &Yes,
         });
         assert_eq!(npubs(&o), vec![npub(2)]);
-        // Already pinned to the retired key from its older proof (evidence
-        // signed at 50): the newer record retires it and brings in 2.
-        let mut retired_pin = pin(5, Method::Dnssec);
-        retired_pin.verified_at = 50;
-        let mut current = claim(2, 5);
-        current.dnssec = Some("AAAA".into());
+    }
+
+    #[test]
+    fn offline_pins_are_not_revised_by_proofs() {
+        // The resolver fetches no claims for a pinned domain offline; even
+        // given some, the pins answer unchanged — retiring a pinned key
+        // takes an online lookup.
+        struct Named2;
+        impl ProofVerifier for Named2 {
+            fn verify(&self, _: &Claim, _: u64) -> Option<ProvenRecord> {
+                Some(ProvenRecord {
+                    signed_at: NOW,
+                    named: vec![npub(2)],
+                })
+            }
+        }
+        let mut c = claim(2, 5);
+        c.dnssec = Some("AAAA".into());
         let o = decide(Input {
             domain: "example.org",
-            pins: vec![retired_pin.clone()],
+            pins: vec![pin(1, Method::Dns)],
             txt: TxtLookup::Unreachable,
-            claims: &[claim(5, 20), current.clone()],
+            claims: &[c],
             now: NOW,
             allow_unverified_offline: false,
-            proofs: &Yes,
+            proofs: &Named2,
         });
-        assert_eq!(npubs(&o), vec![npub(2)]);
-        assert!(o.changes.contains(&PinChange::Forget(npub(5))));
-        assert_eq!(bound(&o)[0].verified_at, 100, "the evidence's age");
-        // A pin verified online after that record was signed stays.
-        retired_pin.verified_at = 150;
-        let o = decide(Input {
-            domain: "example.org",
-            pins: vec![retired_pin],
-            txt: TxtLookup::Unreachable,
-            claims: &[claim(5, 20), current],
-            now: NOW,
-            allow_unverified_offline: false,
-            proofs: &Yes,
-        });
-        assert_eq!(npubs(&o), vec![npub(5), npub(2)]);
+        assert_eq!(npubs(&o), vec![npub(1)]);
+        assert!(o.changes.is_empty());
     }
 
     #[test]

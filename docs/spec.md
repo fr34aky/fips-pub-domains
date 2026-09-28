@@ -277,11 +277,11 @@ the record — a retired key's claim can carry a chain signed before the
 change and still valid — so the newest proven record (by its signature's
 inception) decides, as the live record would online: every key it names
 that has a claim is a server, newest claim first. Such a binding's
-`verified_at` is the record's signing time — the age of the evidence — so
-that offline, too, a newer proven record retires a pin resting on older
-evidence that it no longer names. Two different records signed at the same
-time are a conflict: the domain is refused rather than decided by relay
-order. A domain whose claims carry no valid proof and that was **never
+`verified_at` is the record's signing time, the age of the evidence. Two
+different records signed at the same time are a conflict: the domain is
+refused rather than decided by relay order. Proofs only matter for a
+domain that is not pinned: offline, pins answer without any relay, so
+retiring a pinned key takes an online lookup, as it did before proofs. A domain whose claims carry no valid proof and that was **never
 seen online is refused offline** unless the user enabled
 `allow_unverified_offline`, which resolves it with a visible "unverified"
 marker (§5.1 step 5, never silent).

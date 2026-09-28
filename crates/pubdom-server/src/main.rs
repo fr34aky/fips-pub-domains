@@ -414,7 +414,7 @@ mod tests {
                 ttl: 300
             }
         );
-        std::fs::write(&dir.join("bad.yaml"), "domain: ch\nnames: {}\n").unwrap();
+        std::fs::write(dir.join("bad.yaml"), "domain: ch\nnames: {}\n").unwrap();
         assert!(load_zone(&dir.join("bad.yaml"), me).is_err());
         let _ = std::fs::remove_dir_all(dir);
     }

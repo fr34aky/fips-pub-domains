@@ -281,10 +281,10 @@ mod tests {
             }
         }
         // A documentation-prefix address nobody answers for.
-        assert_eq!(
-            mesh.echo("2001:db8::1".parse().unwrap(), Duration::from_millis(300))
-                .unwrap_or(false),
-            false
+        assert!(
+            !mesh
+                .echo("2001:db8::1".parse().unwrap(), Duration::from_millis(300))
+                .unwrap_or(false)
         );
     }
 }

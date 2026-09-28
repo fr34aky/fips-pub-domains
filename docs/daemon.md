@@ -44,7 +44,7 @@ Other backends (dnsmasq, plain `resolv.conf`, launchd, Windows) are on the
 listen: ["[::1]:5356", "127.0.0.1:5356"]
 upstreams: []                                    # explicit legacy resolvers; empty → follow upstreams_from
 upstreams_from: /run/systemd/resolve/resolv.conf # written by setup; re-read every 30 s, minus ourselves
-dnssec: true                                     # validate TXT answers (unsigned zones still work, as method dns)
+dnssec: true                                     # validate TXT answers and accept DNSSEC proofs in claims (unsigned zones still work, as method dns)
 public_relays: ["wss://relay.damus.io", "wss://nos.lol", "wss://relay.primal.net", "wss://relay.nostr.band"]
 mesh_relays: ["ws://npub1….fips:80"]             # relays on fips nodes, by .fips name (see below)
 responder: "[::1]:5354"                          # fips's .fips responder

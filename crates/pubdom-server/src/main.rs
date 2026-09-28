@@ -27,10 +27,11 @@ use pubdom_core::claim::{Target, ZoneRecord};
 use pubdom_core::domain::{normalize, relative_label};
 use pubdom_core::txt::TxtRecord;
 use pubdom_core::{DEFAULT_SERVER_PORT, Npub, synth};
+use pubdom_resolve::proof;
 use pubdom_resolve::relay::{claim_event_json, publish_claim, publish_zone, zone_event_json};
 use serde::Deserialize;
 use std::collections::BTreeMap;
-use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
@@ -65,6 +66,8 @@ enum Cmd {
         publish: bool,
         #[arg(long)]
         relay: Vec<String>,
+        #[command(flatten)]
+        proof: ProofArgs,
     },
     /// Sign and publish the claim(s) to relays.
     Publish {
@@ -75,12 +78,48 @@ enum Cmd {
         /// Print the signed event instead of sending it.
         #[arg(long)]
         dry_run: bool,
+        #[command(flatten)]
+        proof: ProofArgs,
     },
     /// Print the legacy DNS TXT record the operator must add (spec §4).
     Txt {
         #[arg(long, required = true)]
         zone: Vec<PathBuf>,
     },
+}
+
+/// The DNSSEC proof carried in the claim (spec §3.1 `dnssec` tag).
+#[derive(clap::Args, Clone)]
+struct ProofArgs {
+    /// Do not attach a DNSSEC proof to the claim.
+    #[arg(long)]
+    no_dnssec_proof: bool,
+    /// Resolver to collect the proof from (repeatable); default: the
+    /// system's, then 9.9.9.9 and 1.1.1.1.
+    #[arg(long = "dns")]
+    dns: Vec<IpAddr>,
+}
+
+impl ProofArgs {
+    /// The chain for `domain`, or `None` (disabled, or the zone is not
+    /// signed — the claim is then published without one).
+    async fn chain(&self, domain: &str) -> Option<String> {
+        if self.no_dnssec_proof {
+            return None;
+        }
+        let upstreams = if self.dns.is_empty() {
+            proof::default_upstreams()
+        } else {
+            self.dns.clone()
+        };
+        match proof::build_chain_any(domain, &upstreams, Duration::from_secs(3)).await {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::warn!(%domain, error = %e, "no DNSSEC proof for the claim; clients that never saw the domain online cannot verify it offline");
+                None
+            }
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -283,19 +322,47 @@ async fn serve(zones: Arc<Zones>, bind: SocketAddrV6, ttl: u32) -> Result<()> {
 /// The claim and the zone record for every zone (spec §3.1, §3.3): the
 /// claim says who serves the domain, the zone record which names — so a
 /// client can still resolve them while this server is unreachable.
-async fn publish_all(keys: &Keys, zones: &[Zone], relays: &[String]) {
+///
+/// Returns when to publish again at the latest: a proof is only as good as
+/// its signatures, so halfway through the remaining validity of the
+/// shortest-lived one, at least an hour and at most 24 h from now.
+async fn publish_all(
+    keys: &Keys,
+    zones: &[Zone],
+    relays: &[String],
+    proof_args: &ProofArgs,
+) -> Duration {
+    let day = Duration::from_secs(24 * 3600);
+    let mut next = day;
     for z in zones {
+        let chain = proof_args.chain(&z.record.domain).await;
+        let expires = chain.as_deref().and_then(|c| {
+            proof::verify_chain(
+                c,
+                &z.record.domain,
+                pubdom_resolve::now(),
+                &Default::default(),
+            )
+            .ok()
+            .map(|p| p.expires)
+        });
+        if let Some(exp) = expires {
+            let left = exp.saturating_sub(pubdom_resolve::now());
+            next = next.min(Duration::from_secs(left / 2).max(Duration::from_secs(3600)));
+        }
         match publish_claim(
             keys.clone(),
             relays,
             &z.record.domain,
             z.port,
-            None,
+            chain.as_deref(),
             Duration::from_secs(10),
         )
         .await
         {
-            Ok(ok) => tracing::info!(domain = %z.record.domain, relays = ?ok, "claim published"),
+            Ok(ok) => {
+                tracing::info!(domain = %z.record.domain, relays = ?ok, dnssec_proof_until = ?expires, "claim published")
+            }
             Err(e) => tracing::error!(domain = %z.record.domain, error = %e, "claim not published"),
         }
         match publish_zone(
@@ -315,6 +382,7 @@ async fn publish_all(keys: &Keys, zones: &[Zone], relays: &[String]) {
             }
         }
     }
+    next
 }
 
 /// A snapshot of the zones as last loaded — what `publish_all` sends.
@@ -360,6 +428,7 @@ async fn main() -> Result<()> {
             zone,
             relay,
             dry_run,
+            proof,
         } => {
             let zones: Vec<Zone> = zone
                 .iter()
@@ -369,8 +438,13 @@ async fn main() -> Result<()> {
                 for z in &zones {
                     println!(
                         "{}",
-                        claim_event_json(&keys, &z.record.domain, z.port, None)
-                            .map_err(|e| anyhow!(e))?
+                        claim_event_json(
+                            &keys,
+                            &z.record.domain,
+                            z.port,
+                            proof.chain(&z.record.domain).await.as_deref()
+                        )
+                        .map_err(|e| anyhow!(e))?
                     );
                     println!(
                         "{}",
@@ -379,7 +453,7 @@ async fn main() -> Result<()> {
                     );
                 }
             } else {
-                publish_all(&keys, &zones, &relay).await;
+                publish_all(&keys, &zones, &relay, &proof).await;
             }
         }
         Cmd::Serve {
@@ -388,6 +462,7 @@ async fn main() -> Result<()> {
             ttl,
             publish,
             relay,
+            proof,
         } => {
             let zones: Vec<Zone> = zone
                 .iter()
@@ -420,11 +495,11 @@ async fn main() -> Result<()> {
                 }
                 let (k, zs, rl) = (keys.clone(), zones.clone(), relay.clone());
                 tokio::spawn(async move {
-                    // At start, every 24 h, and whenever a zone file changed:
-                    // the zone record must say what the server would answer.
+                    // At start, whenever a zone file changed (the zone record
+                    // must say what the server would answer), and before the
+                    // DNSSEC proof runs out — every 24 h at the latest.
                     let mut last: Vec<Zone> = Vec::new();
-                    let mut last_publish =
-                        std::time::Instant::now() - Duration::from_secs(24 * 3600);
+                    let mut due = std::time::Instant::now();
                     loop {
                         zs.check_reload();
                         let now = snapshot(&zs);
@@ -434,10 +509,11 @@ async fn main() -> Result<()> {
                             .ne(last
                                 .iter()
                                 .map(|z| (&z.record.domain, &z.record.names, z.port)));
-                        if changed || last_publish.elapsed() >= Duration::from_secs(24 * 3600) {
-                            publish_all(&k, &now, &rl).await;
+                        if changed || std::time::Instant::now() >= due {
+                            let next = publish_all(&k, &now, &rl, &proof).await;
+                            tracing::debug!(in_secs = next.as_secs(), "next publication");
                             last = now;
-                            last_publish = std::time::Instant::now();
+                            due = std::time::Instant::now() + next;
                         }
                         tokio::time::sleep(Duration::from_secs(30)).await;
                     }

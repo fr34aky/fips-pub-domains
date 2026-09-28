@@ -12,7 +12,9 @@ use crate::relay::{RelayClient, RelayScope};
 use crate::txt::TxtVerifier;
 use pubdom_core::cache::{self, TtlCache};
 use pubdom_core::claim::{Event, ZoneRecord};
-use pubdom_core::policy::{self, Decision, Input, NoProofs, PinChange, Reason, TxtLookup};
+use pubdom_core::policy::{
+    self, Decision, Input, NoProofs, PinChange, ProofVerifier, Reason, TxtLookup,
+};
 use pubdom_core::synth::{self, Query, Step3Outcome};
 use pubdom_core::{ANSWER_TTL_SECS, Binding, Npub, PinStore, domain};
 use std::collections::HashMap;
@@ -155,6 +157,8 @@ pub struct Resolver<T: TxtSource, C: ClaimSource> {
     txt: T,
     claims: C,
     mesh: Arc<dyn MeshDns>,
+    /// DNSSEC proofs in claims (spec §5.5); `NoProofs` with `dnssec: false`.
+    proofs: Box<dyn ProofVerifier + Send + Sync>,
     online: AtomicBool,
     decisions: TtlCache<String, CachedDecision>,
     step3: TtlCache<String, CachedStep3>,
@@ -191,12 +195,18 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         claims: C,
         mesh: Arc<dyn MeshDns>,
     ) -> Self {
+        let proofs: Box<dyn ProofVerifier + Send + Sync> = if cfg.dnssec {
+            Box::new(crate::proof::DnssecProofs::default())
+        } else {
+            Box::new(NoProofs)
+        };
         Self {
             cfg,
             pins,
             txt,
             claims,
             mesh,
+            proofs,
             online: AtomicBool::new(true),
             decisions: TtlCache::new(4096),
             step3: TtlCache::new(4096),
@@ -375,7 +385,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             claims: &claims,
             now,
             allow_unverified_offline: self.cfg.allow_unverified_offline,
-            proofs: &NoProofs,
+            proofs: self.proofs.as_ref(),
         });
         for change in &outcome.changes {
             match change {

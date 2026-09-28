@@ -79,6 +79,21 @@ Published by the server that serves a domain.
   agreed to serve the domain; it does **not** prove domain ownership.
 - Clients query `{"kinds":[37197], "#d":["example.org"]}` and may receive
   claims from several authors (§5.3).
+- `dnssec` (optional): the proof that the TXT record of §4 names the
+  author, verifiable with nothing but the DNS root key. Resource records in
+  uncompressed wire format, concatenated in any order, base64 (as in RFC
+  9102 §3): the `_fips-dns.<domain>` TXT RRset and, for the zone signing it
+  and every zone above up to the root, that zone's DNSKEY RRset and
+  (except the root) its DS RRset — each with its RRSIGs. At most 16 KB of
+  base64; a signed domain's chain is typically 3–6 KB. A verifier checks it
+  as RFC 4035 prescribes, offline: the root DNSKEY RRset signed by a key in
+  the built-in trust anchors, each child's DNSKEY RRset signed by a key its
+  validated DS covers, every RRSIG current and made by the zone owning the
+  name (DS by the parent, DNSKEY by the zone itself); wildcard expansions
+  are not accepted. The proof is only as good as its shortest-lived
+  signature — typically one to four weeks — so the server re-publishes the
+  claim with a fresh chain halfway through the remaining validity, and
+  every 24 h at the latest.
 
 ### 3.2 Attestation — kind 37198 (addressable)
 
@@ -253,12 +268,20 @@ so it replaces it. Relays consulted offline are whatever is reachable:
   some other path (e.g. the mesh has a gateway).
 
 Verification offline follows §5.1 without step 2's DNS: pinned > DNSSEC
-proof in the claim > attestations > unverified. In phase 1 only pins exist,
-so a domain **never seen online is refused offline** unless the user
-enabled `allow_unverified_offline`, which resolves it with a visible
-"unverified" marker (§5.1 step 5, never silent). Because this is the path
-the mesh-only use case depends on, DNSSEC proofs in claims (the only
-trustless offline verification) move ahead of attestations in §9.
+proof in the claim > attestations > unverified. A claim whose `dnssec`
+proof validates at the current time is a verified binding (method
+`dnssec`) and is pinned like one; every such claim is a server, newest
+first. A domain whose claims carry no valid proof and that was **never
+seen online is refused offline** unless the user enabled
+`allow_unverified_offline`, which resolves it with a visible "unverified"
+marker (§5.1 step 5, never silent).
+
+Limits of proofs: a node off every relay for longer than a signature's
+lifetime cannot verify a *new* domain offline (pinned ones keep working);
+a zone that is not DNSSEC-signed has no proof to offer; and the trust
+anchors are built in (the 2017 and 2024 root KSKs) — a root key rollover
+beyond those needs updated software, RFC 5011 automatic updates are not
+implemented. `dnssec: false` in the client config ignores proofs.
 
 Privacy differs offline: the relays asked do see the domain. Mesh relays
 are run by nodes the user chose, and no public relay is reachable anyway,

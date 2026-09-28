@@ -11,10 +11,15 @@ client node, a strfry relay reachable only over the mesh).
 cargo test --workspace
 ```
 
-50 tests, no network: the policy tables (precedence, conflicts, pin
+No network: the policy tables (precedence, conflicts, pin
 changes, offline, anti-rollback), domain and PSL rules, TXT and claim
 parsing, DNS synthesis, the TXT combiner, the resolver over fake sources
-and a fake mesh, the zone file, the pin file. fips2go's host suite adds the
+and a fake mesh, the zone file, the pin file, and DNSSEC proofs over a
+synthetic signed hierarchy (root → org → example.org with a split KSK/ZSK,
+a test trust anchor): valid, expired, not yet valid, unanchored root,
+missing DS, forged TXT, a DS signed by the child, garbage.
+`PUBDOM_LIVE_DOMAIN=example.org cargo test -p pubdom-resolve live --
+--ignored` builds and verifies the chain of a real signed domain. fips2go's host suite adds the
 smoltcp UDP exchange against a userspace server and the proxy with a fake
 resolver.
 
@@ -111,6 +116,26 @@ the public address again, `-- link: eth0`. Nothing left behind.
 (Blocking port 53 *including* loopback also blocks resolved's stub at
 `127.0.0.53`; `resolvectl query` still works because it uses D-Bus, but
 `curl` and `getent` do not. Exclude `lo`.)
+
+## Level 4d — a domain never seen, offline, from the DNSSEC proof
+
+The serving node publishes its claim with a proof (`serve --publish`; the
+log shows `claim published … dnssec_proof_until=Some(…)`, 3.8 KB of chain
+for a DNSSEC-signed `.ch`-style domain with ECDSA keys under an RSA root).
+On a client with an **empty pin file**, no public relay and no legacy DNS —
+only the mesh relay:
+
+```
+$ fips-pubdom --config ./config-proof.yaml --offline verify example.org
+pins: none
+txt: Unreachable (ttl None)
+claim events: 1
+  claim by npub1… port 5355 created_at …: DNSSEC proof valid until 1791417600
+decision: Bound([Binding { domain: "example.org", npub: npub1…, port: 5355, method: Dnssec, … }])
+```
+
+Before proofs, the same situation was `NotOverFips(Unverified)`. The strfry
+relay accepted the 5 KB event without configuration changes.
 
 ## Level 3b — a third node, from the install guide
 

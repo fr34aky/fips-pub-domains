@@ -12,37 +12,31 @@
 - Live tests through level 5 ([testing.md](testing.md)).
 - Zone records (kind 37199): published by the server with the claim, used
   by the resolver when the server does not answer.
+- Redundant servers: every server the TXT record names is pinned; failover
+  with a growing backoff.
+- DNSSEC proofs in claims: the server attaches the signed TXT record and
+  its chain to the root, re-published before the signatures expire; an
+  offline client with no pin verifies a domain from the proof alone
+  (verified live, [testing.md](testing.md) level 4d). Signature lifetime,
+  unsigned zones and the built-in root anchors are the limits (spec §5.5).
 
 ## Next
 
 1. **fips2go PR review and merge** (#55). Every path is device-verified;
    what the phone lacks is discovery through relays inside the mesh (item
-   6).
+   5).
 2. **Registration and the NIP** — submitted 2026-09-28:
    [registry-of-kinds #16](https://github.com/nostr-protocol/registry-of-kinds/pull/16)
    and [nips #2487](https://github.com/nostr-protocol/nips/pull/2487)
    (NIP-DB). Until merged, the kind numbers are provisional; if others are
    assigned, `pubdom-core::KIND_*` and the docs follow.
-3. **DNSSEC proofs in claims** (spec §3.1 `dnssec` tag, §5.5): the RFC 9102
-   chain for the TXT RRset, verified locally against the root trust anchor
-   — the only trustless verification of a domain never seen online. Moved
-   ahead of attestations because the mesh-only case depends on it. Design
-   points settled in advance: the chain is only valid for its RRSIGs'
-   lifetime (typically 2–4 weeks) and goes stale at every key rollover, so
-   the server must re-publish the claim with a fresh chain well inside that
-   window (the 24 h re-publish loop is the place); verifiers must refuse
-   expired signatures, which means a node off the relays longer than one
-   signature lifetime can no longer verify a *new* domain offline (pinned
-   ones keep working); and the root trust anchor rollover (KSK-2024) needs
-   current software — RFC 5011 automatic updates are not implemented, and
-   `dnssec: false` is the emergency switch back to multi-resolver DNS.
-4. **Attestations** (kind 37198) and the trust setting *k*; default
+3. **Attestations** (kind 37198) and the trust setting *k*; default
    witnesses = the user's synced trusted nodes, opt-in.
-5. **Daemon backends**: dnsmasq / NetworkManager, plain `resolv.conf`,
+4. **Daemon backends**: dnsmasq / NetworkManager, plain `resolv.conf`,
    then macOS (launchd + `networksetup`) and Windows (service + adapter
    DNS); restricted per-domain mode on all three; OpenWrt and pfSense
    packaging. Network-change watchers instead of the 30 s poll.
-6. **Phone gaps**: TCP fallback for step 3 over the smoltcp stack; a way to
+5. **Phone gaps**: TCP fallback for step 3 over the smoltcp stack; a way to
    reach mesh relays from the app (a websocket client over smoltcp, or a
    local proxy in the shim) so offline discovery works there too; an
    explicit online flag from the VpnService.

@@ -221,8 +221,12 @@ claim for a public suffix (`ch`, `co.uk`) — use a bundled Public Suffix List.
   fresh record). A tie is *disputed*: pins keep resolving, an unpinned
   domain stays legacy for a minute and is asked again. Disputed is not the
   offline path: no relay is asked and nothing unverified is used. A record
-  that fails validation counts as no answer. List order never chooses
-  between an honest and a poisoned resolver.
+  that fails validation counts as no answer; if nothing but such records
+  came back, the lookup is disputed. List order never chooses between an
+  honest and a poisoned resolver. The trade-off is deliberate: a replayed
+  signed denial can at worst unpin a domain until the next validated
+  lookup pins it again; letting unvalidated records outvote it could keep
+  a retired key in use.
 
 ### 5.5 No public Internet: the claim *is* the TXT record
 

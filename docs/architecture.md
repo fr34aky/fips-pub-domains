@@ -40,7 +40,7 @@ application (spec §7: a name is never made unreachable by this code).
 
 | module | what |
 |---|---|
-| `txt` | `TxtVerifier`: one hickory resolver **per upstream**, asked in parallel, so agreement can be counted: DNSSEC-validated (`Proof::Secure`) → `Dnssec`; two agreeing → `Dns`; one → `DnsSingle`; all failed → `Unreachable` (the offline path). When they disagree, validated records outrank unvalidated ones (and only validated answers are counted), otherwise the majority counts; a tie, or a validated denial against unvalidated records, is `Disputed` (pins resolve, nothing else; re-asked after 60 s) |
+| `txt` | `TxtVerifier`: one hickory resolver **per upstream**, asked in parallel, so agreement can be counted: DNSSEC-validated (`Proof::Secure`) → `Dnssec`; two agreeing → `Dns`; one → `DnsSingle`; all failed → `Unreachable` (the offline path). When they disagree and anything validated, only validated answers count (a validated denial included), otherwise records outrank denials; the majority wins, a tie is `Disputed` (pins resolve, nothing else; re-asked after 60 s); bogus answers count as failed |
 | `relay` | `RelayClient`: nostr-sdk with two relay sets, public and mesh; online both are asked at once (after a TXT hit), offline the mesh set first; `publish_claim` for the server |
 | `mesh` | the `MeshDns` trait — step 3 over UDP, TCP on truncation, identity registration through fips's responder — and `KernelMeshDns` for hosts with a TUN |
 | `pins` | `FilePinStore`: the JSON pin file, written atomically |

@@ -213,15 +213,16 @@ claim for a public suffix (`ch`, `co.uk`) — use a bundled Public Suffix List.
   server, and it applies whether or not the claim of the server the record
   names instead reached us — else a retired key would stay pinned and
   answer the next offline lookup.
-- **Resolvers that disagree** on the record: validated records win over
-  any number of unvalidated ones, and only validated answers are counted
-  then; without any, the answer most resolvers gave counts. A tie is
-  *disputed*, and so is a validated denial against unvalidated records (a
-  replayed signed denial must not unpin, a stripped path must not bind).
-  Disputed: pins keep resolving, an unpinned domain stays legacy for a
-  minute and is asked again. It is not the offline path: no relay is asked
-  and nothing unverified is used. List order must never choose between an
-  honest and a poisoned resolver.
+- **Resolvers that disagree** on the record: once any answer validated,
+  only validated answers count — an unvalidated one contradicting a signed
+  zone is forged or stale — and a validated denial is one more answer; the
+  majority wins. Without validated answers the majority of the records
+  wins, and records outrank denials (a stale negative cache must not hide a
+  fresh record). A tie is *disputed*: pins keep resolving, an unpinned
+  domain stays legacy for a minute and is asked again. Disputed is not the
+  offline path: no relay is asked and nothing unverified is used. A record
+  that fails validation counts as no answer. List order never chooses
+  between an honest and a poisoned resolver.
 
 ### 5.5 No public Internet: the claim *is* the TXT record
 

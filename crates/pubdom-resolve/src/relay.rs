@@ -129,7 +129,10 @@ pub async fn publish_claim(
     for u in relays {
         client.add_relay(u).await.map_err(|e| format!("{u}: {e}"))?;
     }
+    // Wait for the connections: `connect()` returns at once and a send
+    // before the handshake is "relay not connected".
     client.connect().await;
+    client.wait_for_connection(timeout).await;
     let tags: Vec<Tag> = Claim::tags(domain, port, dnssec)
         .into_iter()
         .map(|t| Tag::parse(t).map_err(|e| e.to_string()))

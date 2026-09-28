@@ -70,7 +70,14 @@ pub struct ResolverConfig {
 impl Default for ResolverConfig {
     fn default() -> Self {
         Self {
-            public_relays: vec!["wss://relay.damus.io".into(), "wss://nos.lol".into()],
+            // More than two: one relay banning an address or being down must
+            // not hide every claim, and a publisher rarely reaches all of them.
+            public_relays: vec![
+                "wss://relay.damus.io".into(),
+                "wss://nos.lol".into(),
+                "wss://relay.primal.net".into(),
+                "wss://relay.nostr.band".into(),
+            ],
             mesh_relays: Vec::new(),
             upstreams: Vec::new(),
             dnssec: true,

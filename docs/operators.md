@@ -137,6 +137,40 @@ server — `www: self` on node A resolves to node A when A answers and to
 node B when only B does — so either keep such names identical in meaning
 (the same site on both nodes) or name the node explicitly.
 
+## Removing a server
+
+To take node A out of service while node B keeps the domain:
+
+1. Delete A's line from the `_fips-dns` TXT record. Clients that are
+   online drop A at their next lookup: a record that no longer names a
+   pinned server, validated as strongly as the pin, unpins it.
+2. **Run A's `publish` once more** before stopping it for good, with the
+   same zone and relays:
+
+   ```sh
+   fips-pubdom-server --key /etc/fips/fips.key publish \
+       --zone /etc/fips-pubdom/zones/example.org.yaml \
+       --relay wss://relay.example --relay ws://npub1….fips:80
+   ```
+
+   The record no longer names A, so A's claim goes out without a DNSSEC
+   proof (`dnssec_proof_until=None`, with a warning saying why) and
+   replaces its earlier claim on the relays.
+3. Stop A's server (`systemctl disable --now fips-pubdom-server`).
+
+Step 2 matters for clients that are offline and have never seen the
+domain: they go by the newest DNSSEC proof, ordered by the TXT record's
+signature date. Some DNS hosters re-sign a changed record with the *same*
+signature date as before (a fixed signing schedule). Then A's old proof,
+naming A, and B's new one, not naming it, cannot be told apart, and those
+clients refuse the domain until A's old signatures expire — up to their
+full lifetime, often weeks. Pinned clients are not affected; they keep
+using the servers they know until they are online again.
+
+To check, from any node with an empty pin file and only a relay on the
+mesh configured: `fips-pubdom --offline verify example.org` should list A's
+claim with `no DNSSEC proof` and bind B alone.
+
 ## Checking from another node
 
 From any linked fips node, with the server's fips address:

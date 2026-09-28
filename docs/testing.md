@@ -137,21 +137,6 @@ decision: Bound([Binding { domain: "example.org", npub: npub1…, port: 5355, me
 Before proofs, the same situation was `NotOverFips(Unverified)`. The strfry
 relay accepted the 5 KB event without configuration changes.
 
-## Level 5b — the phone, offline, a domain never seen
-
-fips2go with a mesh relay configured (`ws://npub1….fips:80`), its pin file
-emptied, the phone's Internet blocked at the router, and the phone linked
-over LAN to a node that reaches the relay. Opening `www.example.org`: the
-first lookup overran the 3.5 s budget (TXT timeout, then the relay) and the
-browser got the legacy answer, but the lookup finished in the background —
-`binding verified and pinned … method=Dnssec` from the claim's proof — and
-the retry was answered over fips (A and AAAA). Only the server whose claim
-carried a proof was pinned. Found on the way: a lookup cancelled at the
-budget never cached anything, so the domain never resolved offline; the
-shim now lets it finish. The phone needs a mesh path to the relay: on a
-different LAN than the node that reaches it, discovery failed until both
-joined the same one.
-
 ## Level 3b — a third node, from the install guide
 
 A fresh Arch/Omarchy desktop following [install.md](install.md) verbatim:
@@ -232,7 +217,7 @@ it now says which.
 
 ## Level 5 — the phone
 
-Run on a Pixel 9 Pro with fips2go's `names` branch (a debug build from
+Run on a Pixel 9 Pro with fips2go (then its `names` branch; a debug build from
 CI, re-signed with one local key so later builds install in place), the
 browser captured as a mesh app, and the demo domain pinned:
 
@@ -283,3 +268,18 @@ relays were too few once one banned the publisher's address and the other
 was unreachable — four now. A CI debug APK is signed with a throwaway key
 per run, so device installs are re-signed with one local key to update in
 place.
+
+## Level 5b — the phone, offline, a domain never seen
+
+fips2go with a mesh relay configured (`ws://npub1….fips:80`), its pin file
+emptied, the phone's Internet blocked at the router, and the phone linked
+over LAN to a node that reaches the relay. Opening `www.example.org`: the
+first lookup overran the 3.5 s budget (TXT timeout, then the relay) and the
+browser got the legacy answer, but the lookup finished in the background —
+`binding verified and pinned … method=Dnssec` from the claim's proof — and
+the retry was answered over fips (A and AAAA). Only the server whose claim
+carried a proof was pinned. Found on the way: a lookup cancelled at the
+budget never cached anything, so the domain never resolved offline; the
+shim now lets it finish. The phone needs a mesh path to the relay: on a
+different LAN than the node that reaches it, discovery failed until both
+joined the same one.

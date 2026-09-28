@@ -8,8 +8,9 @@
 - `fips-pubdom-server`, `fips-pubdomd` (Linux, systemd-resolved),
   `fips-pubdom`; mesh relays for offline discovery.
 - fips2go: resolver in the VPN's DNS proxy, UDP over smoltcp, Settings
-  switch (#55, #58); mesh relays reached through a loopback proxy over the
-  in-process TCP stack, configured in Settings (#59). Device-verified:
+  switch (#55; pins bumped in #56–#58); mesh relays reached through a
+  loopback proxy over the in-process TCP stack, configured in Settings
+  (#59). Device-verified:
   pinned, first-visit discovery, offline, and — offline with no pins — a
   domain verified from its claim's DNSSEC proof via a relay on the mesh.
 - Live tests through level 5 ([testing.md](testing.md)).
@@ -37,11 +38,10 @@
    DNS); restricted per-domain mode on all three; OpenWrt and pfSense
    packaging. Network-change watchers instead of the 30 s poll.
 4. **Phone gaps**: TCP fallback for step 3 over the smoltcp stack; an
-   explicit online flag from the VpnService; a `dnssec` switch in the app;
-   upstream ports kept for the TXT verifier. Offline, a first lookup that
-   has to wait for the TXT timeout and a mesh relay overruns the 3.5 s
-   budget and falls back once; it finishes in the background, so the
-   retry resolves.
+   explicit online flag from the VpnService (would skip the TXT wait
+   offline, so a first lookup through a mesh relay fits the 3.5 s budget
+   instead of resolving only on the retry); a `dnssec` switch in the app;
+   upstream ports kept for the TXT verifier.
 
 ## Known gaps and interactions
 

@@ -112,7 +112,8 @@ one systemd-resolved interaction you will want to know about.
 ### Resolve on Android
 
 Built into fips2go: Settings → *Public domain names over fips* (on by
-default). [docs/android.md](docs/android.md).
+default); relays on fips nodes go in *Mesh relays for public names*, for
+offline discovery. [docs/android.md](docs/android.md).
 
 ## Documentation
 

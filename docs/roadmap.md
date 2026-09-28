@@ -8,13 +8,14 @@
 - `fips-pubdom-server`, `fips-pubdomd` (Linux, systemd-resolved),
   `fips-pubdom`; mesh relays for offline discovery on desktops.
 - fips2go: resolver in the VPN's DNS proxy, UDP over smoltcp, Settings
-  switch (branch `names`, not yet device-verified).
-- Live tests through level 4 ([testing.md](testing.md)).
+  switch (PR open; device-verified for the pinned path).
+- Live tests through level 5 ([testing.md](testing.md)).
 
 ## Next
 
-1. **Phone on a device** (test level 5); fips2go PR once its CI can fetch
-   this repository.
+1. **fips2go PR review and merge** (#55). On the phone still untested:
+   first-visit discovery (claim on a reachable relay) and the pinned offline
+   case (needs a LAN mesh link to the serving node).
 2. **Registration and the NIP.** Kinds 37197–37199 into
    `nostr-protocol/registry-of-kinds`, then [nip.md](nip.md) to
    `nostr-protocol/nips` with the two implementations as reference. Not

@@ -114,8 +114,31 @@ the public address again, `-- link: eth0`. Nothing left behind.
 
 ## Level 5 — the phone
 
-Not yet run. Build fips2go's `names` branch for arm64, install, Settings →
-*Public domain names over fips*, open `http://www.example.org:8321/` in a
-captured browser; Diagnostics should show `public name answered over
-fips`. Then the FIPS Hotspot or airplane mode with a mesh link for the
-pinned offline case. This is where `meshudp.rs` meets a real network.
+Run on a Pixel 9 Pro with fips2go's `names` branch (a debug build from
+CI, re-signed with one local key so later builds install in place), the
+browser captured as a mesh app, and the demo domain pinned:
+
+```
+I fips_android::engine: public domain names over fips on pins="/data/user/0/org.fips.android/files/names-pins.json"
+I fips_android::dns: public name answered over fips qname=www.example.org qtype=1
+I fips_android::dns: public name answered over fips qname=www.example.org qtype=28
+```
+
+The browser then reached fips-ui on the serving node **over the mesh, by
+public name** — the page shell rendered before fips-ui's own Host-header
+guard refused `www.example.org:8321` (an application-level allow-list of
+its own; the request had already crossed the mesh). That exercises the
+phone-specific code end to end: the resolver in the proxy, step 3 through
+the smoltcp UDP socket (`meshudp.rs`), the responder registration, the
+synthesized AAAA with the public addresses suppressed.
+
+Found on this level and fixed: with the claim only on a relay inside the
+mesh (unreachable from the phone) the resolver refused despite the pin and
+a TXT record naming the pinned server — a policy gap, since a pin is a
+verified binding (spec §5.1 step 2). Reproduced on the desktop first, fixed
+in `pubdom-core` with a test, then re-tested on the device.
+
+Not yet run on the phone: first-visit discovery (needs the claim on a relay
+the phone can reach, i.e. a public one) and the offline case (needs a LAN
+mesh link to the serving node so the Internet can be cut without losing
+the mesh: LAN mDNS on both sides, same Wi-Fi).

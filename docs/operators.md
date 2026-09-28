@@ -102,7 +102,10 @@ that strips DNSSEC records does not work), checks it as a client would, and
 re-publishes before its signatures expire: halfway through their remaining
 validity, every 24 h at the latest. If collecting fails (a resolver timing
 out), the last chain is kept while it has more than an hour left and the
-server tries again in an hour. The log line `claim published … dnssec_proof_until=…`
+server tries again in an hour — after a restart too, taken from its own
+claim on the relays. A chain whose record does not name this server's key
+is refused with a warning (a key rotation, or a record set up for another
+node). Each zone is scheduled on its own. The log line `claim published … dnssec_proof_until=…`
 shows it; for an unsigned zone the claim goes out without a proof and a
 warning says so. `--no-dnssec-proof` turns it off.
 

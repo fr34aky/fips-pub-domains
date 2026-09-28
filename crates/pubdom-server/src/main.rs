@@ -105,6 +105,10 @@ struct ProofArgs {
 /// still valid with one that has none.
 struct Prover {
     args: ProofArgs,
+    /// This server's key: a chain whose record does not name it is useless.
+    author: Npub,
+    /// Where this server's own earlier claim can be found after a restart.
+    relays: Vec<String>,
     last: std::sync::Mutex<std::collections::HashMap<String, (String, u64)>>,
 }
 
@@ -116,11 +120,38 @@ struct Proof {
 }
 
 impl Prover {
-    fn new(args: ProofArgs) -> Self {
+    fn new(args: ProofArgs, author: Npub, relays: Vec<String>) -> Self {
         Self {
             args,
+            author,
+            relays,
             last: Default::default(),
         }
+    }
+
+    /// The chain of this server's own claim on the relays, if it is still
+    /// valid for an hour and names this server: after a restart during a
+    /// DNS outage, what keeps the relays' copy from being replaced by a
+    /// claim without a proof.
+    async fn published_chain(&self, domain: &str) -> Option<(String, u64)> {
+        let relays =
+            pubdom_resolve::RelayClient::new(&self.relays, &[], Duration::from_secs(3)).await;
+        let events = relays
+            .fetch_claims(domain, pubdom_resolve::relay::RelayScope::AfterHit)
+            .await;
+        relays.shutdown().await;
+        let now = pubdom_resolve::now();
+        let checker = proof::DnssecProofs::default();
+        events
+            .iter()
+            .filter_map(|e| pubdom_core::Claim::parse(e).ok())
+            .filter(|c| c.author == self.author && c.domain == domain)
+            .filter_map(|c| {
+                let p = checker.check(&c, now).ok()?;
+                let chain = c.dnssec.clone()?;
+                (p.expires > now + 3600).then_some((chain, p.expires))
+            })
+            .max_by_key(|(_, exp)| *exp)
     }
 
     async fn proof(&self, domain: &str) -> Proof {
@@ -139,7 +170,19 @@ impl Prover {
             self.args.dns.clone()
         };
         let now = pubdom_resolve::now();
-        match proof::build_chain_any(domain, &upstreams, Duration::from_secs(3)).await {
+        let built = proof::build_chain_any(domain, &upstreams, Duration::from_secs(3))
+            .await
+            .and_then(|(chain, proven)| {
+                if proven.records.iter().any(|r| r.npub == self.author) {
+                    Ok((chain, proven))
+                } else {
+                    Err(format!(
+                        "the _fips-dns record does not name this server's key {}",
+                        self.author
+                    ))
+                }
+            });
+        match built {
             Ok((chain, proven)) => {
                 self.last
                     .lock()
@@ -155,7 +198,20 @@ impl Prover {
                 }
             }
             Err(e) => {
-                let last = self.last.lock().unwrap().get(domain).cloned();
+                let cached = self.last.lock().unwrap().get(domain).cloned();
+                let last = match cached {
+                    Some(l) => Some(l),
+                    None => {
+                        let seeded = self.published_chain(domain).await;
+                        if let Some(l) = &seeded {
+                            self.last
+                                .lock()
+                                .unwrap()
+                                .insert(domain.to_string(), l.clone());
+                        }
+                        seeded
+                    }
+                };
                 match last {
                     // Still good for another hour: keep publishing it and
                     // try again in an hour.
@@ -480,7 +536,7 @@ async fn main() -> Result<()> {
                 .iter()
                 .map(|p| load_zone(p, author))
                 .collect::<Result<_>>()?;
-            let prover = Prover::new(proof);
+            let prover = Prover::new(proof, author, relay.clone());
             if dry_run {
                 for z in &zones {
                     println!(
@@ -541,27 +597,40 @@ async fn main() -> Result<()> {
                     bail!("--publish needs at least one --relay");
                 }
                 let (k, zs, rl) = (keys.clone(), zones.clone(), relay.clone());
-                let prover = Prover::new(proof);
+                let prover = Prover::new(proof, author, relay.clone());
                 tokio::spawn(async move {
-                    // At start, whenever a zone file changed (the zone record
-                    // must say what the server would answer), and before the
-                    // DNSSEC proof runs out — every 24 h at the latest.
-                    let mut last: Vec<Zone> = Vec::new();
-                    let mut due = std::time::Instant::now();
+                    // Per zone: at start, whenever its file changed (the zone
+                    // record must say what the server would answer), and
+                    // before its DNSSEC proof runs out — every 24 h at the
+                    // latest. One zone's hourly retry does not republish the
+                    // others.
+                    type Seen = (Vec<(String, Target)>, u16, std::time::Instant);
+                    let mut seen: std::collections::HashMap<String, Seen> = Default::default();
                     loop {
                         zs.check_reload();
-                        let now = snapshot(&zs);
-                        let changed = now
-                            .iter()
-                            .map(|z| (&z.record.domain, &z.record.names, z.port))
-                            .ne(last
-                                .iter()
-                                .map(|z| (&z.record.domain, &z.record.names, z.port)));
-                        if changed || std::time::Instant::now() >= due {
-                            let next = publish_all(&k, &now, &rl, &prover).await;
-                            tracing::debug!(in_secs = next.as_secs(), "next publication");
-                            last = now;
-                            due = std::time::Instant::now() + next;
+                        for z in snapshot(&zs) {
+                            let d = z.record.domain.clone();
+                            let due = match seen.get(&d) {
+                                Some((names, port, at)) => {
+                                    *names != z.record.names
+                                        || *port != z.port
+                                        || std::time::Instant::now() >= *at
+                                }
+                                None => true,
+                            };
+                            if due {
+                                let next =
+                                    publish_all(&k, std::slice::from_ref(&z), &rl, &prover).await;
+                                tracing::debug!(domain = %d, in_secs = next.as_secs(), "next publication");
+                                seen.insert(
+                                    d,
+                                    (
+                                        z.record.names.clone(),
+                                        z.port,
+                                        std::time::Instant::now() + next,
+                                    ),
+                                );
+                            }
                         }
                         tokio::time::sleep(Duration::from_secs(30)).await;
                     }

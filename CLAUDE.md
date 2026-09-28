@@ -34,8 +34,9 @@ the Android-specific parts that already live there (`shim/src/names.rs`,
   Never tag without the user asking.
 - Nothing gets published outside this repository without the user saying
   so. Done on the user's word (2026-09-28): the demo domain's claim on
-  public relays, registry-of-kinds #16, nips #2487 (NIP-DB), the v0.1.0
-  , v0.2.0 and v0.2.1 tags. Tagging a release still needs the user's explicit word each time.
+  public relays, registry-of-kinds #16, nips #2487 (NIP-DB), the v0.1.0,
+  v0.2.0 and v0.2.1 tags. Tagging a release still needs the user's
+  explicit word each time.
 - No `cfg(target_os)` in `pubdom-core` or `pubdom-resolve` (CI enforces).
 - `cargo test --workspace` must stay green; the policy tables in
   `pubdom-core` are the place to add a case before changing behaviour.

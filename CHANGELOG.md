@@ -17,13 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server that stayed down was retried every 5 minutes.
 - A name answered by its domain server itself no longer needs an ICMPv6
   echo for the record types that follow from the cache; where echo is
-  blocked, A went to the public address while AAAA went to the mesh.
+  blocked, A went to the public address while AAAA went to the mesh. The
+  answer counts as proof for two minutes; after that the server is asked
+  again instead of pinged.
 - Only address types (A, AAAA, ANY, CNAME) of a bound name go over fips,
   and HTTPS/SVCB get NODATA; MX, TXT, SRV and every other type stay legacy
   DNS. Under a wildcard zone they were answered empty, which broke mail
   and SPF lookups from machines running the daemon.
-- Upstream resolvers that disagree on the `_fips-dns` record: a
-  DNSSEC-validated answer now wins over any unvalidated majority, and a tie
+- Upstream resolvers that disagree on the `_fips-dns` record: validated
+  answers (a record, else a denial) now win over any unvalidated majority,
+  and a tie
   is no longer broken by list order but treated as disputed — pins keep
   resolving, an unpinned domain stays legacy and is asked again a minute
   later.
@@ -32,15 +35,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The reachability echo could panic on a scheduling delay; the daemon's
   and server's socket loops spun at full CPU on a persistent error.
 
+- `fips-pubdom-server` said "Invalid secret key" when the key file merely
+  could not be read (a `fips.key` with mode 600 and a user outside the
+  `fips` group); it now says so, and also accepts a 32-byte raw key file.
+
 ### Removed
 
 - `ResolverConfig.upstreams` (never read), and with it the argument of
   `Config::resolver_config`. fips2go sets the field and drops that line at
   its next pin bump.
-
-- `fips-pubdom-server` said "Invalid secret key" when the key file merely
-  could not be read (a `fips.key` with mode 600 and a user outside the
-  `fips` group); it now says so, and also accepts a 32-byte raw key file.
 
 ### Added
 

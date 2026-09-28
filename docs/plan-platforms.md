@@ -19,7 +19,7 @@ platform-specific and they are kept in four small places.
 | (d) Paths | `names-core::paths` (via the `directories` crate) | config, pins, cache, logs — §5. |
 
 Everything else — event parsing, verification, pinning, precedence, answer
-synthesis, caching, the step-3 client, the relay client, the SRV verifier —
+synthesis, caching, the step-3 client, the relay client, the TXT verifier —
 is portable Rust with no `cfg(target_os)`. Rule: **no `cfg(target_os)` in
 `names-core` or `names-resolve`**; CI enforces it with a grep.
 
@@ -42,41 +42,41 @@ service), runs the resolver
 from `names-resolve` for every query, and forwards anything without a binding
 to the upstream resolvers it learned from the OS (or from its config).
 
-Behaviour per query, in order: local hosts → pins/cache → (online) SRV hint →
+Behaviour per query, in order: local hosts → pins/cache → (online) TXT hint →
 relays → step 3 → synthesised answer; else passthrough (spec §5, §7). The
 budget rules from plan-phase1 §6 apply unchanged.
 
 It is in the DNS path for **all names** (the default mode, §2.1), because
-discovery works by asking public DNS for the `_fips-dns._udp.<domain>` SRV
+discovery works by asking public DNS for the `_fips-dns.<domain>` TXT
 record the first time a domain is seen — and a resolver can only ask about
 domains whose queries reach it. A restricted mode (§2.2) that routes only
 known domains exists for machines whose owner will not put a daemon in
 front of all DNS; it gives up discovery.
 
-### 2.1 Default mode — full path, SRV-first discovery
+### 2.1 Default mode — full path, TXT-first discovery
 
 The daemon becomes the machine's DNS server; the OS's previous resolvers
 become its upstreams. For every name it does, in order:
 
 1. local hosts, pins, caches (spec §5.1 steps 1–2);
 2. **online, domain not pinned and not in the negative cache:** ask the
-   upstream for `_fips-dns._udp.<domain> SRV` **before** anything else. This
+   upstream for `_fips-dns.<domain> TXT` **before** anything else. This
    costs one query per new domain per 6 h (negative cache, spec §5.6) and
    reveals nothing new: the same upstream is about to resolve `<domain>`
    itself. Only the fact that this machine runs fips-names is visible to it.
-3. SRV hit → fetch the claim from relays, verify author == SRV target, pin,
-   step 3, synthesise (spec §5–§7). SRV miss → passthrough, remember the
+3. TXT hit → fetch the claim from relays, verify the TXT names the author, pin,
+   step 3, synthesise (spec §5–§7). TXT miss → passthrough, remember the
    miss.
 4. **offline** (no upstream reachable): pinned domains resolve over the
    mesh; for an unpinned domain the claim is fetched from relays directly —
-   the claim replaces the SRV record (spec §5.5) — over whatever relays are
+   the claim replaces the TXT record (spec §5.5) — over whatever relays are
    reachable, which offline means **mesh relays** (`ws://[fd…]:port` on
    fips nodes, configured or synced). Verified by pin, DNSSEC proof or
    attestation; otherwise refused unless the user opted into the visible
    "unverified" marker.
 
 Online, relays therefore only learn about domains that already opted in
-via DNS — the SRV hint is the gate. Android has always worked this way (the
+via DNS — the TXT hint is the gate. Android has always worked this way (the
 VPN captures all DNS); desktops now match it.
 
 Caveats: captive portals and per-network resolver changes must be followed
@@ -121,7 +121,7 @@ change; `setup` only installs the service and the mode.
 Network changes: the daemon watches for them (netlink on Linux,
 `SCDynamicStore` on macOS, `NotifyAddrChange` on Windows — three thin
 `cfg` modules in `names-daemon`, ~50 lines each) to refresh upstreams and the
-online/offline flag the resolver needs (spec §8 privacy rule: SRV first when
+online/offline flag the resolver needs (spec §8 privacy rule: TXT first when
 online).
 
 ## 4. Android: integrated, not a daemon
@@ -134,7 +134,7 @@ should share: policy, pins format, wire formats, tests. Differences:
 - `PinStore` in the app's private files dir; the app exposes "pinned domains"
   and "forget" in its UI instead of a CLI.
 - Online flag from `network_changed` / `network_hint`.
-- Full mode only (the VPN captures all DNS; SRV-first discovery as on the
+- Full mode only (the VPN captures all DNS; TXT-first discovery as on the
   desktop).
 
 An Android build never compiles `names-daemon`, and the shim compiles the
@@ -169,7 +169,7 @@ domain is possible but not a goal.
   `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-pc-windows-msvc`,
   `aarch64-linux-android` (library crates only).
 - `names-core` and `names-resolve` tests run on all of them; the fake
-  relay / fake SRV / fake step-3 server tests are loopback-only, so they run
+  relay / fake TXT / fake step-3 server tests are loopback-only, so they run
   everywhere.
 - `names-daemon` gets one smoke test per OS: start, answer a pinned name on
   loopback, passthrough an unbound one.
@@ -187,7 +187,7 @@ plan-phase1 milestones stay; this adds:
   **full mode** with the systemd-resolved drop-in backend (the `.fips`
   setup generalised to `~.`), plus the network-change watcher it needs for
   upstreams. That is the smallest end-to-end desktop demo, and it exercises
-  SRV-first discovery.
+  TXT-first discovery.
 - **M5: macOS and Windows** — launchd socket on 53 + `networksetup`,
   Windows service + adapter DNS. Full mode.
 - **M6: restricted mode** (per-domain routing on all three), OpenWrt/pfSense
@@ -195,7 +195,7 @@ plan-phase1 milestones stay; this adds:
 
 ## 9. Decisions to confirm
 
-- Full mode with SRV-first discovery is the default on every platform
+- Full mode with TXT-first discovery is the default on every platform
   (decided 2026-09-28); restricted per-domain mode is opt-in and gives up
   discovery.
 - Loopback port 5356 for the daemon on Linux/BSD; 53 on macOS (launchd

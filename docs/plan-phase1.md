@@ -1,7 +1,7 @@
 # Phase 1 plan: MVP of domain binding over fips
 
 Status: **plan**, nothing implemented. Spec: [domain-binding.md](domain-binding.md)
-§9 phase 1 — claim + SRV verification + pinning + step 3 over UDP with
+§9 phase 1 — claim + TXT verification + pinning + step 3 over UDP with
 CNAME, unverified refused, phone integration in the fips2go shim.
 
 ## 1. What the MVP must demonstrate
@@ -38,7 +38,7 @@ network.
 fips-names/
   crates/
     names-core/       policy, no I/O          — events, verification, pins, precedence, DNS synthesis
-    names-resolve/    client I/O adapters     — relay fetch, legacy SRV lookup, step-3 query (via trait)
+    names-resolve/    client I/O adapters     — relay fetch, legacy TXT lookup, step-3 query (via trait)
     names-server/     step-3 authoritative server + claim publisher (binary `fips-names-server`)
     names-daemon/     `fips-namesd` forwarding resolver for desktops/servers (see plan-platforms.md)
     names-cli/        `fips-names` tool: claim publish, verify, pin inspect (binary)
@@ -56,7 +56,7 @@ in [plan-platforms.md](plan-platforms.md).
   trait (get/put/list, plus the "highest `created_at` seen" anti-rollback
   table). One file-backed implementation (JSON, atomic rename) — good enough
   for the phone's app-private dir and `~/.config/fips-names/` on desktop.
-- `Policy`: given (local hosts hit?, pins, claims, SRV result) → `Decision`:
+- `Policy`: given (local hosts hit?, pins, claims, TXT result) → `Decision`:
   `Local(npub) | Bound(binding) | Refuse(reason) | Passthrough`. This is §5.1
   minus the attestation/DNSSEC steps, which are stubs that always fail in
   phase 1 so the enum and precedence are already right.
@@ -78,7 +78,7 @@ in [plan-platforms.md](plan-platforms.md).
   (`ws://[fd…]:port`, reached through the TUN; on the phone through the
   smoltcp `MeshLink`, so this is a second use of the TCP flavour that
   already exists) — and the online flag selects which half is tried first.
-- `SrvVerifier`: `_fips-dns._udp.<domain> SRV` via `hickory-resolver` against
+- `TxtVerifier`: `_fips-dns.<domain> TXT` via `hickory-resolver` against
   the system's or a configured upstream set; phase 1 = unsigned DNS, at least
   **two** resolvers agreeing when more than one is configured (§4). DNSSEC
   validation is behind a feature flag, off, so the API already carries
@@ -89,7 +89,7 @@ in [plan-platforms.md](plan-platforms.md).
   - the phone impl lives in fips2go (`MeshLink` UDP), *not* here — the trait
     is the seam.
 - `Resolver::lookup(name, qtype) -> Outcome` orchestrating: local → pins →
-  online: SRV first, relays only on a hit (§8 privacy rule); offline:
+  online: TXT first, relays only on a hit (§8 privacy rule); offline:
   relays directly, mesh relays first (§5.5) → verify → pin → step 3 →
   synthesise.
 
@@ -100,7 +100,7 @@ It is this binary, run on the node that serves the domain:
 
 - Listens for DNS on **the node's own fips address** (from
   `npub → fd…`), UDP and TCP, default port **5355** — 53 needs root or
-  `CAP_NET_BIND_SERVICE`, and the port travels in the claim and the SRV
+  `CAP_NET_BIND_SERVICE`, and the port travels in the claim and the TXT
   anyway. `port` is a claim tag precisely so the default can change.
 - Zone: a small file `example.org.zone`-like YAML:
   ```yaml
@@ -118,8 +118,8 @@ It is this binary, run on the node that serves the domain:
   each configured domain with the node key (`--key-file`, same format as
   fips), to the configured relays, and re-publishes on start and every 24 h
   (addressable events are replaced, so this is idempotent).
-- Prints the SRV record the operator must add to legacy DNS:
-  `_fips-dns._udp.example.org. 3600 IN SRV 0 0 5355 npub1xyz….fips.`
+- Prints the TXT record the operator must add to legacy DNS:
+  `_fips-dns.example.org. 3600 IN TXT "v=fips1 npub=npub1xyz… port=5355"`
 
 The zone record event (kind 37199, phase 2) will be produced from the same
 YAML, so the format is chosen with that in mind.
@@ -127,7 +127,7 @@ YAML, so the format is chosen with that in mind.
 ### 3.4 `names-cli`
 
 Operator and debugging tool: `claim show <domain>`, `verify <domain>`
-(runs SRV verification and prints the decision), `pins list|forget`,
+(runs TXT verification and prints the decision), `pins list|forget`,
 `lookup <name>` (full resolver path against a kernel UDP mesh socket — the
 desktop path in miniature, and the thing integration tests drive).
 
@@ -160,7 +160,7 @@ beyond that in phase 1.
 
 ## 5. Legacy DNS side for the demo domain
 
-For `example.org`: add the SRV above at the registrar. No DNSSEC required for
+For `example.org`: add the TXT above at the registrar. No DNSSEC required for
 phase 1 (multi-resolver check instead); enabling DNSSEC on the zone is the
 phase 3 enabler and costs nothing now.
 
@@ -169,8 +169,8 @@ phase 3 enabler and costs nothing now.
 | Step | Budget | Note |
 |---|---|---|
 | Local hosts + pins + cache | ~0 | in-memory |
-| Legacy SRV (online only) | 1.5 s | parallel over the resolver set |
-| Relay fetch | 2 s | fips's figure; only on SRV hint / offline |
+| Legacy TXT (online only) | 1.5 s | parallel over the resolver set |
+| Relay fetch | 2 s | fips's figure; only on TXT hint / offline |
 | Step 3 UDP | 1 s, one retry | mesh RTT is typically < 300 ms |
 | Step 3 TCP fallback | 3 s | only on TC |
 | Whole lookup, cold, online | ≤ 4.5 s | must stay under the proxy timeout; upstream fallback afterwards |
@@ -183,7 +183,7 @@ phase 3 enabler and costs nothing now.
   (A → NODATA, AAAA suppression, TTL cap), and the "not over fips" cases:
   step-3 NXDOMAIN, refused binding, `legacy` zone entry → passthrough.
 - `names-resolve`: fake relay (loopback websocket, as fips2go's engine test
-  does), fake SRV upstream (`hickory` in-process authority), fake step-3
+  does), fake TXT upstream (`hickory` in-process authority), fake step-3
   server on loopback → end-to-end `lookup("www.example.org")` produces
   `CNAME npub1234.fips.` + synthesized AAAA, and `lookup("example.org")`
   is `Passthrough` with the negative cache set.
@@ -197,7 +197,7 @@ phase 3 enabler and costs nothing now.
 1. **Workspace + `names-core`** with tests. No network. (Policy is the part
    most likely to be wrong; get it reviewed first.)
 2. **`names-server`** + `names-cli lookup` on a desktop mesh node: two Linux
-   nodes, claim on a test relay, SRV in `example.org`, `lookup www.example.org`
+   nodes, claim on a test relay, TXT in `example.org`, `lookup www.example.org`
    over the mesh.
 3. **fips2go**: `MeshLink` UDP, resolver in the proxy, pin store, setting.
    Demo of §1.

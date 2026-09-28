@@ -34,8 +34,8 @@ Non-goals:
 client resolver                         Nostr relays        legacy DNS        npubxyz (domain's fips DNS server)
       │  1. claim for example.org? ───────────▶│
       │◀──────── claim: npubxyz, port 5355 ────│
-      │  2. _fips-dns._udp.example.org SRV? ───────────────────────▶│     (optional; skipped when unreachable)
-      │◀─────────────────── npubxyz.fips:5355 ───────────────────────│
+      │  2. _fips-dns.example.org TXT? ────────────────────────────▶│     (optional; skipped when unreachable)
+      │◀──────────── "v=fips1 npub=npubxyz port=5355" ───────────────│
       │  3. www.example.org? (DNS over UDP, over the mesh) ─────────────────────────────▶│
       │◀────────────────────────────── CNAME npub1234.fips. ─────────────────────────────│
       ▼
@@ -69,7 +69,7 @@ Published by the server that serves a domain.
   "tags": [
     ["d", "example.org"],
     ["service", "fips-dns", "5355"],
-    ["dnssec", "<base64 RFC 9102-style chain for the _fips-dns SRV RRset>"]   // optional
+    ["dnssec", "<base64 RFC 9102-style chain for the _fips-dns TXT RRset>"]   // optional
   ],
   "content": ""
 }
@@ -127,14 +127,22 @@ characters, no label starting with `npub1`).
 ## 4. Legacy DNS records (optional verifier)
 
 ```
-_fips-dns._udp.example.org.  SRV  0 0 5355  npub1xyz…(63 chars).fips.
+_fips-dns.example.org.  TXT  "v=fips1 npub=npub1xyz… port=5355"
 ```
 
-- An npub is exactly 63 characters, the maximum length of one DNS label, so
-  `npub….fips.` is a valid SRV target.
-- A matching SRV record verifies the claim. With **DNSSEC** it is
-  cryptographically strong; without it, it is only as strong as the client's
-  DNS path — query two or three independent resolvers.
+- A **TXT** record, not SRV: an SRV target must be a hostname, and domain
+  hosters validate it (in-zone, resolvable, known TLD) — `npub….fips.` is
+  rejected by common control panels. TXT under a `_`-prefixed name is what
+  ACME DNS-01, DKIM and site-verification use for the same reason: every
+  hoster can set it, and the npub is data, not a name.
+- Format: space-separated `key=value` pairs; `v=fips1` first, `npub`
+  required, `port` optional (default 5355; the claim's `service` tag is
+  authoritative). Unknown keys are ignored. Several TXT records may name
+  several servers.
+- A TXT record naming the claim's author verifies the claim. With
+  **DNSSEC** it is cryptographically strong; without it, it is only as
+  strong as the client's DNS path — query two or three independent
+  resolvers.
 - The same RRset, with its DNSSEC chain serialized into the claim's `dnssec`
   tag, lets anyone verify the binding **offline** against the DNS root key.
 
@@ -170,7 +178,7 @@ claim for a public suffix (`ch`, `co.uk`) — use a bundled Public Suffix List.
 
 ### 5.3 Several claims for one domain
 
-- Keep only claims whose author is also the SRV target (when DNS was
+- Keep only claims whose author a TXT record names (when DNS was
   reachable) — this resolves all conflicts online.
 - Offline: a pinned binding wins; otherwise the claim with a valid DNSSEC
   proof; otherwise the claim with the most trusted attestations. Ties or no
@@ -183,12 +191,12 @@ claim for a public suffix (`ch`, `co.uk`) — use a bundled Public Suffix List.
   equal or stronger method (DNSSEC ≥ multi-resolver DNS ≥ attestation). A
   pinned binding is never replaced by an unverified claim.
 
-### 5.5 No public Internet: the claim *is* the SRV record
+### 5.5 No public Internet: the claim *is* the TXT record
 
 When no legacy upstream is reachable — the daemon's online flag is off, or
-every upstream times out or SERVFAILs on the SRV query — the resolver skips
+every upstream times out or SERVFAILs on the TXT query — the resolver skips
 step 2 and fetches the claim (kind 37197) from relays **directly**: the
-claim carries the same information as the SRV record (server npub, port),
+claim carries the same information as the TXT record (server npub, port),
 so it replaces it. Relays consulted offline are whatever is reachable:
 
 - **mesh relays** — Nostr relays running on fips nodes, addressed as
@@ -209,15 +217,15 @@ trustless offline verification) move ahead of attestations in §9.
 
 Privacy differs offline: the relays asked do see the domain. Mesh relays
 are run by nodes the user chose, and no public relay is reachable anyway,
-so this is accepted; the online rule (SRV first, §8) is unchanged.
+so this is accepted; the online rule (TXT first, §8) is unchanged.
 
 ### 5.6 Caching
 
 | Item | TTL |
 |---|---|
-| Legacy SRV miss (no binding) | 6 h — most domains have none |
+| Legacy TXT miss (no binding) | 6 h — most domains have none |
 | Relay miss offline (no claim) | 1 h — so background queries of an offline browser reach mesh relays once per domain, not per query |
-| Legacy SRV hit | min(SRV TTL, 1 h) |
+| Legacy TXT hit | min(TXT TTL, 1 h) |
 | Claim / attestation fetched from relays | 1 h, stale-while-revalidate |
 | Step 3 answer | its TTL, capped at 1 h |
 | Answer synthesized for an application | 30 s — so a lost mesh route falls back quickly |
@@ -251,13 +259,13 @@ responder: that responder binds loopback, answers only `.fips`, and
 deliberately drops queries arriving on the mesh interface (it protects the
 hosts file from enumeration). The domain server listens on the node's own
 fips address, UDP and TCP, default port **5355** (53 needs privileges; the
-port travels in the claim and the SRV anyway), and answers from a small
+port travels in the claim and the TXT record anyway), and answers from a small
 per-domain zone file. The same program signs and publishes the claim with
 the node key, and re-publishes it periodically.
 
 ## 7. OS integration
 
-Browsers never ask for SRV and are never changed. The machine's resolver is:
+Browsers never ask for TXT and are never changed. The machine's resolver is:
 
 - **Phone (fips2go):** the shim already intercepts all DNS from captured
   apps; the hook is the non-`.fips` branch of `DnsProxy::serve`
@@ -270,7 +278,7 @@ Browsers never ask for SRV and are never changed. The machine's resolver is:
 - **Desktops and servers (Linux, BSD, macOS, Windows):** a standalone
   forwarding resolver daemon (`fips-namesd`) in the path for **all names**
   (systemd-resolved `~.`, dnsmasq/unbound upstream, macOS `networksetup`,
-  Windows adapter DNS) — it must see every query to do the SRV-first
+  Windows adapter DNS) — it must see every query to do the TXT-first
   discovery of §8. An opt-in restricted mode routes only known domains via
   the OS's per-domain routing (resolved routing domains, dnsmasq
   `server=/domain/`, `/etc/resolver/<domain>`, NRPT) and gives up
@@ -315,17 +323,17 @@ Known holes:
   the same name on both networks should serve its certificate on its fips
   address too.
 - **DNS spoofing without DNSSEC:** an attacker on the client's DNS path could
-  publish a claim and forge the matching SRV answer. Multiple independent
+  publish a claim and forge the matching TXT answer. Multiple independent
   resolvers and pinning reduce this; DNSSEC removes it.
 - **Rollback / withholding:** relays can hide a newer event but cannot forge
   one. Keep and persist the highest `created_at` seen per (kind, author, d);
   ignore timestamps more than 10 minutes in the future.
 - **Privacy — browsing history:** asking relays about every visited domain
-  gives relay operators the browsing history. So the SRV hint is the gate:
-  when online, **always** ask the legacy upstream for `_fips-dns._udp.<domain>`
+  gives relay operators the browsing history. So the TXT hint is the gate:
+  when online, **always** ask the legacy upstream for `_fips-dns.<domain>`
   first (that upstream is about to resolve the name anyway; the negative
   cache keeps it to one query per domain per 6 h) and query relays only for
-  domains with an SRV hit. Offline (§5.5), the claim is fetched from relays
+  domains with a TXT hit. Offline (§5.5), the claim is fetched from relays
   directly — those are mesh relays the user chose, or public ones that
   happen to be reachable; the domain is disclosed to them, accepted as the
   price of resolving at all. Step 3 reveals the name only to the domain's
@@ -335,7 +343,7 @@ Known holes:
 
 ## 9. Phasing
 
-1. **MVP:** claim (§3.1) + SRV verification + pinning + step 3 over UDP with
+1. **MVP:** claim (§3.1) + TXT verification + pinning + step 3 over UDP with
    CNAME; offline claim fetch via mesh relays (§5.5); unverified refused
    (opt-in marker); phone integration in the fips2go shim; Linux daemon.
 2. **DNSSEC proofs** in claims — trustless offline verification of domains

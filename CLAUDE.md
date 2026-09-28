@@ -40,7 +40,7 @@ move it into one of those repos.
    presentation in DNS; routing happens by suffix (`.fips` / reserved `.alt`,
    RFC 9476), and non-LDH characters break apps.
 5. The user's flow, adopted as the spec: (1) Nostr claim for the domain →
-   server npub, (2) legacy DNS SRV only as an *optional* verifier, (3) ask
+   server npub, (2) legacy DNS SRV only as an *optional* verifier (later TXT, see spec §4), (3) ask
    that server over the mesh for individual names. Refinements agreed:
    - HTTPS is not required (fips is end-to-end encrypted and authenticates
      the npub) — so binding verification is what security rests on; HSTS and
@@ -86,7 +86,7 @@ move it into one of those repos.
 ## Next steps
 
 Phase 1 is planned in `docs/plan-phase1.md` (2026-09-28): a Rust workspace
-in this repo — `names-core` (policy, no I/O), `names-resolve` (relay/SRV/mesh
+in this repo — `names-core` (policy, no I/O), `names-resolve` (relay/TXT/mesh
 adapters behind a `MeshDns` trait), `names-server` (step 3 server + claim
 publisher), `names-daemon` (`fips-namesd`), `names-cli`. Milestones:
 core+tests → server + Linux daemon over the mesh → fips2go integration →
@@ -97,9 +97,9 @@ Platform rule (`docs/plan-platforms.md`): the resolver is a **separate
 daemon** on every desktop/server OS and **embedded in fips2go** on Android;
 no `cfg(target_os)` in `names-core`/`names-resolve`. Default on every
 platform: the resolver is in the path for **all names** and discovers
-domains by asking public DNS for the `_fips-dns` SRV first (user decision
-2026-09-28); relays are only asked after an SRV hit. With no upstream
+domains by asking public DNS for the `_fips-dns` TXT first (user decision
+2026-09-28); relays are only asked after a TXT hit. With no upstream
 reachable, the claim is fetched from relays directly (mesh relays on fips
-nodes first) — the claim replaces the SRV record (spec §5.5). Opt-in
+nodes first) — the claim replaces the TXT record (spec §5.5). Opt-in
 restricted mode routes only known domains via per-domain OS routing and
 gives up discovery.

@@ -11,8 +11,8 @@ Nostr public key that serves it, so that clients can reach a domain's
 services through key-addressed overlay networks (such as
 [fips](https://github.com/jmcorgan/fips), where a public key *is* a routable
 IPv6 address) with or without access to the legacy DNS. The events replace
-the DNS `SRV` record when DNS is unreachable and are verified against it
-when it is.
+the DNS `TXT` record described below when DNS is unreachable and are
+verified against it when it is.
 
 Kind numbers below are **placeholders** pending registration in
 [registry-of-kinds](https://github.com/nostr-protocol/registry-of-kinds);
@@ -41,8 +41,8 @@ in lowercase, without trailing dot, ASCII (IDNs in A-label form).
   listens on, on the author's overlay address. `fips-dns` is a DNS server
   answering names under the domain over the overlay (see "Resolution"). Other
   services MAY be added; a claim MAY carry several `service` tags.
-- `dnssec` (optional): the `_<service>._udp.<domain> SRV` RRset together with
-  its RRSIG chain to the root, serialized as in RFC 9102 §3 (a sequence of
+- `dnssec` (optional): the `_<service>.<domain> TXT` RRset together with its
+  RRSIG chain to the root, serialized as in RFC 9102 §3 (a sequence of
   RRsets in wire format, base64). It lets a client verify the binding without
   querying DNS.
 
@@ -101,21 +101,27 @@ A domain owner that wants the binding verifiable publishes, in the
 legacy DNS:
 
 ```
-_fips-dns._udp.example.org.  SRV  0 0 5355  <npub>.fips.
+_fips-dns.example.org.  TXT  "v=fips1 npub=<npub> port=5355"
 ```
 
-The target's first label is the server's public key in bech32 `npub` form
-(63 characters, the DNS label maximum). Signing the zone with DNSSEC makes
-the verification cryptographic and enables the `dnssec` tag.
+The record is `TXT` rather than `SRV` because SRV targets are hostnames
+that DNS hosters validate; a TXT record under an underscore-prefixed name
+(as in ACME DNS-01 and DKIM) can be set anywhere. Its content is
+space-separated `key=value` pairs: `v=fips1` first, `npub` (bech32 public
+key) required, `port` optional (the claim's `service` tag is
+authoritative), unknown keys ignored. Several records may name several
+servers. Signing the zone with DNSSEC makes the verification cryptographic
+and enables the `dnssec` tag.
 
 ## Verification
 
 A client that receives one or more claims for a domain MUST classify each
 before use, in this order of strength:
 
-1. **DNS-verified** — the client fetched the `SRV` record itself and its
-   target key equals the claim's author (`dnssec` if validated, `dns` if
-   not; unsigned answers SHOULD be confirmed by more than one resolver).
+1. **DNS-verified** — the client fetched the `TXT` record itself and one
+   of its `npub` values equals the claim's author (`dnssec` if validated,
+   `dns` if not; unsigned answers SHOULD be confirmed by more than one
+   resolver).
 2. **Proof-verified** — the claim's `dnssec` tag validates against the DNS
    root trust anchor and names the author. Works offline.
 3. **Attested** — at least `k` configured witnesses published kind 37198 for
@@ -152,8 +158,8 @@ in the future.
 
 Querying relays for every domain a user visits discloses the user's
 browsing to relay operators. When the legacy DNS is reachable, clients
-SHOULD query the `SRV` record first — the resolver that answers it is about
-to resolve the name anyway — and query relays only for domains whose `SRV`
+SHOULD query the `TXT` record first — the resolver that answers it is about
+to resolve the name anyway — and query relays only for domains whose `TXT`
 exists. When DNS is unreachable, clients query relays directly; users
 SHOULD prefer relays they trust, including relays reachable only over the
 overlay.

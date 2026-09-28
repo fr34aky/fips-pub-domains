@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The `fips-pubdom-server` systemd unit never started: systemd expands
+  `%s` in `ExecStart` to the service user's shell and `$z` itself, so the
+  server was told to load a zone file named `/bin/sh`. The specifier and
+  the shell variables are escaped now.
+
 ## [0.2.0] - 2026-09-28
 
 ### Fixed

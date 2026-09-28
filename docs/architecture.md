@@ -44,6 +44,7 @@ application (spec §7: a name is never made unreachable by this code).
 | `relay` | `RelayClient`: nostr-sdk with two relay sets, public and mesh; online both are asked at once (after a TXT hit), offline the mesh set first; `publish_claim` for the server |
 | `mesh` | the `MeshDns` trait — step 3 over UDP, TCP on truncation, identity registration through fips's responder — and `KernelMeshDns` for hosts with a TUN |
 | `pins` | `FilePinStore`: the JSON pin file, written atomically |
+| `proof` | DNSSEC proofs in claims: `build_chain` (the server collects the TXT RRset and the DNSKEY/DS chain to the root with the DO bit), `verify_chain` (RFC 4035 validation offline against hickory's built-in root anchors), `DnssecProofs`, the resolver's `ProofVerifier` |
 | `config` | the YAML config shared by daemon and CLI; `build_resolver()` |
 | `resolver` | `Resolver::lookup(query) → Answer | Passthrough` |
 

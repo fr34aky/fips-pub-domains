@@ -79,16 +79,17 @@ pub struct Outcome {
 }
 
 /// Verifies the `dnssec` proof carried in a claim against the DNS root
-/// trust anchor (phase 2). Phase 1 passes [`NoProofs`].
+/// trust anchor (spec §3.1, §5.5); `pubdom-resolve::proof` implements it.
+/// [`NoProofs`] is the `dnssec: false` switch.
 pub trait ProofVerifier {
     /// `true` if the claim's proof shows a `_fips-dns` TXT record naming the
-    /// claim's author, and it validates.
-    fn verify(&self, claim: &Claim) -> bool;
+    /// claim's author, and it validates at `now` (signatures expire).
+    fn verify(&self, claim: &Claim, now: u64) -> bool;
 }
 
 pub struct NoProofs;
 impl ProofVerifier for NoProofs {
-    fn verify(&self, _: &Claim) -> bool {
+    fn verify(&self, _: &Claim, _: u64) -> bool {
         false
     }
 }
@@ -245,23 +246,28 @@ pub fn decide(input: Input<'_>) -> Outcome {
                 return keep(Decision::Bound(input.pins.clone()));
             }
             // Offline and unpinned: only a proof carried in the claim can
-            // verify it (spec §5.5).
-            if let Some(proven) = input
+            // verify it (spec §5.5). Every proven claim is a server, newest
+            // first — the same set the TXT record would have given online.
+            let mut proven: Vec<&Claim> = input
                 .claims
                 .iter()
-                .filter(|c| c.dnssec.is_some() && input.proofs.verify(c))
-                .max_by_key(|c| c.created_at)
-            {
-                let b = Binding {
-                    domain: input.domain.to_owned(),
-                    npub: proven.author,
-                    port: proven.port,
-                    method: Method::Dnssec,
-                    verified_at: input.now,
-                };
+                .filter(|c| c.dnssec.is_some() && input.proofs.verify(c, input.now))
+                .collect();
+            if !proven.is_empty() {
+                proven.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                let servers: Vec<Binding> = proven
+                    .into_iter()
+                    .map(|c| Binding {
+                        domain: input.domain.to_owned(),
+                        npub: c.author,
+                        port: c.port,
+                        method: Method::Dnssec,
+                        verified_at: input.now,
+                    })
+                    .collect();
                 return Outcome {
-                    decision: Decision::Bound(vec![b.clone()]),
-                    changes: vec![PinChange::Put(b)],
+                    changes: servers.iter().cloned().map(PinChange::Put).collect(),
+                    decision: Decision::Bound(servers),
                 };
             }
             if input.claims.is_empty() {
@@ -656,8 +662,9 @@ mod tests {
     fn offline_proof_verifies_and_pins() {
         struct Yes;
         impl ProofVerifier for Yes {
-            fn verify(&self, c: &Claim) -> bool {
-                c.author == npub(2)
+            fn verify(&self, c: &Claim, now: u64) -> bool {
+                assert_eq!(now, NOW, "signatures are checked at the decision's time");
+                c.author == npub(2) || c.author == npub(4)
             }
         }
         let mut proven = claim(2, 5);
@@ -674,6 +681,22 @@ mod tests {
         let b = &bound(&o)[0];
         assert_eq!((b.npub, b.method), (npub(2), Method::Dnssec));
         assert_eq!(o.changes, vec![PinChange::Put(b.clone())]);
+        // Every proven claim is a server, newest first; an unproven one is not.
+        let mut second = claim(4, 7);
+        second.dnssec = Some("AAAA".into());
+        let mut first = claim(2, 5);
+        first.dnssec = Some("AAAA".into());
+        let o = decide(Input {
+            domain: "example.org",
+            pins: vec![],
+            txt: TxtLookup::Unreachable,
+            claims: &[first, claim(3, 9), second],
+            now: NOW,
+            allow_unverified_offline: false,
+            proofs: &Yes,
+        });
+        assert_eq!(npubs(&o), vec![npub(4), npub(2)]);
+        assert_eq!(o.changes.len(), 2);
     }
 
     #[test]

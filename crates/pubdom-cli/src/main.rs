@@ -4,7 +4,7 @@
 
 use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
-use pubdom_core::policy::{self, Input, NoProofs, TxtLookup};
+use pubdom_core::policy::{self, Input, NoProofs, ProofVerifier, TxtLookup};
 use pubdom_core::{PinStore, synth};
 use pubdom_resolve::relay::RelayScope;
 use pubdom_resolve::{Config, FilePinStore, LookupResult, RelayClient, TxtVerifier};
@@ -142,12 +142,20 @@ async fn main() -> Result<()> {
             let events = relays.fetch_claims(&domain, scope).await;
             println!("claim events: {}", events.len());
             let claims = policy::ingest_claims(&pins, &domain, &events, pubdom_resolve::now());
+            let dnssec = pubdom_resolve::proof::DnssecProofs::default();
+            let now = pubdom_resolve::now();
             for c in &claims {
+                let proof = match (&c.dnssec, dnssec.check(c, now)) {
+                    (None, _) => "no DNSSEC proof".to_string(),
+                    (Some(_), Ok(p)) => format!("DNSSEC proof valid until {}", p.expires),
+                    (Some(_), Err(e)) => format!("DNSSEC proof {e}"),
+                };
                 println!(
-                    "  claim by {} port {} created_at {}",
+                    "  claim by {} port {} created_at {}: {proof}",
                     c.author, c.port, c.created_at
                 );
             }
+            let proofs: &dyn ProofVerifier = if cfg.dnssec { &dnssec } else { &NoProofs };
             let out = policy::decide(Input {
                 domain: &domain,
                 pins: pinned,
@@ -155,7 +163,7 @@ async fn main() -> Result<()> {
                 claims: &claims,
                 now: pubdom_resolve::now(),
                 allow_unverified_offline: cfg.allow_unverified_offline,
-                proofs: &NoProofs,
+                proofs,
             });
             println!("decision: {:?}", out.decision);
             println!("pin changes: {:?} (not applied by `verify`)", out.changes);

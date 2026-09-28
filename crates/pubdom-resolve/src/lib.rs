@@ -14,6 +14,7 @@
 pub mod config;
 pub mod mesh;
 pub mod pins;
+pub mod proof;
 pub mod relay;
 pub mod resolver;
 pub mod txt;

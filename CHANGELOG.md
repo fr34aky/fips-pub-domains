@@ -51,6 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   could not be read (a `fips.key` with mode 600 and a user outside the
   `fips` group); it now says so, and also accepts a 32-byte raw key file.
 
+### Changed
+
+- `ProofVerifier::verify` takes the time to check signatures at.
+
 ### Removed
 
 - `ResolverConfig.upstreams` (never read), and with it the argument of
@@ -58,6 +62,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its next pin bump.
 
 ### Added
+
+- **DNSSEC proofs in claims** (spec §3.1, §5.5): for a DNSSEC-signed
+  domain, `fips-pubdom-server` attaches the signed `_fips-dns` TXT record
+  and its DNSKEY/DS chain to the root to the claim, checks it as a client
+  would, and re-publishes before the signatures expire (halfway through the
+  remaining validity, every 24 h at the latest). A client with no pin and
+  no DNS — only a relay on the mesh — verifies the domain from the proof
+  alone against the built-in root keys, and pins it as `dnssec`; every
+  proven claim becomes a server. `--dns` picks the resolvers the chain is
+  collected from, `--no-dnssec-proof` turns it off, `dnssec: false` on the
+  client ignores proofs. `fips-pubdom verify` shows each claim's proof.
 
 - **Redundant servers** (spec §5.3): every key the TXT record names and
   that claims the domain is pinned as a server; step 3 asks them in pin

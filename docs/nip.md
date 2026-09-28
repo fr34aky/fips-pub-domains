@@ -45,9 +45,14 @@ in lowercase, without trailing dot, ASCII (IDNs in A-label form).
   answering names under the domain over the overlay (see "Resolution"). Other
   services MAY be added; a claim MAY carry several `service` tags.
 - `dnssec` (optional): the `_<service>.<domain> TXT` RRset together with its
-  RRSIG chain to the root, serialized as in RFC 9102 §3 (a sequence of
-  RRsets in wire format, base64). It lets a client verify the binding without
-  querying DNS.
+  RRSIG chain to the root, serialized as in RFC 9102 §3 (resource records in
+  uncompressed wire format, concatenated in any order, base64): the TXT
+  RRset, and for the zone signing it and each zone above it the DNSKEY RRset
+  and (except for the root) the DS RRset, all with their RRSIGs. It lets a
+  client verify the binding without querying DNS, against the root trust
+  anchor. Clients MUST refuse signatures outside their validity window, so
+  authors SHOULD re-publish the claim with a fresh chain well before the
+  earliest RRSIG expiration.
 
 **A claim proves only that the author agreed to serve the domain.** It does
 not prove the author controls the domain. Any key can publish a claim for

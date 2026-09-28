@@ -92,6 +92,18 @@ tooling. A relay may gate writes on a pubkey allowlist —
 strfry's write-policy plugin, for instance — in which case the node's hex
 pubkey must be on it.
 
+**DNSSEC proof.** If the domain's zone is DNSSEC-signed, the claim also
+carries a proof (`dnssec` tag): the signed TXT record and the chain of
+keys up to the DNS root. A client that has never seen the domain and has
+no Internet — only the mesh and a relay on it — verifies the claim with
+that proof alone. The server collects the chain from the system's
+resolvers, then 9.9.9.9 and 1.1.1.1 (`--dns <ip>` to choose; a local stub
+that strips DNSSEC records does not work), checks it as a client would, and
+re-publishes before its signatures expire: halfway through their remaining
+validity, every 24 h at the latest. The log line `claim published … dnssec_proof_until=…`
+shows it; for an unsigned zone the claim goes out without a proof and a
+warning says so. `--no-dnssec-proof` turns it off.
+
 `packaging/systemd/fips-pubdom-server.service` runs one `serve` for all the
 zones in `/etc/fips-pubdom/zones/` (same port for all) as group `fips`;
 `--publish --relay …` go into `/etc/fips-pubdom/server.env` as
@@ -127,7 +139,10 @@ dig @fdd9:…:8f4d -p 5355 www.example.org +tcp +short     # the truncation path
 
 And with a resolver installed ([daemon.md](daemon.md)):
 `fips-pubdom verify example.org` should end in `decision: Bound(… method:
-Dnssec …)` (or `Dns` for an unsigned zone).
+Dnssec …)` (or `Dns` for an unsigned zone), and list the claim with
+`DNSSEC proof valid until <unix time>`. `fips-pubdom --offline verify
+example.org` with an empty pin file shows what a client that never saw the
+domain decides from the proof alone.
 
 ## What the server does not do
 

@@ -1447,6 +1447,7 @@ dependencies = [
 name = "pubdom-resolve"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "futures",
  "hickory-resolver",
  "nostr-sdk",

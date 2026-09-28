@@ -30,8 +30,10 @@ use hickory_resolver::proto::serialize::binary::{
 };
 use pubdom_core::claim::Claim;
 use pubdom_core::domain::txt_name;
-use pubdom_core::policy::ProofVerifier;
+use pubdom_core::policy::{ProofVerifier, ProvenRecord};
 use pubdom_core::txt::TxtRecord;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::time::Duration;
@@ -39,8 +41,8 @@ use std::time::Duration;
 /// Longest chain accepted: a TXT record a few zones deep is well under
 /// 10 KB even with RSA keys; nothing legitimate comes near this.
 const MAX_CHAIN_BYTES: usize = 64 * 1024;
-/// Zones walked from the TXT record to the root; bounds a malicious chain.
-const MAX_DEPTH: usize = 16;
+/// Zones walked from the TXT record up to the root when collecting.
+const MAX_ZONES: usize = 16;
 
 /// Why a proof did not verify.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +68,9 @@ impl std::fmt::Display for ProofError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Proven {
     pub records: Vec<TxtRecord>,
+    /// Inception of the TXT RRset's signature: which of two valid proofs
+    /// shows the newer record.
+    pub signed_at: u64,
     /// The earliest RRSIG expiration in the chain (unix seconds): the proof
     /// is worthless after it, and the server must re-publish before.
     pub expires: u64,
@@ -115,9 +120,11 @@ pub fn verify_chain(
         records: &records,
         now,
         anchors,
+        memo: RefCell::new(HashMap::new()),
+        budget: Cell::new(MAX_SIG_CHECKS),
     };
-    let mut expires = u64::MAX;
-    v.rrset(&owner, RecordType::TXT, &mut expires, 0)
+    let valid = v
+        .rrset(&owner, RecordType::TXT)
         .map_err(ProofError::Unsigned)?;
     let mut out = Vec::new();
     for r in v.set(&owner, RecordType::TXT) {
@@ -134,14 +141,38 @@ pub fn verify_chain(
     }
     Ok(Proven {
         records: out,
-        expires,
+        signed_at: valid.inception,
+        expires: valid.expires,
     })
 }
+
+/// Signature verifications one proof may cost. A real chain needs one per
+/// RRset (six or so); the budget stops a crafted chain full of forged
+/// RRSIGs from making validation expensive.
+const MAX_SIG_CHECKS: u32 = 64;
+/// A signature whose inception is up to this far in the future is
+/// accepted: offline nodes often run without NTP. Expiration is strict.
+const INCEPTION_SKEW: u64 = 3600;
+
+/// A validated RRset: when the signature relied on was made, and the
+/// earliest expiration of everything it rests on.
+#[derive(Clone, Copy)]
+struct Valid {
+    inception: u64,
+    expires: u64,
+}
+
+/// A validation result, as memoized.
+type Checked = Result<Valid, String>;
 
 struct Validator<'a> {
     records: &'a [Record],
     now: u64,
     anchors: &'a TrustAnchors,
+    /// Each RRset is validated once; `None` marks one in progress, so a
+    /// cycle in a crafted chain fails instead of recursing.
+    memo: RefCell<HashMap<(Name, RecordType), Option<Checked>>>,
+    budget: Cell<u32>,
 }
 
 impl Validator<'_> {
@@ -149,14 +180,14 @@ impl Validator<'_> {
     fn set(&self, name: &Name, ty: RecordType) -> Vec<&Record> {
         self.records
             .iter()
-            .filter(|r| r.record_type() == ty && (&r.name) == name && r.dns_class == DNSClass::IN)
+            .filter(|r| r.record_type() == ty && &r.name == name && r.dns_class == DNSClass::IN)
             .collect()
     }
 
     fn sigs(&self, name: &Name, ty: RecordType) -> Vec<&RRSIG> {
         self.records
             .iter()
-            .filter(|r| (&r.name) == name && r.dns_class == DNSClass::IN)
+            .filter(|r| &r.name == name && r.dns_class == DNSClass::IN)
             .filter_map(|r| match &r.data {
                 RData::DNSSEC(DNSSECRData::RRSIG(s)) if s.input().type_covered == ty => Some(s),
                 _ => None,
@@ -174,19 +205,23 @@ impl Validator<'_> {
             .collect()
     }
 
-    /// Validate the RRset (name, ty): some current RRSIG over it by a key of
-    /// its zone whose DNSKEY RRset validates in turn. Lowers `expires` to the
-    /// signatures relied on.
-    fn rrset(
-        &self,
-        name: &Name,
-        ty: RecordType,
-        expires: &mut u64,
-        depth: usize,
-    ) -> Result<(), String> {
-        if depth > MAX_DEPTH {
-            return Err("chain too deep".into());
+    /// Validate the RRset (name, ty), once.
+    fn rrset(&self, name: &Name, ty: RecordType) -> Result<Valid, String> {
+        let key = (name.clone(), ty);
+        match self.memo.borrow().get(&key) {
+            Some(Some(r)) => return r.clone(),
+            Some(None) => return Err(format!("{name} {ty}: the chain is circular")),
+            None => {}
         }
+        self.memo.borrow_mut().insert(key.clone(), None);
+        let r = self.rrset_uncached(name, ty);
+        self.memo.borrow_mut().insert(key, Some(r.clone()));
+        r
+    }
+
+    /// Some current RRSIG over the RRset by a key of its zone whose DNSKEY
+    /// RRset validates in turn.
+    fn rrset_uncached(&self, name: &Name, ty: RecordType) -> Result<Valid, String> {
         let set = self.set(name, ty);
         if set.is_empty() {
             return Err(format!("no {ty} at {name}"));
@@ -196,8 +231,8 @@ impl Validator<'_> {
             let input = sig.input();
             let signer = &input.signer_name;
             // The signer is the zone owning the name: an ancestor (or the
-            // name itself); a DS record is signed by the parent, never by
-            // the zone it describes; a DNSKEY RRset only by its own zone.
+            // name itself); a DS record is signed by a zone above it, never
+            // by the zone it describes; a DNSKEY RRset only by its own zone.
             if !signer.zone_of(name)
                 || (ty == RecordType::DS && signer == name)
                 || (ty == RecordType::DNSKEY && signer != name)
@@ -215,17 +250,18 @@ impl Validator<'_> {
                 u64::from(input.sig_inception.get()),
                 u64::from(input.sig_expiration.get()),
             );
-            if self.now < inception || self.now > expiration {
+            if self.now + INCEPTION_SKEW < inception || self.now > expiration {
                 why = format!(
                     "{name} {ty}: signature not valid now (valid {inception}..{expiration})"
                 );
                 continue;
             }
-            let mut exp = (*expires).min(expiration);
-            let trusted_keys: Vec<&DNSKEY> = if ty == RecordType::DNSKEY {
+            // The keys this signature may be made with, and when what makes
+            // them trusted expires.
+            let (keys, below) = if ty == RecordType::DNSKEY {
                 // The zone's own key set, self-signed: the signing key must be
                 // anchored (root) or covered by a validated DS.
-                match self.anchored_keys(name, &mut exp, depth) {
+                match self.anchored_keys(name) {
                     Ok(k) => k,
                     Err(e) => {
                         why = e;
@@ -233,35 +269,42 @@ impl Validator<'_> {
                     }
                 }
             } else {
-                if let Err(e) = self.rrset(signer, RecordType::DNSKEY, &mut exp, depth + 1) {
-                    why = e;
+                match self.rrset(signer, RecordType::DNSKEY) {
+                    Ok(v) => (self.keys(signer), v.expires),
+                    Err(e) => {
+                        why = e;
+                        continue;
+                    }
+                }
+            };
+            for k in keys {
+                if k.algorithm() != input.algorithm
+                    || k.calculate_key_tag().ok() != Some(input.key_tag)
+                {
                     continue;
                 }
-                self.keys(signer)
-            };
-            let ok = trusted_keys.iter().any(|k| {
-                k.algorithm() == input.algorithm
-                    && k.calculate_key_tag().ok() == Some(input.key_tag)
-                    && k.verify_rrsig(name, DNSClass::IN, sig, set.iter().copied())
-                        .is_ok()
-            });
-            if ok {
-                *expires = exp;
-                return Ok(());
+                let left = self.budget.get();
+                if left == 0 {
+                    return Err("too many signatures to check".into());
+                }
+                self.budget.set(left - 1);
+                if k.verify_rrsig(name, DNSClass::IN, sig, set.iter().copied())
+                    .is_ok()
+                {
+                    return Ok(Valid {
+                        inception,
+                        expires: expiration.min(below),
+                    });
+                }
             }
             why = format!("{name} {ty}: signature does not verify");
         }
         Err(why)
     }
 
-    /// The keys of `zone` that are trust points: in the anchors (root), or
-    /// covered by a validated DS RRset from the parent.
-    fn anchored_keys(
-        &self,
-        zone: &Name,
-        expires: &mut u64,
-        depth: usize,
-    ) -> Result<Vec<&DNSKEY>, String> {
+    /// The keys of `zone` that are trust points — in the anchors (root), or
+    /// covered by a validated DS RRset from above — and when that expires.
+    fn anchored_keys(&self, zone: &Name) -> Result<(Vec<&DNSKEY>, u64), String> {
         let keys = self.keys(zone);
         if zone.is_root() {
             let k: Vec<&DNSKEY> = keys
@@ -271,10 +314,10 @@ impl Validator<'_> {
             return if k.is_empty() {
                 Err("root DNSKEY RRset holds no trust anchor".into())
             } else {
-                Ok(k)
+                Ok((k, u64::MAX))
             };
         }
-        self.rrset(zone, RecordType::DS, expires, depth + 1)?;
+        let ds_valid = self.rrset(zone, RecordType::DS)?;
         let ds: Vec<&DS> = self
             .set(zone, RecordType::DS)
             .into_iter()
@@ -290,7 +333,7 @@ impl Validator<'_> {
         if k.is_empty() {
             Err(format!("no DNSKEY of {zone} matches its DS"))
         } else {
-            Ok(k)
+            Ok((k, ds_valid.expires))
         }
     }
 }
@@ -318,13 +361,22 @@ impl DnssecProofs {
 }
 
 impl ProofVerifier for DnssecProofs {
-    fn verify(&self, claim: &Claim, now: u64) -> bool {
+    fn verify(&self, claim: &Claim, now: u64) -> Option<ProvenRecord> {
         match self.check(claim, now) {
-            Ok(_) => true,
+            Ok(p) => Some(p.into()),
             Err(e) => {
                 tracing::debug!(domain = %claim.domain, author = %claim.author, error = %e, "claim's DNSSEC proof rejected");
-                false
+                None
             }
+        }
+    }
+}
+
+impl From<Proven> for ProvenRecord {
+    fn from(p: Proven) -> Self {
+        ProvenRecord {
+            signed_at: p.signed_at,
+            named: p.records.iter().map(|r| r.npub).collect(),
         }
     }
 }
@@ -332,11 +384,12 @@ impl ProofVerifier for DnssecProofs {
 /// Collect the chain for `_fips-dns.<domain>` from `upstream`, a recursive
 /// resolver that returns DNSSEC records when asked with the DO bit (most
 /// public ones do; a stub that strips them yields "no RRSIG").
+/// Returns the chain and what it proves.
 pub async fn build_chain(
     domain: &str,
     upstream: IpAddr,
     timeout: Duration,
-) -> Result<String, String> {
+) -> Result<(String, Proven), String> {
     let owner = Name::from_str(&format!("{}.", txt_name(domain))).map_err(|e| e.to_string())?;
     let mut out: Vec<Record> = Vec::new();
     // The TXT RRset; its RRSIG's signer is the zone to walk up from.
@@ -344,7 +397,7 @@ pub async fn build_chain(
     let mut zone = signer_of(&txt, &owner, RecordType::TXT)
         .ok_or_else(|| format!("{owner} TXT is not signed (is the zone DNSSEC-signed?)"))?;
     out.extend(txt);
-    for _ in 0..MAX_DEPTH {
+    for _ in 0..MAX_ZONES {
         out.extend(ask(upstream, &zone, RecordType::DNSKEY, timeout).await?);
         if zone.is_root() {
             let chain = encode_chain(&out)?;
@@ -357,9 +410,9 @@ pub async fn build_chain(
                 ));
             }
             // Never publish something we would refuse ourselves.
-            verify_chain(&chain, domain, crate::now(), &TrustAnchors::default())
+            let proven = verify_chain(&chain, domain, crate::now(), &TrustAnchors::default())
                 .map_err(|e| format!("collected chain {e}"))?;
-            return Ok(chain);
+            return Ok((chain, proven));
         }
         let ds = ask(upstream, &zone, RecordType::DS, timeout).await?;
         let parent = signer_of(&ds, &zone, RecordType::DS)
@@ -391,7 +444,7 @@ pub async fn build_chain_any(
     domain: &str,
     upstreams: &[IpAddr],
     timeout: Duration,
-) -> Result<String, String> {
+) -> Result<(String, Proven), String> {
     let mut errors = Vec::new();
     for ip in upstreams {
         match build_chain(domain, *ip, timeout).await {
@@ -422,7 +475,9 @@ async fn ask(
     ty: RecordType,
     timeout: Duration,
 ) -> Result<Vec<Record>, String> {
-    let id: u16 = rand_id();
+    // Random: the answer is checked anyway, but a guessable ID would let an
+    // off-path attacker make the build fail.
+    let id: u16 = rand::random();
     let mut msg = Message::new(id, MessageType::Query, OpCode::Query);
     msg.metadata.recursion_desired = true;
     msg.add_query(Query::query(name.clone(), ty));
@@ -478,14 +533,6 @@ async fn ask(
         return Err(format!("{upstream}: empty answer for {name} {ty}"));
     }
     Ok(records)
-}
-
-fn rand_id() -> u16 {
-    let n = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    (n ^ (n >> 16)) as u16
 }
 
 #[cfg(test)]
@@ -652,7 +699,9 @@ mod tests {
         let proofs = DnssecProofs {
             anchors: w.anchors.clone(),
         };
-        assert!(proofs.verify(&claim(chain.clone(), author()), NOW));
+        let shown = proofs.verify(&claim(chain.clone(), author()), NOW).unwrap();
+        assert_eq!(shown.named, vec![author()]);
+        assert_eq!(shown.signed_at, NOW - 3600);
         assert_eq!(
             proofs.check(&claim(chain.clone(), Npub::from_bytes([8; 32])), NOW),
             Err(ProofError::NotNamed)
@@ -660,14 +709,14 @@ mod tests {
         // For another domain the same chain proves nothing.
         let mut other = claim(chain, author());
         other.domain = "example.net".into();
-        assert!(!proofs.verify(&other, NOW));
+        assert!(proofs.verify(&other, NOW).is_none());
     }
 
     #[test]
     fn signatures_outside_their_window_are_refused() {
         let w = world();
         let chain = w.chain();
-        for now in [NOW - 7200, NOW + 86401] {
+        for now in [NOW - 3600 - INCEPTION_SKEW - 1, NOW + 86401] {
             assert!(matches!(
                 verify_chain(&chain, "example.org", now, &w.anchors),
                 Err(ProofError::Unsigned(_))
@@ -714,24 +763,74 @@ mod tests {
     }
 
     #[test]
-    fn a_signature_by_a_zone_below_is_refused() {
-        // example.org's key signing org's DS for example.org is not the
-        // parent vouching; nor may a zone sign names outside itself.
+    fn a_signature_by_the_wrong_zone_is_refused() {
         let w = world();
-        let (org, ex) = (name("org."), name("example.org."));
-        let mut recs = w.records(
-            &format!("v=fips1 npub={}", author()),
-            (NOW - 3600, NOW + 86400),
-        );
-        recs.retain(|r| {
-            !(r.name == ex
-                && matches!(&r.data, RData::DNSSEC(DNSSECRData::RRSIG(s)) if s.input().type_covered == RecordType::DS))
-        });
-        let set = ds(&ex, &w.ksk);
-        recs.push(sign(&set, &w.ksk, &ex, NOW - 3600, NOW + 86400));
+        let ex = name("example.org.");
+        let txt = format!("v=fips1 npub={}", author());
+        let window = (NOW - 3600, NOW + 86400);
+        let is_sig_over = |r: &Record, ty: RecordType| matches!(&r.data, RData::DNSSEC(DNSSECRData::RRSIG(s)) if s.input().type_covered == ty);
+        // example.org's own key signing its DS is not its parent vouching.
+        let mut recs = w.records(&txt, window);
+        recs.retain(|r| !(r.name == ex && is_sig_over(r, RecordType::DS)));
+        recs.push(sign(&ds(&ex, &w.ksk), &w.ksk, &ex, window.0, window.1));
         let chain = encode_chain(&recs).unwrap();
         assert!(verify_chain(&chain, "example.org", NOW, &w.anchors).is_err());
-        let _ = org;
+        // A zone may not sign names outside itself: example.org's key over
+        // org's DS, naming example.org as the signer.
+        let org = name("org.");
+        let mut recs = w.records(&txt, window);
+        recs.retain(|r| !(r.name == org && is_sig_over(r, RecordType::DS)));
+        recs.push(sign(&ds(&org, &w.org), &w.zsk, &ex, window.0, window.1));
+        let chain = encode_chain(&recs).unwrap();
+        assert!(verify_chain(&chain, "example.org", NOW, &w.anchors).is_err());
+    }
+
+    #[test]
+    fn a_chain_full_of_forged_signatures_stays_cheap() {
+        // Dozens of RRSIGs with the right key tag but garbage signatures on
+        // every RRset: validation gives up after its budget instead of
+        // multiplying the work per level.
+        let w = world();
+        let window = (NOW - 3600, NOW + 86400);
+        let mut recs = w.records(&format!("v=fips1 npub={}", author()), window);
+        let sigs: Vec<Record> = recs
+            .iter()
+            .filter(|r| matches!(&r.data, RData::DNSSEC(DNSSECRData::RRSIG(_))))
+            .cloned()
+            .collect();
+        for s in &sigs {
+            let RData::DNSSEC(DNSSECRData::RRSIG(rrsig)) = &s.data else {
+                unreachable!()
+            };
+            for i in 0..40u8 {
+                let mut bad = rrsig.sig().to_vec();
+                bad[0] ^= i.wrapping_add(1);
+                let forged = RRSIG::from_sig(rrsig.input().clone(), bad);
+                recs.insert(
+                    0,
+                    Record::from_rdata(
+                        s.name.clone(),
+                        3600,
+                        RData::DNSSEC(DNSSECRData::RRSIG(forged)),
+                    ),
+                );
+            }
+        }
+        let chain = encode_chain(&recs).unwrap();
+        let start = std::time::Instant::now();
+        assert!(verify_chain(&chain, "example.org", NOW, &w.anchors).is_err());
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn a_slightly_slow_clock_is_tolerated_on_inception_only() {
+        let w = world();
+        let chain = w.chain();
+        // Signed an hour before NOW: a clock up to an hour behind that
+        // still accepts it; expiration has no slack.
+        assert!(verify_chain(&chain, "example.org", NOW - 3600 - 1800, &w.anchors).is_ok());
+        assert!(verify_chain(&chain, "example.org", NOW - 3600 - 3601, &w.anchors).is_err());
+        assert!(verify_chain(&chain, "example.org", NOW + 86401, &w.anchors).is_err());
     }
 
     /// Against the live DNS: `PUBDOM_LIVE_DOMAIN=<a signed domain with a
@@ -744,7 +843,7 @@ mod tests {
             .unwrap_or_else(|_| "9.9.9.9".into())
             .parse()
             .unwrap();
-        let chain = build_chain(&domain, upstream, Duration::from_secs(3))
+        let (chain, _) = build_chain(&domain, upstream, Duration::from_secs(3))
             .await
             .unwrap();
         let p = verify_chain(&chain, &domain, crate::now(), &TrustAnchors::default()).unwrap();

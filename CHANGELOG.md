@@ -69,8 +69,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would, and re-publishes before the signatures expire (halfway through the
   remaining validity, every 24 h at the latest). A client with no pin and
   no DNS — only a relay on the mesh — verifies the domain from the proof
-  alone against the built-in root keys, and pins it as `dnssec`; every
-  proven claim becomes a server. `--dns` picks the resolvers the chain is
+  alone against the built-in root keys, and pins it as `dnssec`; the newest
+  proven record decides which claims are servers. If collecting the chain
+  fails, the server keeps the last one while it is valid and retries hourly. `--dns` picks the resolvers the chain is
   collected from, `--no-dnssec-proof` turns it off, `dnssec: false` on the
   client ignores proofs. `fips-pubdom verify` shows each claim's proof.
 

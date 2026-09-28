@@ -100,23 +100,84 @@ struct ProofArgs {
     dns: Vec<IpAddr>,
 }
 
-impl ProofArgs {
-    /// The chain for `domain`, or `None` (disabled, or the zone is not
-    /// signed — the claim is then published without one).
-    async fn chain(&self, domain: &str) -> Option<String> {
-        if self.no_dnssec_proof {
-            return None;
+/// Builds the proofs, remembering the last good chain per domain: a failed
+/// rebuild (a resolver timing out) must not replace a claim whose proof is
+/// still valid with one that has none.
+struct Prover {
+    args: ProofArgs,
+    last: std::sync::Mutex<std::collections::HashMap<String, (String, u64)>>,
+}
+
+/// What a publication carries, and when to try again at the latest.
+struct Proof {
+    chain: Option<String>,
+    expires: Option<u64>,
+    retry: Duration,
+}
+
+impl Prover {
+    fn new(args: ProofArgs) -> Self {
+        Self {
+            args,
+            last: Default::default(),
         }
-        let upstreams = if self.dns.is_empty() {
+    }
+
+    async fn proof(&self, domain: &str) -> Proof {
+        let day = Duration::from_secs(24 * 3600);
+        let hour = Duration::from_secs(3600);
+        if self.args.no_dnssec_proof {
+            return Proof {
+                chain: None,
+                expires: None,
+                retry: day,
+            };
+        }
+        let upstreams = if self.args.dns.is_empty() {
             proof::default_upstreams()
         } else {
-            self.dns.clone()
+            self.args.dns.clone()
         };
+        let now = pubdom_resolve::now();
         match proof::build_chain_any(domain, &upstreams, Duration::from_secs(3)).await {
-            Ok(c) => Some(c),
+            Ok((chain, proven)) => {
+                self.last
+                    .lock()
+                    .unwrap()
+                    .insert(domain.to_string(), (chain.clone(), proven.expires));
+                // Halfway through the remaining validity of the shortest
+                // signature, at least an hour and at most a day from now.
+                let left = proven.expires.saturating_sub(now);
+                Proof {
+                    chain: Some(chain),
+                    expires: Some(proven.expires),
+                    retry: Duration::from_secs(left / 2).clamp(hour, day),
+                }
+            }
             Err(e) => {
-                tracing::warn!(%domain, error = %e, "no DNSSEC proof for the claim; clients that never saw the domain online cannot verify it offline");
-                None
+                let last = self.last.lock().unwrap().get(domain).cloned();
+                match last {
+                    // Still good for another hour: keep publishing it and
+                    // try again in an hour.
+                    Some((chain, expires)) if expires > now + 3600 => {
+                        tracing::warn!(%domain, error = %e, "could not refresh the DNSSEC proof; keeping the last one");
+                        Proof {
+                            chain: Some(chain),
+                            expires: Some(expires),
+                            retry: hour,
+                        }
+                    }
+                    // A zone that had a proof: retry soon. One that never
+                    // had one is most likely unsigned: daily.
+                    had => {
+                        tracing::warn!(%domain, error = %e, "no DNSSEC proof for the claim; clients that never saw the domain online cannot verify it offline");
+                        Proof {
+                            chain: None,
+                            expires: None,
+                            retry: if had.is_some() { hour } else { day },
+                        }
+                    }
+                }
             }
         }
     }
@@ -326,30 +387,15 @@ async fn serve(zones: Arc<Zones>, bind: SocketAddrV6, ttl: u32) -> Result<()> {
 /// Returns when to publish again at the latest: a proof is only as good as
 /// its signatures, so halfway through the remaining validity of the
 /// shortest-lived one, at least an hour and at most 24 h from now.
-async fn publish_all(
-    keys: &Keys,
-    zones: &[Zone],
-    relays: &[String],
-    proof_args: &ProofArgs,
-) -> Duration {
-    let day = Duration::from_secs(24 * 3600);
-    let mut next = day;
+async fn publish_all(keys: &Keys, zones: &[Zone], relays: &[String], prover: &Prover) -> Duration {
+    let mut next = Duration::from_secs(24 * 3600);
     for z in zones {
-        let chain = proof_args.chain(&z.record.domain).await;
-        let expires = chain.as_deref().and_then(|c| {
-            proof::verify_chain(
-                c,
-                &z.record.domain,
-                pubdom_resolve::now(),
-                &Default::default(),
-            )
-            .ok()
-            .map(|p| p.expires)
-        });
-        if let Some(exp) = expires {
-            let left = exp.saturating_sub(pubdom_resolve::now());
-            next = next.min(Duration::from_secs(left / 2).max(Duration::from_secs(3600)));
-        }
+        let Proof {
+            chain,
+            expires,
+            retry,
+        } = prover.proof(&z.record.domain).await;
+        next = next.min(retry);
         match publish_claim(
             keys.clone(),
             relays,
@@ -434,6 +480,7 @@ async fn main() -> Result<()> {
                 .iter()
                 .map(|p| load_zone(p, author))
                 .collect::<Result<_>>()?;
+            let prover = Prover::new(proof);
             if dry_run {
                 for z in &zones {
                     println!(
@@ -442,7 +489,7 @@ async fn main() -> Result<()> {
                             &keys,
                             &z.record.domain,
                             z.port,
-                            proof.chain(&z.record.domain).await.as_deref()
+                            prover.proof(&z.record.domain).await.chain.as_deref()
                         )
                         .map_err(|e| anyhow!(e))?
                     );
@@ -453,7 +500,7 @@ async fn main() -> Result<()> {
                     );
                 }
             } else {
-                publish_all(&keys, &zones, &relay, &proof).await;
+                publish_all(&keys, &zones, &relay, &prover).await;
             }
         }
         Cmd::Serve {
@@ -494,6 +541,7 @@ async fn main() -> Result<()> {
                     bail!("--publish needs at least one --relay");
                 }
                 let (k, zs, rl) = (keys.clone(), zones.clone(), relay.clone());
+                let prover = Prover::new(proof);
                 tokio::spawn(async move {
                     // At start, whenever a zone file changed (the zone record
                     // must say what the server would answer), and before the
@@ -510,7 +558,7 @@ async fn main() -> Result<()> {
                                 .iter()
                                 .map(|z| (&z.record.domain, &z.record.names, z.port)));
                         if changed || std::time::Instant::now() >= due {
-                            let next = publish_all(&k, &now, &rl, &proof).await;
+                            let next = publish_all(&k, &now, &rl, &prover).await;
                             tracing::debug!(in_secs = next.as_secs(), "next publication");
                             last = now;
                             due = std::time::Instant::now() + next;

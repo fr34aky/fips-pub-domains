@@ -131,7 +131,8 @@ async fn main() -> Result<()> {
             println!("txt: {txt:?} (ttl {ttl:?})");
             let scope = match txt {
                 TxtLookup::Hit { .. } => RelayScope::AfterHit,
-                TxtLookup::Miss { .. } => RelayScope::AfterHit, // verify shows everything it can
+                // verify shows everything it can
+                TxtLookup::Miss { .. } | TxtLookup::Disputed => RelayScope::AfterHit,
                 TxtLookup::Unreachable if cli.offline => RelayScope::Offline,
                 TxtLookup::Unreachable => RelayScope::MeshOnly,
             };

@@ -30,6 +30,10 @@ pub enum TxtLookup {
     Miss { method: Method },
     /// No upstream could be asked: offline, or every upstream failed.
     Unreachable,
+    /// Upstreams answered but disagree, and no side validated: no answer
+    /// either way. Online, so not the offline path — no relay is asked and
+    /// nothing unverified is used; pins keep resolving.
+    Disputed,
 }
 
 /// Why a name is not over fips. Logged, never shown as an error to the
@@ -45,6 +49,8 @@ pub enum Reason {
     Unverified,
     /// Offline, several unverifiable claims by different authors.
     Conflict,
+    /// Upstream resolvers disagree on the record (and nothing is pinned).
+    Disputed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,6 +228,14 @@ pub fn decide(input: Input<'_>) -> Outcome {
             Outcome {
                 decision: Decision::NotOverFips(Reason::NoTxt),
                 changes,
+            }
+        }
+
+        TxtLookup::Disputed => {
+            if input.pins.is_empty() {
+                keep(Decision::NotOverFips(Reason::Disputed))
+            } else {
+                keep(Decision::Bound(input.pins.clone()))
             }
         }
 
@@ -475,6 +489,17 @@ mod tests {
         );
         assert_eq!(npubs(&o), vec![npub(1)]);
         assert_eq!(o.changes, vec![PinChange::Forget(npub(3))]);
+    }
+
+    #[test]
+    fn disputed_record_keeps_pins_and_never_goes_offline() {
+        // Resolvers disagree: pins resolve unchanged, and without one the
+        // domain is legacy — never the unverified offline path, even opted in.
+        let o = run(vec![pin(1, Method::Dns)], TxtLookup::Disputed, &[], true);
+        assert_eq!(npubs(&o), vec![npub(1)]);
+        assert!(o.changes.is_empty());
+        let o = run(vec![], TxtLookup::Disputed, &[claim(2, 5)], true);
+        assert_eq!(o.decision, Decision::NotOverFips(Reason::Disputed));
     }
 
     #[test]

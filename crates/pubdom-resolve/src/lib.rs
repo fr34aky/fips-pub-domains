@@ -32,3 +32,20 @@ pub fn now() -> u64 {
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
+
+/// After a failed `recv_from`/`accept` in a serving loop: a per-peer error
+/// (a reset, an aborted handshake — Windows reports a closed client port on
+/// the next UDP receive) is retried at once; anything else (EMFILE, a
+/// vanished interface) is likely to persist, so the loop pauses instead of
+/// spinning.
+pub async fn after_socket_error(e: &std::io::Error, what: &str) {
+    use std::io::ErrorKind::*;
+    match e.kind() {
+        ConnectionReset | ConnectionAborted | ConnectionRefused | Interrupted | WouldBlock
+        | TimedOut => tracing::debug!(error = %e, "{what} failed"),
+        _ => {
+            tracing::warn!(error = %e, "{what} failed");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+}

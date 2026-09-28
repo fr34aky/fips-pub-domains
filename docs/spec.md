@@ -213,9 +213,9 @@ claim for a public suffix (`ch`, `co.uk`) — use a bundled Public Suffix List.
   server, and it applies whether or not the claim of the server the record
   names instead reached us — else a retired key would stay pinned and
   answer the next offline lookup.
-- **Resolvers that disagree** on the record: a DNSSEC-validated answer
-  wins over any number of unvalidated ones; otherwise the answer most of
-  them gave counts, and a tie is *disputed* — pins keep resolving, an
+- **Resolvers that disagree** on the record: validated answers — a
+  validated record, else a validated denial — win over any number of
+  unvalidated ones; among the rest the answer most of them gave counts, and a tie is *disputed* — pins keep resolving, an
   unpinned domain stays legacy for a minute and is asked again. Disputed
   is not the offline path: no relay is asked and nothing unverified is
   used. List order must never choose between an honest and a poisoned

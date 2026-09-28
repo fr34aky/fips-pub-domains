@@ -7,11 +7,12 @@
 //! - `Dns` when two or more upstreams returned the same set of npubs;
 //! - `DnsSingle` when only one upstream was available or answered.
 //!
-//! Upstreams naming different npubs: a validated answer wins over any
-//! number of unvalidated ones (they disagree with a signed zone, so they are
-//! forged or stale); otherwise the largest group wins, and a tie is
-//! `Disputed` — else list order alone would pick between an honest and a
-//! poisoned resolver.
+//! Upstreams that disagree: validated answers — a validated record, else a
+//! validated denial — win over any number of unvalidated ones (those
+//! contradict a signed zone, so they are forged or stale). Among the
+//! remaining candidates the largest group wins, and a tie is `Disputed` —
+//! else list order alone would pick between an honest and a poisoned
+//! resolver.
 //!
 //! A miss is a miss only if every upstream that answered said so; an
 //! upstream that failed (timeout, SERVFAIL) is simply not counted, and if
@@ -111,7 +112,11 @@ impl TxtVerifier {
             }
         });
         let answers: Vec<One> = futures::future::join_all(futs).await;
-        combine(answers)
+        let out = combine(&answers);
+        if out.0 == TxtLookup::Disputed {
+            tracing::warn!(%domain, ?answers, "upstream resolvers disagree on the _fips-dns record; not using it");
+        }
+        out
     }
 
     async fn one(r: &TokioResolver, name: &str) -> One {
@@ -159,14 +164,14 @@ impl TxtVerifier {
     }
 }
 
-fn combine(answers: Vec<One>) -> (TxtLookup, Option<u32>) {
+fn combine(answers: &[One]) -> (TxtLookup, Option<u32>) {
     let answered = answers.iter().filter(|a| !matches!(a, One::Failed)).count();
     if answered == 0 {
         return (TxtLookup::Unreachable, None);
     }
-    // Group hits by their set of npubs; the largest group is the answer.
+    // Group hits by their set of npubs.
     let mut groups: Vec<(Vec<Npub>, Vec<&One>)> = Vec::new();
-    for a in &answers {
+    for a in answers {
         if let One::Hit { records, .. } = a {
             let mut key: Vec<Npub> = records.iter().map(|r| r.npub).collect();
             key.sort();
@@ -178,41 +183,45 @@ fn combine(answers: Vec<One>) -> (TxtLookup, Option<u32>) {
         }
     }
     let is_secure = |v: &Vec<&One>| v.iter().any(|a| matches!(a, One::Hit { secure: true, .. }));
-    let secure: Vec<&(Vec<Npub>, Vec<&One>)> =
-        groups.iter().filter(|(_, v)| is_secure(v)).collect();
-    let top = groups.iter().map(|(_, v)| v.len()).max().unwrap_or(0);
-    let tied: Vec<&(Vec<Npub>, Vec<&One>)> =
-        groups.iter().filter(|(_, v)| v.len() == top).collect();
-    let best = match (secure.as_slice(), tied.as_slice()) {
-        ([one], _) => Some(*one),
-        ([], []) => None,
-        ([], [one]) => Some(*one),
-        _ => {
-            tracing::warn!("upstream resolvers disagree on the _fips-dns record; not using it");
-            return (TxtLookup::Disputed, None);
-        }
+    let secure_miss = answers
+        .iter()
+        .any(|a| matches!(a, One::Miss { secure: true }));
+    // Validated answers first: an unvalidated one that contradicts a signed
+    // zone is forged or stale. Among the candidates the largest group wins;
+    // a tie is disputed.
+    let candidates: Vec<&(Vec<Npub>, Vec<&One>)> = if groups.iter().any(|(_, v)| is_secure(v)) {
+        groups.iter().filter(|(_, v)| is_secure(v)).collect()
+    } else if secure_miss {
+        return (
+            TxtLookup::Miss {
+                method: Method::Dnssec,
+            },
+            None,
+        );
+    } else {
+        groups.iter().collect()
     };
-    let Some((_, best)) = best else {
+    let top = candidates.iter().map(|(_, v)| v.len()).max().unwrap_or(0);
+    let tied: Vec<&&(Vec<Npub>, Vec<&One>)> =
+        candidates.iter().filter(|(_, v)| v.len() == top).collect();
+    let best = match tied.as_slice() {
+        [] => None,
+        [one] => Some(&one.1),
+        _ => return (TxtLookup::Disputed, None),
+    };
+    let Some(best) = best else {
         let misses = answers
             .iter()
             .filter(|a| matches!(a, One::Miss { .. }))
             .count();
-        let secure = answers
-            .iter()
-            .any(|a| matches!(a, One::Miss { secure: true }));
-        let method = if secure {
-            Method::Dnssec
-        } else if misses >= 2 {
+        let method = if misses >= 2 {
             Method::Dns
         } else {
             Method::DnsSingle
         };
         return (TxtLookup::Miss { method }, None);
     };
-    let secure = best
-        .iter()
-        .any(|a| matches!(a, One::Hit { secure: true, .. }));
-    let method = if secure {
+    let method = if is_secure(best) {
         Method::Dnssec
     } else if best.len() >= 2 {
         Method::Dns
@@ -258,27 +267,23 @@ mod tests {
     #[test]
     fn combine_counts_agreement() {
         assert_eq!(
-            combine(vec![One::Failed, One::Failed]).0,
+            combine(&[One::Failed, One::Failed]).0,
             TxtLookup::Unreachable
         );
         assert_eq!(
-            combine(vec![One::Miss { secure: false }, One::Failed]).0,
+            combine(&[One::Miss { secure: false }, One::Failed]).0,
             TxtLookup::Miss {
                 method: Method::DnsSingle
             }
         );
         assert_eq!(
-            combine(vec![
-                One::Miss { secure: false },
-                One::Miss { secure: false }
-            ])
-            .0,
+            combine(&[One::Miss { secure: false }, One::Miss { secure: false }]).0,
             TxtLookup::Miss {
                 method: Method::Dns
             }
         );
         assert_eq!(
-            combine(vec![One::Miss { secure: true }]).0,
+            combine(&[One::Miss { secure: true }]).0,
             TxtLookup::Miss {
                 method: Method::Dnssec
             }
@@ -292,11 +297,11 @@ mod tests {
             .len(),
             2
         );
-        match combine(vec![hit(&[1], false), One::Failed]).0 {
+        match combine(&[hit(&[1], false), One::Failed]).0 {
             TxtLookup::Hit { method, .. } => assert_eq!(method, Method::DnsSingle),
             other => panic!("{other:?}"),
         }
-        match combine(vec![
+        match combine(&[
             hit(&[1], false),
             hit(&[1], false),
             One::Miss { secure: false },
@@ -309,12 +314,12 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        match combine(vec![hit(&[1], true)]).0 {
+        match combine(&[hit(&[1], true)]).0 {
             TxtLookup::Hit { method, .. } => assert_eq!(method, Method::Dnssec),
             other => panic!("{other:?}"),
         }
         // Two resolvers disagree, a third sides with one of them.
-        match combine(vec![hit(&[1], false), hit(&[2], false), hit(&[2], false)]).0 {
+        match combine(&[hit(&[1], false), hit(&[2], false), hit(&[2], false)]).0 {
             TxtLookup::Hit { records, method } => {
                 assert_eq!(records[0].npub, Npub::from_bytes([2; 32]));
                 assert_eq!(method, Method::Dns);
@@ -326,10 +331,10 @@ mod tests {
             vec![hit(&[1], false), hit(&[2], false)],
             vec![hit(&[2], false), hit(&[1], false)],
         ] {
-            assert_eq!(combine(order).0, TxtLookup::Disputed);
+            assert_eq!(combine(&order).0, TxtLookup::Disputed);
         }
         // …unless one side validated — which wins even when outnumbered.
-        match combine(vec![hit(&[1], false), hit(&[1], false), hit(&[2], true)]).0 {
+        match combine(&[hit(&[1], false), hit(&[1], false), hit(&[2], true)]).0 {
             TxtLookup::Hit { records, method } => {
                 assert_eq!(records[0].npub, Npub::from_bytes([2; 32]));
                 assert_eq!(method, Method::Dnssec);
@@ -337,10 +342,25 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(
-            combine(vec![hit(&[1], true), hit(&[2], true)]).0,
+            combine(&[hit(&[1], true), hit(&[2], true)]).0,
             TxtLookup::Disputed
         );
-        match combine(vec![hit(&[2], true), hit(&[1], false)]).0 {
+        // Several validated answers: the majority among them (a stale but
+        // validly signed cache during a rollover).
+        match combine(&[hit(&[1], true), hit(&[2], true), hit(&[2], true)]).0 {
+            TxtLookup::Hit { records, .. } => {
+                assert_eq!(records[0].npub, Npub::from_bytes([2; 32]))
+            }
+            other => panic!("{other:?}"),
+        }
+        // A validated denial beats an unvalidated hit.
+        assert_eq!(
+            combine(&[One::Miss { secure: true }, hit(&[1], false)]).0,
+            TxtLookup::Miss {
+                method: Method::Dnssec
+            }
+        );
+        match combine(&[hit(&[2], true), hit(&[1], false)]).0 {
             TxtLookup::Hit { records, method } => {
                 assert_eq!(records[0].npub, Npub::from_bytes([2; 32]));
                 assert_eq!(method, Method::Dnssec);
@@ -350,7 +370,7 @@ mod tests {
         // Hits outrank misses even when misses are more numerous: a stale
         // negative cache somewhere must not hide a fresh record.
         assert!(matches!(
-            combine(vec![
+            combine(&[
                 One::Miss { secure: false },
                 One::Miss { secure: false },
                 hit(&[1], false)

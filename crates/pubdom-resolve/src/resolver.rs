@@ -135,7 +135,8 @@ const REACHABLE_TTL: Duration = Duration::from_secs(120);
 
 #[derive(Clone)]
 enum CachedStep3 {
-    Node(Npub),
+    /// The node, and whether it was the server that gave the answer.
+    Node(Npub, bool),
     NotOverFips,
 }
 
@@ -380,24 +381,29 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             }
         }
         let (cached, ttl) = match outcome.decision {
-            _ if disputed => {
-                let cached = match outcome.decision {
-                    Decision::Bound(b) => CachedDecision::Use(b, false),
-                    _ => CachedDecision::NotOverFips,
-                };
-                (cached, cache::TXT_DISPUTED_TTL)
-            }
             Decision::Bound(b) => {
-                let ttl = txt_ttl
-                    .map(|t| Duration::from_secs(t.into()).min(cache::TXT_HIT_MAX_TTL))
-                    .unwrap_or(cache::CLAIM_TTL);
+                let ttl = if disputed {
+                    cache::TXT_DISPUTED_TTL
+                } else {
+                    txt_ttl
+                        .map(|t| Duration::from_secs(t.into()).min(cache::TXT_HIT_MAX_TTL))
+                        .unwrap_or(cache::CLAIM_TTL)
+                };
                 (CachedDecision::Use(b, false), ttl)
             }
             Decision::Unverified(b) => (CachedDecision::Use(vec![b], true), cache::RELAY_MISS_TTL),
             Decision::NotOverFips(reason) => {
-                tracing::debug!(domain = d, ?reason, "not over fips");
+                if reason == Reason::Disputed {
+                    tracing::info!(
+                        domain = d,
+                        "not over fips: upstream resolvers disagree on the TXT record"
+                    );
+                } else {
+                    tracing::debug!(domain = d, ?reason, "not over fips");
+                }
                 let ttl = match reason {
                     Reason::NoTxt | Reason::PublicSuffix => cache::TXT_MISS_TTL,
+                    Reason::Disputed => cache::TXT_DISPUTED_TTL,
                     _ if is_unreachable => cache::RELAY_MISS_TTL,
                     _ => cache::CLAIM_TTL,
                 };
@@ -437,13 +443,17 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
 
     async fn step3_uncached(&self, q: &Query, servers: &[Binding]) -> Option<Npub> {
         let now = crate::now();
-        if let Some(cached) = self.step3.get(&q.name, now) {
-            return match cached {
-                // A cached answer names a node; the echo rule applies — a
-                // server that answered for itself seeded `reachable`.
-                CachedStep3::Node(n) => self.deliverable(q, n, false).await,
-                CachedStep3::NotOverFips => None,
-            };
+        match self.step3.get(&q.name, now) {
+            // Another node: the echo rule applies.
+            Some(CachedStep3::Node(n, false)) => return self.deliverable(q, n, false).await,
+            // The server answered for itself, which proved it reachable for
+            // REACHABLE_TTL. Past that, ask it again rather than ping it —
+            // the answer is the proof, and servers may filter echo.
+            Some(CachedStep3::Node(n, true)) if self.reachable.get(&n, now) == Some(true) => {
+                return self.deliverable(q, n, true).await;
+            }
+            Some(CachedStep3::NotOverFips) => return None,
+            Some(CachedStep3::Node(_, true)) | None => {}
         }
         // Ask the servers in pin order, skipping those in their backoff
         // window (spec §5.3): the primary stays the primary while it
@@ -481,7 +491,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
                         self.reachable.put(npub, true, REACHABLE_TTL, now);
                     }
                     self.step3
-                        .put(q.name.clone(), CachedStep3::Node(npub), ttl, now);
+                        .put(q.name.clone(), CachedStep3::Node(npub, proven), ttl, now);
                     return self.deliverable(q, npub, proven).await;
                 }
                 Ok(Step3Outcome::NotOverFips) => {
@@ -551,6 +561,9 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
     fn mark_down(&self, npub: Npub, now: u64) {
         // The streak is forgotten once the entry expires: a server that has
         // not failed for a whole maximum window starts over.
+        // Whatever its last answer proved no longer holds: the zone-record
+        // fallback must echo it like any other target.
+        self.reachable.remove(&npub);
         let prev = self.down.get(&npub, now);
         if prev.is_some_and(|d| now < d.retry_at) {
             // Already marked for this outage by a concurrent lookup of
@@ -1351,6 +1364,17 @@ mod tests {
             1,
             "A came from the cache"
         );
+        // Once that proof has lapsed, the server is asked again — not
+        // pinged — and answers.
+        r.reachable.remove(&npub(1));
+        let q = build_query(3, "www.example.org", QTYPE_A).unwrap();
+        assert!(matches!(r.lookup(&q).await, LookupResult::Answer(_)));
+        assert!(mesh.echoes.lock().unwrap().is_empty());
+        assert_eq!(mesh.queries.lock().unwrap().len(), 2, "re-asked");
+        // A server that fails loses its proof: the zone-record fallback
+        // must echo it.
+        r.mark_down(npub(1), crate::now());
+        assert_eq!(r.reachable.get(&npub(1), crate::now()), None);
     }
 
     #[tokio::test]

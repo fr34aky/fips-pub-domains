@@ -6,9 +6,12 @@
   the mesh lookup with `CNAME <npub>.fips`, unverified bindings refused
   (opt-in marker offline).
 - `fips-pubdom-server`, `fips-pubdomd` (Linux, systemd-resolved),
-  `fips-pubdom`; mesh relays for offline discovery on desktops.
+  `fips-pubdom`; mesh relays for offline discovery.
 - fips2go: resolver in the VPN's DNS proxy, UDP over smoltcp, Settings
-  switch (PR open; device-verified: pinned, first-visit discovery, offline).
+  switch (#55, #58); mesh relays reached through a loopback proxy over the
+  in-process TCP stack, configured in Settings (#59). Device-verified:
+  pinned, first-visit discovery, offline, and — offline with no pins — a
+  domain verified from its claim's DNSSEC proof via a relay on the mesh.
 - Live tests through level 5 ([testing.md](testing.md)).
 - Zone records (kind 37199): published by the server with the claim, used
   by the resolver when the server does not answer.
@@ -22,24 +25,23 @@
 
 ## Next
 
-1. **fips2go PR review and merge** (#55). Every path is device-verified;
-   what the phone lacks is discovery through relays inside the mesh (item
-   5).
-2. **Registration and the NIP** — submitted 2026-09-28:
+1. **Registration and the NIP** — submitted 2026-09-28:
    [registry-of-kinds #16](https://github.com/nostr-protocol/registry-of-kinds/pull/16)
    and [nips #2487](https://github.com/nostr-protocol/nips/pull/2487)
    (NIP-DB). Until merged, the kind numbers are provisional; if others are
    assigned, `pubdom-core::KIND_*` and the docs follow.
-3. **Attestations** (kind 37198) and the trust setting *k*; default
+2. **Attestations** (kind 37198) and the trust setting *k*; default
    witnesses = the user's synced trusted nodes, opt-in.
-4. **Daemon backends**: dnsmasq / NetworkManager, plain `resolv.conf`,
+3. **Daemon backends**: dnsmasq / NetworkManager, plain `resolv.conf`,
    then macOS (launchd + `networksetup`) and Windows (service + adapter
    DNS); restricted per-domain mode on all three; OpenWrt and pfSense
    packaging. Network-change watchers instead of the 30 s poll.
-5. **Phone gaps**: TCP fallback for step 3 over the smoltcp stack; a way to
-   reach mesh relays from the app (a websocket client over smoltcp, or a
-   local proxy in the shim) so offline discovery works there too; an
-   explicit online flag from the VpnService.
+4. **Phone gaps**: TCP fallback for step 3 over the smoltcp stack; an
+   explicit online flag from the VpnService; a `dnssec` switch in the app;
+   upstream ports kept for the TXT verifier. Offline, a first lookup that
+   has to wait for the TXT timeout and a mesh relay overruns the 3.5 s
+   budget and falls back once; it finishes in the background, so the
+   retry resolves.
 
 ## Known gaps and interactions
 
@@ -58,7 +60,6 @@
   lookup (30 s TTL).
 - On systemd-resolved, a link search domain equal to a bound domain shadows
   the daemon ([daemon.md](daemon.md), Troubleshooting).
-- Mesh relays are desktop-only; on Android offline means pinned domains.
 - When DNS fails while the node believes it is online (every upstream
   timing out, or answers failing DNSSEC validation — a router stripping
   DNSSEC records does that for every zone under a signed TLD, unsigned

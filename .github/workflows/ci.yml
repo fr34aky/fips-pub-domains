@@ -16,7 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: |
-          if grep -rn 'cfg(target_os\|cfg(unix\|cfg(windows' crates/pubdom-core crates/pubdom-resolve; then
+          # Real cfg attributes only: the rule is stated in comments too.
+          if grep -rnE --include='*.rs' '#\[cfg(_attr)?\(.*(target_os|unix|windows)' crates/pubdom-core crates/pubdom-resolve; then
             echo "platform-specific code in a library crate" >&2; exit 1
           fi
       - uses: dtolnay/rust-toolchain@stable

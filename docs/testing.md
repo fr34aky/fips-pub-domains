@@ -280,6 +280,35 @@ was unreachable — four now. A CI debug APK is signed with a throwaway key
 per run, so device installs are re-signed with one local key to update in
 place.
 
+**A name bound to a third node** (`relay.example.org`, the zone pointing
+it at the mesh relay's own node rather than the server): the phone showed
+the hoster's parking page every time, while the daemon resolved it. The
+shim's log showed the lookup *succeeding* — both `public name answered
+over fips` lines — about 2.8 s after the query, against the 3.5 s budget:
+2 s of it was the claim fetch waiting out its timeout for a relay in the
+pool that never sent EOSE. One cold lookup had overrun, the proxy forwarded
+the legacy answer, and the hoster's wildcard made that a real address with
+a 300 s TTL that Android's resolver kept; the finished lookup's cached
+decision was never asked for. Fixed in two places (fips-pub-domains #11,
+fips2go #60): the claim fetch returns 750 ms after the first relay that
+delivered a claim, and a legacy answer forwarded during an overrun has its
+TTLs capped at 5 s. Re-tested on the device from a fresh start (caches
+empty), the first lookup:
+
+```
+12:27:04.70  intent: open http://relay.example.org/?v=…
+12:27:06.71  Session established (initiator, XK) src=npub1…   # step 3 to the server
+12:27:06.80  public name answered over fips qname=relay.example.org qtype=28
+12:27:06.80  public name answered over fips qname=relay.example.org qtype=1
+12:27:07.82  Timeout reached for subscription, auto-closing   # the quiet relay, after the answer
+```
+
+About 2 s from the intent, so under 1.8 s for the lookup itself, and the
+browser showed the relay's own page over the mesh at the first attempt.
+Note for anyone reading the device: the browser's own host cache
+(Chromium, 60 s) can show the legacy page once more after an overrun; the
+proxy's log, not the page, says what was answered.
+
 ## Level 5b — the phone, offline, a domain never seen
 
 fips2go with a mesh relay configured (`ws://npub1….fips:80`), its pin file

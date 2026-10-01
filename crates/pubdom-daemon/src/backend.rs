@@ -691,12 +691,19 @@ pub fn teardown(
     Ok((backend, notes))
 }
 
-#[cfg(test)]
+// The backends are Linux's; their tests run there. On macOS the temporary
+// directory raced between parallel tests on CI (a file written right after
+// its directory was created came back ENOENT), and a Windows run of
+// resolv.conf handling proves nothing about Windows.
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::collections::HashSet;
     use std::rc::Rc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
 
     /// A host whose `systemctl is-active` answers from `active`; every
     /// other command succeeds and is recorded.
@@ -723,8 +730,9 @@ mod tests {
 
     fn tmp() -> PathBuf {
         let d = std::env::temp_dir().join(format!(
-            "pubdom-backend-{}-{}",
+            "pubdom-backend-{}-{}-{}",
             std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()

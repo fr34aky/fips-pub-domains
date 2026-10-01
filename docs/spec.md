@@ -126,7 +126,10 @@ Internet access.
   never fetched, let alone believed. The client counts the distinct
   witnesses that name a server and uses it once there are *k* (default 2;
   0 turns attestations off). It vouches only for keys that claim the domain
-  themselves: the claim says which port the server serves.
+  themselves: the claim says which port the server serves. A key that
+  claims the domain is no witness for it, neither for itself nor for a
+  sibling server: a witness is a third party, else a claim could be its
+  own proof or two claimants could vouch for each other.
 - Attestations are consulted offline only, for a domain with no pin and no
   usable proof (§5.1). A binding taken on attestations is pinned as
   `attested`, the weakest method, so any later online verification

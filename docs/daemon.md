@@ -12,9 +12,16 @@ Building and installing — binaries, unit, `sudo fips-pubdomd setup`,
 enabling the service — is one procedure, kept in one place:
 [install.md](install.md). This section explains the OS integration that
 `setup` performs. It detects which resolver arrangement the machine runs
-(`--backend auto`, the default) and records its choice in
-`/etc/fips-pubdom/backend`, so `sudo fips-pubdomd teardown` undoes the
-right thing without being told; `--backend` names one explicitly.
+(`--backend auto`, the default: by the services that are active, not
+by files they may have left behind) and records its choice in
+`/etc/fips-pubdom/backend` before touching anything, so `sudo
+fips-pubdomd teardown` undoes the right thing without being told — after
+a `setup` that failed halfway too; `--backend` names one explicitly. A
+second `setup` is refused until `teardown` has run, so the backup of the
+original `resolv.conf` is never overwritten by our own. An installation
+set up before the record existed is torn down by its resolved drop-in.
+On the backends that snapshot upstreams, an `upstreams` list in the
+config is used instead of a snapshot.
 
 **systemd-resolved** (`resolved`; Ubuntu, Fedora, Arch, Debian with
 resolved). `setup` writes `/etc/systemd/resolved.conf.d/zz-fips-pubdom.conf`:
@@ -50,12 +57,15 @@ resolv.conf cannot carry a port. Restart the daemon after `setup`.
 
 **Standalone dnsmasq** (`dnsmasq`; a server whose local resolver is dnsmasq
 reading `resolv-file`). `setup` snapshots the servers of dnsmasq's resolv
-file into `/etc/fips-pubdom/upstreams.conf`, writes
+file (`resolv-file=` from `dnsmasq.conf` or `dnsmasq.d/`, else
+`/etc/resolv.conf`) into `/etc/fips-pubdom/upstreams.conf`, writes
 `/etc/dnsmasq.d/fips-pubdom.conf` with `no-resolv` and `server=::1#5356` /
 `server=127.0.0.1#5356`, and restarts dnsmasq. The daemon keeps port 5356.
-The snapshot is static: run `setup` again if the machine's resolvers
-change, and remove other `server=` lines from dnsmasq's configuration,
-which it would otherwise keep using.
+The snapshot is static: run `teardown` and `setup` again if the machine's
+resolvers change, and remove other `server=` lines from dnsmasq's
+configuration, which it would otherwise keep using. A dnsmasq that
+already runs with `no-resolv` has its servers in `server=` lines, which
+cannot be snapshotted: give the daemon `upstreams` in the config.
 
 **Plain resolv.conf** (`resolv-conf`; nothing manages the file). `setup`
 snapshots its `nameserver` lines into `/etc/fips-pubdom/upstreams.conf`,

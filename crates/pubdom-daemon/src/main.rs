@@ -129,7 +129,17 @@ async fn handle(state: &Arc<State>, query: Vec<u8>) -> Option<Vec<u8>> {
 async fn run(cfg: Config) -> Result<()> {
     let upstreams = cfg.current_upstreams();
     tracing::info!(?upstreams, listen = ?cfg.listen, pins = %cfg.pins.display(), "starting");
-    let shadowed = cfg.link_search_domains();
+    // Only resolved routes a link's search domain past a global server;
+    // glibc and dnsmasq send every name to the daemon.
+    let on_resolved = cfg
+        .upstreams_from
+        .as_deref()
+        .is_some_and(|p| p.starts_with("/run/systemd/resolve"));
+    let shadowed = if on_resolved {
+        cfg.link_search_domains()
+    } else {
+        Vec::new()
+    };
     if !shadowed.is_empty() {
         tracing::warn!(
             domains = ?shadowed,

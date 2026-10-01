@@ -112,19 +112,10 @@ impl Config {
             return Vec::new();
         };
         let own: Vec<IpAddr> = self.listen.iter().map(|a| a.ip()).collect();
-        let mut out: Vec<IpAddr> = Vec::new();
-        for ip in text
-            .lines()
-            .filter_map(|l| l.strip_prefix("nameserver"))
-            .filter_map(|rest| rest.split_whitespace().next())
-            .filter_map(|s| s.split('%').next().unwrap_or(s).parse::<IpAddr>().ok())
+        nameservers(&text)
+            .into_iter()
             .filter(|ip| !own.contains(ip) && !ip.is_loopback())
-        {
-            if !out.contains(&ip) {
-                out.push(ip);
-            }
-        }
-        out
+            .collect()
     }
 
     /// Search domains the system's links carry (the `search` line of
@@ -181,6 +172,24 @@ pub type ProdResolver = Resolver<MaybeTxt, RelayClient>;
 /// resolvers right now) and can be swapped when the upstreams change — a
 /// laptop that moves networks must verify against the new resolvers, not
 /// keep asking the old ones until they time out.
+/// The `nameserver` entries of a resolv.conf, in order, each once; a
+/// `%scope` suffix dropped. Loopback and the daemon's own addresses are
+/// the caller's business.
+pub fn nameservers(text: &str) -> Vec<IpAddr> {
+    let mut out: Vec<IpAddr> = Vec::new();
+    for ip in text
+        .lines()
+        .filter_map(|l| l.trim_start().strip_prefix("nameserver"))
+        .filter_map(|rest| rest.split_whitespace().next())
+        .filter_map(|s| s.split('%').next().unwrap_or(s).parse::<IpAddr>().ok())
+    {
+        if !out.contains(&ip) {
+            out.push(ip);
+        }
+    }
+    out
+}
+
 pub struct MaybeTxt {
     inner: std::sync::Mutex<Option<Arc<TxtVerifier>>>,
     dnssec: bool,
@@ -253,6 +262,16 @@ mod tests {
         let cfg = Config::default();
         assert!(cfg.current_upstreams().is_empty());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn nameservers_parses_indented_scoped_and_repeated_lines_once() {
+        let got = nameservers(
+            "# c\n  nameserver 10.0.0.1\nnameserver fe80::1%eth0\nnameserver 10.0.0.1\nsearch lan\n",
+        );
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0], "10.0.0.1".parse::<IpAddr>().unwrap());
+        assert_eq!(got[1], "fe80::1".parse::<IpAddr>().unwrap());
     }
 
     #[test]

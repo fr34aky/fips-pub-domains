@@ -5,13 +5,15 @@
 //! temporary directory by the tests below; production uses `/` and the
 //! real `systemctl`/`nmcli`.
 //!
-//! The backend `setup` chose is recorded in `/etc/fips-pubdom/backend`, so
-//! `teardown` undoes the right thing without being told.
+//! The backend `setup` chose is recorded in `/etc/fips-pubdom/backend`
+//! before anything else is touched, so `teardown` undoes the right thing
+//! without being told — after a failed `setup` too.
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::ValueEnum;
 use pubdom_resolve::Config;
-use std::net::IpAddr;
+use pubdom_resolve::config::nameservers;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 /// Sorts after fips's own drop-in (`fips-dns-setup` writes one named after
@@ -22,13 +24,12 @@ const RESOLVED_DROPIN: &str = "etc/systemd/resolved.conf.d/zz-fips-pubdom.conf";
 const RESOLVED_UPSTREAMS: &str = "run/systemd/resolve/resolv.conf";
 const NM_DROPIN: &str = "etc/NetworkManager/conf.d/zz-fips-pubdom.conf";
 const NM_UPSTREAMS: &str = "run/NetworkManager/resolv.conf";
-const NM_RUNDIR: &str = "run/NetworkManager";
 const DNSMASQ_DROPIN: &str = "etc/dnsmasq.d/fips-pubdom.conf";
 const DNSMASQ_CONF: &str = "etc/dnsmasq.conf";
 const DNSMASQ_DIR: &str = "etc/dnsmasq.d";
 const RESOLV_CONF: &str = "etc/resolv.conf";
-/// Where `setup` keeps what it replaced and what it snapshotted (under
-/// /etc/fips-pubdom, next to the config).
+/// What `setup` keeps, under /etc/fips-pubdom next to the config: its
+/// backend, what it replaced, what it snapshotted.
 const STATE_BACKEND: &str = "etc/fips-pubdom/backend";
 const RESOLV_BACKUP: &str = "etc/fips-pubdom/resolv.conf.bak";
 const UPSTREAMS_SNAPSHOT: &str = "etc/fips-pubdom/upstreams.conf";
@@ -156,31 +157,38 @@ impl Host {
         }
         Err(last.unwrap_or_else(|| anyhow!("no command to run")))
     }
+
+    /// Is the service running now? Its runtime files outlive it
+    /// (`/run/systemd/resolve` survives a stopped resolved), so the files
+    /// alone would hand a machine that switched resolvers to the old one.
+    fn active(&self, service: &str) -> bool {
+        (self.run)("systemctl", &["is-active", "--quiet", service]).is_ok()
+    }
+
+    fn is_symlink(&self, rel: &str) -> bool {
+        self.path(rel)
+            .symlink_metadata()
+            .map(|m| m.is_symlink())
+            .unwrap_or(false)
+    }
 }
 
-/// What the machine runs, from the files its resolver leaves behind.
+/// What the machine runs, from its services and the files they leave.
 pub fn detect(host: &Host) -> Result<Backend> {
-    if host.exists(RESOLVED_UPSTREAMS) {
+    if host.exists(RESOLVED_UPSTREAMS) && host.active("systemd-resolved") {
         return Ok(Backend::Resolved);
     }
-    if host.exists(NM_RUNDIR) {
+    if host.active("NetworkManager") {
         return Ok(Backend::NetworkManager);
     }
-    if host.exists(DNSMASQ_DIR)
-        && (host.exists("run/dnsmasq/dnsmasq.pid") || host.exists("var/run/dnsmasq.pid"))
-    {
+    if host.exists(DNSMASQ_DIR) && host.active("dnsmasq") {
         return Ok(Backend::Dnsmasq);
     }
-    let rc = host.path(RESOLV_CONF);
-    if rc
-        .symlink_metadata()
-        .map(|m| m.is_symlink())
-        .unwrap_or(false)
-    {
+    if host.is_symlink(RESOLV_CONF) {
         bail!(
             "{} is a symlink to {}: another tool manages it, and no supported resolver was found running",
-            rc.display(),
-            std::fs::read_link(&rc)
+            host.path(RESOLV_CONF).display(),
+            std::fs::read_link(host.path(RESOLV_CONF))
                 .map(|t| t.display().to_string())
                 .unwrap_or_default()
         );
@@ -189,45 +197,24 @@ pub fn detect(host: &Host) -> Result<Backend> {
 }
 
 /// Port 53 on loopback, for the backends where the OS cannot name a port.
-fn port53() -> Vec<std::net::SocketAddr> {
+fn port53() -> Vec<SocketAddr> {
     vec!["[::1]:53".parse().unwrap(), "127.0.0.1:53".parse().unwrap()]
 }
 
 fn listen_spec(cfg: &Config) -> String {
     cfg.listen
         .iter()
-        .map(|a| match a.ip() {
-            IpAddr::V6(v6) => format!("[{v6}]:{}", a.port()),
-            IpAddr::V4(v4) => format!("{v4}:{}", a.port()),
-        })
+        .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(" ")
 }
 
-/// The `nameserver` entries of a resolv.conf, minus loopback (ourselves,
-/// or a local forwarder about to be replaced).
-fn nameservers(text: &str) -> Vec<IpAddr> {
-    let mut out = Vec::new();
-    for ip in text
-        .lines()
-        .filter_map(|l| l.trim_start().strip_prefix("nameserver"))
-        .filter_map(|rest| rest.split_whitespace().next())
-        .filter_map(|s| s.split('%').next().unwrap_or(s).parse::<IpAddr>().ok())
-        .filter(|ip| !ip.is_loopback())
-    {
-        if !out.contains(&ip) {
-            out.push(ip);
-        }
-    }
-    out
-}
-
-/// A resolv.conf naming `servers`, keeping `search`/`domain`/`options`
-/// lines from `original`.
-fn resolv_conf_text(servers: &[String], original: &str, note: &str) -> String {
+/// A resolv.conf naming the daemon's `listen` addresses, keeping the
+/// `search`/`domain`/`options` lines of `original`.
+fn resolv_conf_text(cfg: &Config, original: &str, note: &str) -> String {
     let mut s = format!("# Managed by fips-pubdomd setup ({note}).\n");
-    for sv in servers {
-        s.push_str(&format!("nameserver {sv}\n"));
+    for a in &cfg.listen {
+        s.push_str(&format!("nameserver {}\n", a.ip()));
     }
     for line in original.lines() {
         let t = line.trim_start();
@@ -239,14 +226,21 @@ fn resolv_conf_text(servers: &[String], original: &str, note: &str) -> String {
     s
 }
 
-/// Snapshot `source`'s servers into the daemon's own upstreams file, for
-/// the backends whose resolver will be pointed at us (its file would then
-/// name only ourselves).
-fn snapshot_upstreams(host: &Host, source: &str) -> Result<Vec<IpAddr>> {
+/// Where the daemon's upstreams come from on a backend whose resolver
+/// will be pointed at us: the config's own `upstreams` when set, else a
+/// static snapshot of `source`'s servers (its file would then name only
+/// ourselves). `None` means the config's list is used.
+fn upstreams_or_snapshot(host: &Host, cfg: &Config, source: &str) -> Result<Option<Vec<IpAddr>>> {
+    if !cfg.upstreams.is_empty() {
+        return Ok(None);
+    }
     let text = host
         .read(source)
         .ok_or_else(|| anyhow!("cannot read {}", host.path(source).display()))?;
-    let servers = nameservers(&text);
+    let servers: Vec<IpAddr> = nameservers(&text)
+        .into_iter()
+        .filter(|ip| !ip.is_loopback())
+        .collect();
     if servers.is_empty() {
         bail!(
             "no upstream resolver found in {}; set `upstreams` in the config and run setup again",
@@ -258,27 +252,22 @@ fn snapshot_upstreams(host: &Host, source: &str) -> Result<Vec<IpAddr>> {
     for ip in &servers {
         out.push_str(&format!("nameserver {ip}\n"));
     }
-    for line in text.lines() {
-        if line.trim_start().starts_with("search") {
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
     host.write(UPSTREAMS_SNAPSHOT, &out)?;
-    Ok(servers)
+    Ok(Some(servers))
 }
 
 /// Keep what resolv.conf was — a symlink's target, or the file — so
-/// `teardown` can put it back.
+/// `teardown` can put it back. Never over an existing backup: that is the
+/// original, and what is there now is ours.
 fn back_up_resolv_conf(host: &Host) -> Result<()> {
+    if host.exists(RESOLV_BACKUP) {
+        return Ok(());
+    }
     let rc = host.path(RESOLV_CONF);
     let meta = match rc.symlink_metadata() {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            host.write(
-                RESOLV_BACKUP,
-                "# (no resolv.conf existed)\n#fips-pubdom-absent\n",
-            )?;
+            host.write(RESOLV_BACKUP, "#fips-pubdom-absent\n")?;
             return Ok(());
         }
         Err(e) => return Err(e.into()),
@@ -315,54 +304,136 @@ fn restore_resolv_conf(host: &Host) -> Result<()> {
     host.remove(RESOLV_BACKUP)
 }
 
-fn write_config(host: &Host, config_path: &Path, cfg: &Config) -> Result<()> {
-    let p = if config_path.is_absolute() {
-        host.root
-            .join(config_path.strip_prefix("/").unwrap_or(config_path))
+fn under_root(host: &Host, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        host.root.join(path.strip_prefix("/").unwrap_or(path))
     } else {
-        config_path.to_path_buf()
-    };
+        path.to_path_buf()
+    }
+}
+
+fn write_config(host: &Host, config_path: &Path, cfg: &Config) -> Result<()> {
+    let p = under_root(host, config_path);
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir)?;
     }
     std::fs::write(&p, serde_yaml::to_string(cfg)?)
         .with_context(|| format!("writing {}", p.display()))?;
-    let pins = host
-        .root
-        .join(cfg.pins.strip_prefix("/").unwrap_or(&cfg.pins));
-    if let Some(dir) = pins.parent() {
+    if let Some(dir) = under_root(host, &cfg.pins).parent() {
         std::fs::create_dir_all(dir)?;
     }
     Ok(())
 }
 
 fn load_config(host: &Host, config_path: &Path) -> Result<Config> {
-    let p = if config_path.is_absolute() {
-        host.root
-            .join(config_path.strip_prefix("/").unwrap_or(config_path))
-    } else {
-        config_path.to_path_buf()
-    };
-    Config::load_or_default(&p).map_err(anyhow::Error::msg)
+    Config::load_or_default(&under_root(host, config_path)).map_err(anyhow::Error::msg)
+}
+
+/// dnsmasq's `resolv-file=`, from its main file or any file in its conf
+/// directory, else /etc/resolv.conf; and whether `no-resolv` is already
+/// set somewhere, in which case its servers are `server=` lines we cannot
+/// snapshot.
+fn dnsmasq_resolv_file(host: &Host) -> (String, bool) {
+    let mut texts = Vec::new();
+    if let Some(t) = host.read(DNSMASQ_CONF) {
+        texts.push(t);
+    }
+    if let Ok(dir) = std::fs::read_dir(host.path(DNSMASQ_DIR)) {
+        let mut files: Vec<PathBuf> = dir
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.file_name() != Some(std::ffi::OsStr::new("fips-pubdom.conf")))
+            .collect();
+        files.sort();
+        for f in files {
+            if let Ok(t) = std::fs::read_to_string(&f) {
+                texts.push(t);
+            }
+        }
+    }
+    let mut resolv_file = RESOLV_CONF.to_string();
+    let mut no_resolv = false;
+    for t in &texts {
+        for line in t.lines().map(str::trim) {
+            if let Some(p) = line.strip_prefix("resolv-file=") {
+                resolv_file = p.trim().trim_start_matches('/').to_string();
+            }
+            if line == "no-resolv" {
+                no_resolv = true;
+            }
+        }
+    }
+    (resolv_file, no_resolv)
 }
 
 /// Point the OS at the daemon. Returns the backend used and what to tell
 /// the operator.
 pub fn setup(host: &Host, config_path: &Path, backend: Backend) -> Result<(Backend, Vec<String>)> {
+    if let Some(prev) = host.read(STATE_BACKEND) {
+        bail!(
+            "already set up ({} backend, per {}); run `fips-pubdomd teardown` first",
+            prev.trim(),
+            host.path(STATE_BACKEND).display()
+        );
+    }
     let backend = match backend {
         Backend::Auto => detect(host)?,
         b => b,
     };
     let mut cfg = load_config(host, config_path)?;
     let mut notes = Vec::new();
+    // Checks first, then the record, then the files and commands: a setup
+    // that fails halfway is still torn down by name.
     match backend {
         Backend::Resolved => {
-            if !host.exists(RESOLVED_UPSTREAMS) {
-                bail!("systemd-resolved is not running (no /run/systemd/resolve/resolv.conf)");
+            if !host.exists(RESOLVED_UPSTREAMS) || !host.active("systemd-resolved") {
+                bail!("systemd-resolved is not running");
             }
-            // Snapshot the upstreams first: once the drop-in is in place the
-            // stub file points back at us, but /run/systemd/resolve/resolv.conf
-            // keeps listing the real servers, which the daemon then follows.
+        }
+        Backend::NetworkManager => {
+            if !host.active("NetworkManager") {
+                bail!("NetworkManager is not running");
+            }
+            if host.active("systemd-resolved") {
+                bail!("systemd-resolved is running too; use --backend resolved");
+            }
+        }
+        Backend::Dnsmasq => {
+            if !host.exists(DNSMASQ_DIR) {
+                bail!("no /etc/dnsmasq.d: dnsmasq is not installed as the local resolver");
+            }
+            if host.active("NetworkManager") {
+                bail!(
+                    "NetworkManager is running: it would keep feeding dnsmasq its own servers; use --backend networkmanager"
+                );
+            }
+        }
+        Backend::ResolvConf => {
+            if host.active("systemd-resolved") {
+                bail!("systemd-resolved is running; use --backend resolved");
+            }
+            if host.active("NetworkManager") {
+                bail!(
+                    "NetworkManager is running and would rewrite resolv.conf; use --backend networkmanager"
+                );
+            }
+            if host.is_symlink(RESOLV_CONF) {
+                bail!(
+                    "{} is a symlink to {}: another tool manages it; point it at a real file first",
+                    host.path(RESOLV_CONF).display(),
+                    std::fs::read_link(host.path(RESOLV_CONF))
+                        .map(|t| t.display().to_string())
+                        .unwrap_or_default()
+                );
+            }
+        }
+        Backend::Auto => unreachable!(),
+    }
+    host.write(STATE_BACKEND, &format!("{}\n", backend.name()))?;
+    match backend {
+        Backend::Resolved => {
+            // Once the drop-in is in place the stub file points back at us,
+            // but /run/systemd/resolve/resolv.conf keeps listing the real
+            // servers, which the daemon then follows.
             cfg.upstreams_from = Some(PathBuf::from("/").join(RESOLVED_UPSTREAMS));
             write_config(host, config_path, &cfg)?;
             host.write(
@@ -380,12 +451,6 @@ pub fn setup(host: &Host, config_path: &Path, backend: Backend) -> Result<(Backe
             notes.push(format!("wrote {}", host.path(RESOLVED_DROPIN).display()));
         }
         Backend::NetworkManager => {
-            if !host.exists(NM_RUNDIR) {
-                bail!("NetworkManager is not running (no /run/NetworkManager)");
-            }
-            if host.exists(RESOLVED_UPSTREAMS) {
-                bail!("systemd-resolved is running too; use --backend resolved");
-            }
             // NM keeps writing its own list of the connections' servers to
             // /run/NetworkManager/resolv.conf whatever `dns=` says, so the
             // daemon follows DHCP changes through it. `dns=none` keeps NM
@@ -409,7 +474,7 @@ pub fn setup(host: &Host, config_path: &Path, backend: Backend) -> Result<(Backe
             host.write(
                 RESOLV_CONF,
                 &resolv_conf_text(
-                    &["::1".into(), "127.0.0.1".into()],
+                    &cfg,
                     &original,
                     "NetworkManager backend; previous file in /etc/fips-pubdom/resolv.conf.bak",
                 ),
@@ -422,27 +487,16 @@ pub fn setup(host: &Host, config_path: &Path, backend: Backend) -> Result<(Backe
             notes.push("the daemon now listens on port 53 (restart it after this)".into());
         }
         Backend::Dnsmasq => {
-            if !host.exists(DNSMASQ_DIR) {
-                bail!("no /etc/dnsmasq.d: dnsmasq is not installed as the local resolver");
-            }
-            if host.exists(NM_RUNDIR) && !host.exists(NM_DROPIN) {
+            let (resolv_file, no_resolv) = dnsmasq_resolv_file(host);
+            if no_resolv && cfg.upstreams.is_empty() {
                 bail!(
-                    "NetworkManager is running: it would keep feeding dnsmasq its own servers; use --backend networkmanager"
+                    "dnsmasq already has no-resolv: its servers are server= lines, which cannot be snapshotted; set `upstreams` in the config and run setup again"
                 );
             }
-            let resolv_file = host
-                .read(DNSMASQ_CONF)
-                .and_then(|t| {
-                    t.lines().find_map(|l| {
-                        l.trim()
-                            .strip_prefix("resolv-file=")
-                            .map(|s| s.trim().to_string())
-                    })
-                })
-                .map(|p| p.trim_start_matches('/').to_string())
-                .unwrap_or_else(|| RESOLV_CONF.to_string());
-            let servers = snapshot_upstreams(host, &resolv_file)?;
-            cfg.upstreams_from = Some(PathBuf::from("/").join(UPSTREAMS_SNAPSHOT));
+            let servers = upstreams_or_snapshot(host, &cfg, &resolv_file)?;
+            cfg.upstreams_from = servers
+                .is_some()
+                .then(|| PathBuf::from("/").join(UPSTREAMS_SNAPSHOT));
             write_config(host, config_path, &cfg)?;
             let mut text = String::from(
                 "# Managed by fips-pubdomd setup: dnsmasq forwards every name to fips-pubdomd,\n\
@@ -452,48 +506,25 @@ pub fn setup(host: &Host, config_path: &Path, backend: Backend) -> Result<(Backe
                  # dnsmasq's configuration would still be used and must go.\nno-resolv\n",
             );
             for a in &cfg.listen {
-                let ip = match a.ip() {
-                    IpAddr::V6(v6) => v6.to_string(),
-                    IpAddr::V4(v4) => v4.to_string(),
-                };
-                text.push_str(&format!("server={ip}#{}\n", a.port()));
+                text.push_str(&format!("server={}#{}\n", a.ip(), a.port()));
             }
             host.write(DNSMASQ_DROPIN, &text)?;
             (host.run)("systemctl", &["restart", "dnsmasq"])?;
-            notes.push(format!(
-                "wrote {} and {} (upstreams: {servers:?})",
-                host.path(DNSMASQ_DROPIN).display(),
-                host.path(UPSTREAMS_SNAPSHOT).display()
-            ));
-            notes.push(
-                "the snapshot is static: run setup again if the machine's resolvers change".into(),
-            );
+            notes.push(format!("wrote {}", host.path(DNSMASQ_DROPIN).display()));
+            match servers {
+                Some(s) => notes.push(format!(
+                    "upstreams snapshotted from {} to {}: {s:?} (static: run setup again if they change)",
+                    host.path(&resolv_file).display(),
+                    host.path(UPSTREAMS_SNAPSHOT).display()
+                )),
+                None => notes.push(format!("upstreams: the config's own {:?}", cfg.upstreams)),
+            }
         }
         Backend::ResolvConf => {
-            if host.exists(RESOLVED_UPSTREAMS) {
-                bail!("systemd-resolved is running; use --backend resolved");
-            }
-            if host.exists(NM_RUNDIR) && !host.exists(NM_DROPIN) {
-                bail!(
-                    "NetworkManager is running and would rewrite resolv.conf; use --backend networkmanager"
-                );
-            }
-            let rc = host.path(RESOLV_CONF);
-            if rc
-                .symlink_metadata()
-                .map(|m| m.is_symlink())
-                .unwrap_or(false)
-            {
-                bail!(
-                    "{} is a symlink to {}: another tool manages it; point it at a real file first",
-                    rc.display(),
-                    std::fs::read_link(&rc)
-                        .map(|t| t.display().to_string())
-                        .unwrap_or_default()
-                );
-            }
-            let servers = snapshot_upstreams(host, RESOLV_CONF)?;
-            cfg.upstreams_from = Some(PathBuf::from("/").join(UPSTREAMS_SNAPSHOT));
+            let servers = upstreams_or_snapshot(host, &cfg, RESOLV_CONF)?;
+            cfg.upstreams_from = servers
+                .is_some()
+                .then(|| PathBuf::from("/").join(UPSTREAMS_SNAPSHOT));
             cfg.listen = port53();
             write_config(host, config_path, &cfg)?;
             let original = host.read(RESOLV_CONF).unwrap_or_default();
@@ -501,38 +532,41 @@ pub fn setup(host: &Host, config_path: &Path, backend: Backend) -> Result<(Backe
             host.write(
                 RESOLV_CONF,
                 &resolv_conf_text(
-                    &["::1".into(), "127.0.0.1".into()],
+                    &cfg,
                     &original,
                     "previous file in /etc/fips-pubdom/resolv.conf.bak",
                 ),
             )?;
-            notes.push(format!(
-                "wrote {} (upstreams: {servers:?})",
-                host.path(RESOLV_CONF).display()
-            ));
+            notes.push(format!("wrote {}", host.path(RESOLV_CONF).display()));
+            match servers {
+                Some(s) => notes.push(format!(
+                    "upstreams snapshotted to {}: {s:?} (static: anything that rewrites resolv.conf undoes this)",
+                    host.path(UPSTREAMS_SNAPSHOT).display()
+                )),
+                None => notes.push(format!("upstreams: the config's own {:?}", cfg.upstreams)),
+            }
             notes.push("the daemon now listens on port 53 (restart it after this)".into());
-            notes.push(
-                "the snapshot is static: anything that rewrites resolv.conf (dhclient hooks) undoes this".into(),
-            );
         }
         Backend::Auto => unreachable!(),
     }
-    host.write(STATE_BACKEND, &format!("{}\n", backend.name()))?;
     Ok((backend, notes))
 }
 
-/// Undo `setup`. With `Auto`, the backend `setup` recorded.
+/// Undo `setup`. With `Auto`, the backend `setup` recorded — or, for an
+/// installation older than the record, the resolved drop-in if present.
 pub fn teardown(host: &Host, backend: Backend) -> Result<(Backend, Vec<String>)> {
     let backend = match backend {
-        Backend::Auto => host
+        Backend::Auto => match host
             .read(STATE_BACKEND)
             .and_then(|s| Backend::from_name(&s))
-            .ok_or_else(|| {
-                anyhow!(
-                    "nothing recorded in {}; name the backend with --backend",
-                    host.path(STATE_BACKEND).display()
-                )
-            })?,
+        {
+            Some(b) => b,
+            None if host.exists(RESOLVED_DROPIN) => Backend::Resolved,
+            None => bail!(
+                "nothing recorded in {} and no resolved drop-in; name the backend with --backend",
+                host.path(STATE_BACKEND).display()
+            ),
+        },
         b => b,
     };
     let mut notes = Vec::new();
@@ -569,7 +603,10 @@ pub fn teardown(host: &Host, backend: Backend) -> Result<(Backend, Vec<String>)>
         Backend::Auto => unreachable!(),
     }
     host.remove(STATE_BACKEND)?;
-    notes.push("the config file keeps `listen`/`upstreams_from` as setup left them; edit or delete it as you see fit".into());
+    notes.push(
+        "the config file keeps `listen`/`upstreams_from` as setup left them; edit or delete it as you see fit"
+            .into(),
+    );
     Ok((backend, notes))
 }
 
@@ -577,14 +614,25 @@ pub fn teardown(host: &Host, backend: Backend) -> Result<(Backend, Vec<String>)>
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    use std::collections::HashSet;
     use std::rc::Rc;
 
-    fn host(root: &Path) -> (Host, Rc<RefCell<Vec<String>>>) {
+    /// A host whose `systemctl is-active` answers from `active`; every
+    /// other command succeeds and is recorded.
+    fn host(root: &Path, active: &[&str]) -> (Host, Rc<RefCell<Vec<String>>>) {
         let ran = Rc::new(RefCell::new(Vec::new()));
         let r = ran.clone();
+        let active: HashSet<String> = active.iter().map(|s| s.to_string()).collect();
         let h = Host {
             root: root.to_path_buf(),
             run: Box::new(move |cmd, args| {
+                if cmd == "systemctl" && args.first() == Some(&"is-active") {
+                    return if active.contains(args[2]) {
+                        Ok(())
+                    } else {
+                        bail!("inactive")
+                    };
+                }
                 r.borrow_mut().push(format!("{cmd} {}", args.join(" ")));
                 Ok(())
             }),
@@ -610,17 +658,22 @@ mod tests {
     }
 
     #[test]
-    fn detect_prefers_resolved_then_nm_then_dnsmasq_then_plain() {
+    fn detect_goes_by_running_services_then_the_plain_file() {
         let d = tmp();
-        let (h, _) = host(&d);
+        let (h, _) = host(&d, &[]);
         h.write(RESOLV_CONF, "nameserver 9.9.9.9\n").unwrap();
         assert_eq!(detect(&h).unwrap(), Backend::ResolvConf);
+        // dnsmasq's directory alone is not a running dnsmasq.
         std::fs::create_dir_all(h.path(DNSMASQ_DIR)).unwrap();
-        h.write("run/dnsmasq/dnsmasq.pid", "1\n").unwrap();
+        assert_eq!(detect(&h).unwrap(), Backend::ResolvConf);
+        let (h, _) = host(&d, &["dnsmasq"]);
         assert_eq!(detect(&h).unwrap(), Backend::Dnsmasq);
-        std::fs::create_dir_all(h.path(NM_RUNDIR)).unwrap();
+        let (h, _) = host(&d, &["dnsmasq", "NetworkManager"]);
         assert_eq!(detect(&h).unwrap(), Backend::NetworkManager);
+        // resolved's runtime file outlives a stopped resolved: not enough.
         h.write(RESOLVED_UPSTREAMS, "nameserver 9.9.9.9\n").unwrap();
+        assert_eq!(detect(&h).unwrap(), Backend::NetworkManager);
+        let (h, _) = host(&d, &["systemd-resolved", "NetworkManager"]);
         assert_eq!(detect(&h).unwrap(), Backend::Resolved);
     }
 
@@ -628,7 +681,7 @@ mod tests {
     #[cfg(unix)]
     fn detect_refuses_a_symlinked_resolv_conf_nobody_known_manages() {
         let d = tmp();
-        let (h, _) = host(&d);
+        let (h, _) = host(&d, &[]);
         std::fs::create_dir_all(h.path("etc")).unwrap();
         symlink("/somewhere/else", &h.path(RESOLV_CONF)).unwrap();
         let err = detect(&h).unwrap_err().to_string();
@@ -641,10 +694,10 @@ mod tests {
     #[test]
     fn resolv_conf_backend_takes_port_53_and_restores_on_teardown() {
         let d = tmp();
-        let (h, ran) = host(&d);
+        let (h, ran) = host(&d, &[]);
         h.write(
             RESOLV_CONF,
-            "# by hand\nnameserver 192.168.1.1\nnameserver 127.0.0.1\nsearch lan\noptions ndots:1\n",
+            "# by hand\n  nameserver 192.168.1.1\nnameserver 127.0.0.1\nsearch lan\noptions ndots:1\n",
         )
         .unwrap();
         let (b, _) = setup(&h, &cfg_path(), Backend::Auto).unwrap();
@@ -667,11 +720,21 @@ mod tests {
         assert_eq!(h.read(STATE_BACKEND).unwrap().trim(), "resolv-conf");
         assert!(ran.borrow().is_empty(), "nothing to restart but the daemon");
 
+        // A second setup does not clobber the backup of the original.
+        let err = setup(&h, &cfg_path(), Backend::Auto)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("already set up") && err.contains("resolv-conf"),
+            "{err}"
+        );
+        assert!(h.read(RESOLV_BACKUP).unwrap().contains("# by hand"));
+
         let (b, _) = teardown(&h, Backend::Auto).unwrap();
         assert_eq!(b, Backend::ResolvConf);
         assert_eq!(
             h.read(RESOLV_CONF).unwrap(),
-            "# by hand\nnameserver 192.168.1.1\nnameserver 127.0.0.1\nsearch lan\noptions ndots:1\n"
+            "# by hand\n  nameserver 192.168.1.1\nnameserver 127.0.0.1\nsearch lan\noptions ndots:1\n"
         );
         assert!(
             !h.exists(UPSTREAMS_SNAPSHOT) && !h.exists(STATE_BACKEND) && !h.exists(RESOLV_BACKUP)
@@ -681,15 +744,34 @@ mod tests {
     #[test]
     fn resolv_conf_backend_refuses_without_an_upstream_or_under_a_manager() {
         let d = tmp();
-        let (h, _) = host(&d);
+        let (h, _) = host(&d, &[]);
         h.write(RESOLV_CONF, "nameserver 127.0.0.1\n").unwrap();
         let err = setup(&h, &cfg_path(), Backend::ResolvConf)
             .unwrap_err()
             .to_string();
         assert!(err.contains("no upstream resolver"), "{err}");
-        assert!(!h.exists(STATE_BACKEND), "nothing recorded on failure");
-        h.write(RESOLV_CONF, "nameserver 1.1.1.1\n").unwrap();
-        std::fs::create_dir_all(h.path(NM_RUNDIR)).unwrap();
+        // The record is written before the files, so the failed setup can
+        // be torn down; a fresh setup is then possible again.
+        assert!(h.exists(STATE_BACKEND));
+        teardown(&h, Backend::Auto).unwrap();
+        assert!(!h.exists(STATE_BACKEND));
+        // `upstreams` in the config stands in for the snapshot.
+        h.write("etc/fips-pubdom/config.yaml", "upstreams: [\"9.9.9.9\"]\n")
+            .unwrap();
+        let (_, notes) = setup(&h, &cfg_path(), Backend::ResolvConf).unwrap();
+        assert!(
+            notes.iter().any(|n| n.contains("config's own")),
+            "{notes:?}"
+        );
+        assert!(!h.exists(UPSTREAMS_SNAPSHOT));
+        let cfg = load_config(&h, &cfg_path()).unwrap();
+        assert_eq!(cfg.upstreams_from, None);
+        assert_eq!(
+            cfg.current_upstreams(),
+            vec!["9.9.9.9".parse::<IpAddr>().unwrap()]
+        );
+        teardown(&h, Backend::Auto).unwrap();
+        let (h, _) = host(&d, &["NetworkManager"]);
         let err = setup(&h, &cfg_path(), Backend::ResolvConf)
             .unwrap_err()
             .to_string();
@@ -700,8 +782,7 @@ mod tests {
     #[cfg(unix)]
     fn networkmanager_backend_hands_resolv_conf_over_and_follows_nm_list() {
         let d = tmp();
-        let (h, ran) = host(&d);
-        std::fs::create_dir_all(h.path(NM_RUNDIR)).unwrap();
+        let (h, ran) = host(&d, &["NetworkManager"]);
         h.write(
             NM_UPSTREAMS,
             "# Generated by NetworkManager\nsearch home.arpa\nnameserver 192.168.1.1\n",
@@ -718,22 +799,16 @@ mod tests {
         assert_eq!(ran.borrow().as_slice(), ["nmcli general reload conf"]);
         let rc = h.read(RESOLV_CONF).unwrap();
         assert!(rc.contains("nameserver ::1\n") && rc.contains("search home.arpa\n"));
-        assert!(!h.path(RESOLV_CONF).symlink_metadata().unwrap().is_symlink());
+        assert!(!h.is_symlink(RESOLV_CONF));
         let cfg = load_config(&h, &cfg_path()).unwrap();
         assert_eq!(
             cfg.upstreams_from.as_deref(),
             Some(Path::new("/run/NetworkManager/resolv.conf"))
         );
         assert_eq!(cfg.listen, port53());
-        assert_eq!(
-            cfg.current_upstreams(),
-            Vec::<IpAddr>::new(),
-            "test root: the real path is not read"
-        );
 
         teardown(&h, Backend::Auto).unwrap();
-        let meta = h.path(RESOLV_CONF).symlink_metadata().unwrap();
-        assert!(meta.is_symlink(), "the symlink is back");
+        assert!(h.is_symlink(RESOLV_CONF), "the symlink is back");
         assert_eq!(
             std::fs::read_link(h.path(RESOLV_CONF)).unwrap(),
             Path::new("/run/NetworkManager/resolv.conf")
@@ -742,25 +817,35 @@ mod tests {
     }
 
     #[test]
-    fn nmcli_falls_back_to_systemctl_reload() {
+    fn nmcli_falls_back_to_systemctl_reload_and_a_failed_setup_is_torn_down() {
         let d = tmp();
         let ran = Rc::new(RefCell::new(Vec::new()));
         let r = ran.clone();
         let h = Host {
             root: d.clone(),
             run: Box::new(move |cmd, args| {
+                if cmd == "systemctl" && args.first() == Some(&"is-active") {
+                    return if args[2] == "NetworkManager" {
+                        Ok(())
+                    } else {
+                        bail!("inactive")
+                    };
+                }
                 r.borrow_mut().push(format!("{cmd} {}", args.join(" ")));
                 if cmd == "nmcli" {
                     bail!("not installed")
-                } else {
-                    Ok(())
                 }
+                if args == ["reload", "NetworkManager"] && r.borrow().len() < 3 {
+                    bail!("NetworkManager is not under systemd")
+                }
+                Ok(())
             }),
         };
-        std::fs::create_dir_all(h.path(NM_RUNDIR)).unwrap();
         h.write(NM_UPSTREAMS, "nameserver 10.0.0.1\n").unwrap();
         h.write(RESOLV_CONF, "nameserver 10.0.0.1\n").unwrap();
-        setup(&h, &cfg_path(), Backend::NetworkManager).unwrap();
+        // First attempt: both reloads fail, setup errors, but the record
+        // is there and teardown cleans the drop-in up.
+        assert!(setup(&h, &cfg_path(), Backend::NetworkManager).is_err());
         assert_eq!(
             ran.borrow().as_slice(),
             [
@@ -768,16 +853,29 @@ mod tests {
                 "systemctl reload NetworkManager"
             ]
         );
+        assert!(h.exists(NM_DROPIN) && h.exists(STATE_BACKEND));
+        teardown(&h, Backend::Auto).unwrap();
+        assert!(!h.exists(NM_DROPIN) && !h.exists(STATE_BACKEND));
+        // Second attempt: nmcli still missing, systemctl reload works.
+        setup(&h, &cfg_path(), Backend::NetworkManager).unwrap();
+        assert_eq!(
+            ran.borrow().last().map(String::as_str),
+            Some("systemctl reload NetworkManager")
+        );
     }
 
     #[test]
     fn dnsmasq_backend_forwards_to_the_daemon_and_snapshots_its_resolv_file() {
         let d = tmp();
-        let (h, ran) = host(&d);
+        let (h, ran) = host(&d, &["dnsmasq"]);
         std::fs::create_dir_all(h.path(DNSMASQ_DIR)).unwrap();
-        h.write("run/dnsmasq/dnsmasq.pid", "1\n").unwrap();
-        h.write(DNSMASQ_CONF, "# dnsmasq\nresolv-file=/etc/resolv.dnsmasq\n")
-            .unwrap();
+        h.write(DNSMASQ_CONF, "# dnsmasq\n").unwrap();
+        // The resolv-file directive may sit in conf.d, as on Debian.
+        h.write(
+            "etc/dnsmasq.d/local.conf",
+            "resolv-file=/etc/resolv.dnsmasq\n",
+        )
+        .unwrap();
         h.write(
             "etc/resolv.dnsmasq",
             "nameserver 9.9.9.9\nnameserver 149.112.112.112\n",
@@ -790,7 +888,8 @@ mod tests {
         assert!(
             drop.contains("no-resolv\n")
                 && drop.contains("server=::1#5356\n")
-                && drop.contains("server=127.0.0.1#5356\n")
+                && drop.contains("server=127.0.0.1#5356\n"),
+            "{drop}"
         );
         let snap = h.read(UPSTREAMS_SNAPSHOT).unwrap();
         assert!(
@@ -815,12 +914,24 @@ mod tests {
             ran.borrow().last().map(String::as_str),
             Some("systemctl restart dnsmasq")
         );
+
+        // dnsmasq that already runs with no-resolv has nothing to snapshot.
+        h.write("etc/dnsmasq.d/local.conf", "no-resolv\nserver=1.1.1.1\n")
+            .unwrap();
+        let err = setup(&h, &cfg_path(), Backend::Dnsmasq)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("no-resolv") && err.contains("upstreams"),
+            "{err}"
+        );
+        teardown(&h, Backend::Auto).unwrap();
     }
 
     #[test]
     fn resolved_backend_writes_the_drop_in_as_before() {
         let d = tmp();
-        let (h, ran) = host(&d);
+        let (h, ran) = host(&d, &["systemd-resolved", "NetworkManager"]);
         h.write(RESOLVED_UPSTREAMS, "nameserver 192.168.1.1\n")
             .unwrap();
         let (b, _) = setup(&h, &cfg_path(), Backend::Auto).unwrap();
@@ -839,11 +950,15 @@ mod tests {
     }
 
     #[test]
-    fn teardown_without_a_record_needs_the_backend_named() {
+    fn teardown_without_a_record_falls_back_to_the_resolved_drop_in() {
         let d = tmp();
-        let (h, _) = host(&d);
+        let (h, _) = host(&d, &[]);
         let err = teardown(&h, Backend::Auto).unwrap_err().to_string();
         assert!(err.contains("--backend"), "{err}");
-        teardown(&h, Backend::Resolved).unwrap();
+        // An installation set up by 0.2.x: the drop-in exists, no record.
+        h.write(RESOLVED_DROPIN, "[Resolve]\n").unwrap();
+        let (b, _) = teardown(&h, Backend::Auto).unwrap();
+        assert_eq!(b, Backend::Resolved);
+        assert!(!h.exists(RESOLVED_DROPIN));
     }
 }

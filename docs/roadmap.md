@@ -58,11 +58,12 @@
    by nature). Done on Linux: NetworkManager, standalone dnsmasq and plain
    `resolv.conf` beside systemd-resolved, with detection and a recorded
    teardown.
-4. **Phone gaps**: TCP fallback for step 3 over the smoltcp stack; an
-   explicit online flag from the VpnService (would skip the TXT wait
-   offline, so a first lookup through a mesh relay fits the 3.5 s budget
-   instead of resolving only on the retry); upstream ports kept for the
-   TXT verifier. Done: the `dnssec` switch (fips2go #65).
+4. **Phone gaps**: TCP fallback for step 3 over the smoltcp stack;
+   upstream ports kept for the TXT verifier. Done: the `dnssec` switch
+   (fips2go #65); the Internet flag from the VpnService (fips2go #67,
+   `MaybeTxt::set_timeout`): without a validated network the TXT wait is
+   500 ms, so a first offline lookup fits the budget — verified on the
+   phone ([testing.md](testing.md) level 5c).
 
 ## Known gaps and interactions
 

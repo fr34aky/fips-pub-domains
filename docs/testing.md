@@ -441,6 +441,20 @@ cannot load pages. The node's relay connection failed through a dead
 Internet parent until the app was reconnected; the reconnect is what
 made the node pick the LAN peer.
 
+**With the Internet flag** (fips2go #67, later the same day): the Wi-Fi
+re-joined with its DNS pointing at an unreachable address, so Android's
+own probe failed — `public names: internet not validated` within 3 s,
+the shim's TXT wait down to 500 ms, the node running on. Pins forgotten,
+app reconnected, and the first lookup of `relay.example.org` logged no
+"still deciding": `binding verified and pinned … method=Dnssec` (the
+claim's proof, through the mesh relay) 2.5 s after the browser intent,
+then `answered over fips` for A and AAAA — inside the budget, where the
+morning's offline first lookups had all resolved on the retry only.
+Android does not re-probe a validated Wi-Fi on its own when the Internet
+behind it disappears: a router block left the flag at "validated" for
+three minutes until the Wi-Fi was re-joined, which is when a fresh probe
+runs.
+
 ## Level 5b — the phone, offline, a domain never seen
 
 fips2go with a mesh relay configured (`ws://npub1….fips:80`), its pin file

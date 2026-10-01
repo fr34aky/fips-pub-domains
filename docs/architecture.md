@@ -85,8 +85,10 @@ Budgets (plan values, enforced by per-step timeouts and a whole-lookup
 budget in the daemon and the phone): TXT 1.5 s, relays 2 s, step 3 1 s +
 retry, TCP 3 s; a cold online lookup stays under 4.5 s, a pinned mesh
 lookup around 1 s, a cached one milliseconds. The relay fetch asks every
-relay on its own subscription and returns 750 ms after the first one that
-delivered a claim, so one quiet relay no longer costs the whole 2 s. A
+relay on its own subscription and, after a TXT hit, returns 750 ms after
+the first one that delivered a claim, so one quiet relay no longer costs
+the whole 2 s; offline, where the claims alone decide and a conflict is
+only visible with every relay heard, it still waits for all of them. A
 lookup that overruns the whole-lookup budget (3.5 s on the phone, the
 daemon's `budget`) finishes in the background and caches its decision; the
 legacy answer forwarded meanwhile has its TTLs capped at

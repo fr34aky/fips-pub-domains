@@ -24,3 +24,6 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio = { version = "1", features = ["rt", "sync", "time", "net", "macros", "fs"] }
 tracing.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }

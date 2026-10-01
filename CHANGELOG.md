@@ -18,8 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already did, so the stub's next query is answered from its decision.
 - Cold lookups paid the full 2 s relay timeout whenever one relay in the
   pool stayed quiet, because the fetch waited for every relay's EOSE. Each
-  relay is now asked on its own subscription; once one has delivered a
-  claim the others get 750 ms, then the fetch returns.
+  relay is now asked on its own subscription; after a TXT hit, once one
+  has delivered a claim the others get 750 ms, then the fetch returns.
+  Offline every relay is still heard, so a conflict between claims stays
+  visible.
 
 ### Added
 

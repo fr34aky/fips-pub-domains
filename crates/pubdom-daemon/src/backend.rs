@@ -75,11 +75,27 @@ impl Backend {
     }
 }
 
+/// Runs a management command (`systemctl`, `nmcli`) with its arguments.
+pub type Runner = Box<dyn Fn(&str, &[&str]) -> Result<()>>;
+
 /// The machine as the backends see it: a filesystem root and a way to run
 /// the resolver's management commands.
 pub struct Host {
     pub root: PathBuf,
-    pub run: Box<dyn Fn(&str, &[&str]) -> Result<()>>,
+    pub run: Runner,
+}
+
+/// A symlink `link` → `target`; the daemon builds on every OS, the
+/// backends run on Linux.
+fn symlink(target: &str, link: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link)
+    }
+    #[cfg(not(unix))]
+    {
+        std::os::windows::fs::symlink_file(target, link)
+    }
 }
 
 impl Host {
@@ -292,7 +308,7 @@ fn restore_resolv_conf(host: &Host) -> Result<()> {
         .lines()
         .find_map(|l| l.strip_prefix("#fips-pubdom-symlink "))
     {
-        std::os::unix::fs::symlink(target.trim(), &rc)?;
+        symlink(target.trim(), &rc)?;
     } else {
         std::fs::write(&rc, backup)?;
     }
@@ -609,11 +625,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn detect_refuses_a_symlinked_resolv_conf_nobody_known_manages() {
         let d = tmp();
         let (h, _) = host(&d);
         std::fs::create_dir_all(h.path("etc")).unwrap();
-        std::os::unix::fs::symlink("/somewhere/else", h.path(RESOLV_CONF)).unwrap();
+        symlink("/somewhere/else", &h.path(RESOLV_CONF)).unwrap();
         let err = detect(&h).unwrap_err().to_string();
         assert!(
             err.contains("symlink") && err.contains("/somewhere/else"),
@@ -680,6 +697,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn networkmanager_backend_hands_resolv_conf_over_and_follows_nm_list() {
         let d = tmp();
         let (h, ran) = host(&d);
@@ -690,7 +708,7 @@ mod tests {
         )
         .unwrap();
         std::fs::create_dir_all(h.path("etc")).unwrap();
-        std::os::unix::fs::symlink("/run/NetworkManager/resolv.conf", h.path(RESOLV_CONF)).unwrap();
+        symlink("/run/NetworkManager/resolv.conf", &h.path(RESOLV_CONF)).unwrap();
         let (b, _) = setup(&h, &cfg_path(), Backend::Auto).unwrap();
         assert_eq!(b, Backend::NetworkManager);
         assert_eq!(

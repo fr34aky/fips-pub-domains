@@ -344,7 +344,11 @@ fn newest_proof(input: &Input<'_>) -> Result<Option<ProvenRecord>, ()> {
 /// trusted witnesses attest, as an `Attested` binding: most witnesses
 /// first, then the newest claim. A witness's attestation counts for each
 /// server it names; what it says about keys without a claim is ignored,
-/// since only the server's own claim says which port it serves.
+/// since only the server's own claim says which port it serves. A
+/// server's own attestation of itself counts for nothing: a witness list
+/// drawn from the nodes one knows (the phone's Mesh names) routinely
+/// contains the servers themselves, and a claim vouched for by its author
+/// is just the claim.
 fn attested_servers(input: &Input<'_>) -> Vec<Binding> {
     let k = input.attestation_threshold;
     if k == 0 {
@@ -357,7 +361,7 @@ fn attested_servers(input: &Input<'_>) -> Vec<Binding> {
             let witnesses = input
                 .attestations
                 .iter()
-                .filter(|a| a.servers.contains(&c.author))
+                .filter(|a| a.witness != c.author && a.servers.contains(&c.author))
                 .count();
             (c, witnesses)
         })
@@ -1098,6 +1102,23 @@ mod tests {
         // Two claimed servers each attested by nobody: the unverified rule.
         let o = run_attested(vec![], TxtLookup::Unreachable, &claims, true, &[], 2);
         assert_eq!(o.decision, Decision::NotOverFips(Reason::Conflict));
+    }
+
+    /// A server attesting itself is no witness: with k = 1 its own word
+    /// must not turn its claim into a binding.
+    #[test]
+    fn a_server_cannot_attest_itself() {
+        let claims = [claim(1, 5)];
+        let own = [attestation(1, &[1], 7)];
+        let o = run_attested(vec![], TxtLookup::Unreachable, &claims, false, &own, 1);
+        assert_eq!(o.decision, Decision::NotOverFips(Reason::Unverified));
+        // With a real witness beside it, the self-attestation still does
+        // not count toward k.
+        let both = [attestation(1, &[1], 7), attestation(10, &[1], 8)];
+        let o = run_attested(vec![], TxtLookup::Unreachable, &claims, false, &both, 2);
+        assert_eq!(o.decision, Decision::NotOverFips(Reason::Unverified));
+        let o = run_attested(vec![], TxtLookup::Unreachable, &claims, false, &both, 1);
+        assert_eq!(npubs(&o), vec![npub(1)]);
     }
 
     /// Pins and proofs come first: an attestation never overrides a pin

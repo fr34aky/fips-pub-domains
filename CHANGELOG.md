@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A server's attestation of its own domain no longer counts toward *k*:
+  with witnesses drawn from the nodes a client knows (the phone's Mesh
+  names), the servers themselves are routinely on the list, and a claim
+  vouched for by its author is just the claim.
+
 ### Changed
 
 - On the resolved and NetworkManager backends the daemon follows its

@@ -9,6 +9,7 @@
 
 mod backend;
 mod forward;
+mod watch;
 
 use anyhow::{Context, Result};
 use backend::Backend;
@@ -212,6 +213,12 @@ async fn run(cfg: Config) -> Result<()> {
             }
         }));
     }
+    // The upstreams file changes when the network does: follow it, and keep
+    // the poll for whatever the watcher misses.
+    let _watcher = state.cfg.upstreams_from.as_deref().and_then(|p| {
+        let st = state.clone();
+        watch::watch(p, move || st.refresh_upstreams())
+    });
     let st = state.clone();
     tasks.push(tokio::spawn(async move {
         loop {

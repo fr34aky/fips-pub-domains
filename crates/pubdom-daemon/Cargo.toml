@@ -16,6 +16,7 @@ nostr-sdk = { version = "0.44", default-features = false }
 simple-dns = "0.11"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+notify = "8"
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The daemon follows its upstreams file as the OS rewrites it, so a
+  network change is picked up within a second instead of at the next
+  30 s poll (kept as the fallback). The directory is watched, since
+  resolved and NetworkManager rename a new file into place.
+
 ### Fixed
 
 - The daemon's upstreams and `setup`'s snapshot read `resolv.conf` as

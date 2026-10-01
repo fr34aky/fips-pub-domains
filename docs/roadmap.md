@@ -46,9 +46,10 @@
    and [nips #2487](https://github.com/nostr-protocol/nips/pull/2487)
    (NIP-DB). Until merged, the kind numbers are provisional; if others are
    assigned, `pubdom-core::KIND_*` and the docs follow.
-2. **Default witnesses on the phone** = the user's synced trusted nodes
-   (the Mesh names sync's upstream and the hosts-file entries), opt-in;
-   today the list is typed in Settings.
+2. Done: **default witnesses on the phone** from the Mesh names (the
+   sync upstream and the hosts-file entries), opt-in (fips2go #66) — which
+   is what made the policy exclude a domain's own servers as witnesses
+   (#17).
 3. **Daemon backends**: macOS (launchd + `networksetup`) and Windows
    (service + adapter DNS); restricted per-domain mode; OpenWrt and
    pfSense packaging. Implemented, unit-tested, not yet checked live: the

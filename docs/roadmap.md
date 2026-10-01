@@ -57,8 +57,8 @@
 4. **Phone gaps**: TCP fallback for step 3 over the smoltcp stack; an
    explicit online flag from the VpnService (would skip the TXT wait
    offline, so a first lookup through a mesh relay fits the 3.5 s budget
-   instead of resolving only on the retry); a `dnssec` switch in the app;
-   upstream ports kept for the TXT verifier.
+   instead of resolving only on the retry); upstream ports kept for the
+   TXT verifier. Done: the `dnssec` switch (fips2go #65).
 
 ## Known gaps and interactions
 

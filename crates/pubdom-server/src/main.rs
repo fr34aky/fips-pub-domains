@@ -325,28 +325,9 @@ fn load_zone(path: &Path, author: Npub) -> Result<Zone> {
     })
 }
 
-/// The node key: a file (fips's `fips.key`: 64 hex characters, or 32 raw
-/// bytes) or an nsec/hex string. A file that exists but cannot be read is
-/// reported as such — the usual cause is not being in the `fips` group —
-/// rather than as an invalid key.
+/// The node key (see `pubdom_resolve::relay::load_keys`).
 fn load_keys(spec: &str) -> Result<Keys> {
-    let path = Path::new(spec);
-    let text = if path.exists() {
-        let bytes = std::fs::read(path).with_context(|| {
-            format!("cannot read {spec} (is this user in the group that owns it, usually `fips`?)")
-        })?;
-        if bytes.len() == 32 {
-            hex::encode(&bytes)
-        } else {
-            String::from_utf8(bytes)
-                .with_context(|| format!("{spec} is neither text nor a 32-byte key"))?
-        }
-    } else {
-        spec.to_string()
-    };
-    Keys::parse(text.trim()).map_err(|e| {
-        anyhow!("key {spec}: {e} (expected fips's key file, an nsec, or 64 hex characters)")
-    })
+    pubdom_resolve::relay::load_keys(spec).map_err(anyhow::Error::msg)
 }
 
 fn author_of(keys: &Keys) -> Npub {

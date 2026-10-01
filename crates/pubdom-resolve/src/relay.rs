@@ -8,8 +8,8 @@
 //! so this is our own small nostr-sdk client.
 
 use nostr_sdk::prelude::*;
-use pubdom_core::claim::{Event as CoreEvent, Target, ZoneRecord};
-use pubdom_core::{Claim, KIND_CLAIM, KIND_ZONE, Npub};
+use pubdom_core::claim::{Attestation, Event as CoreEvent, Target, ZoneRecord};
+use pubdom_core::{Claim, KIND_ATTESTATION, KIND_CLAIM, KIND_ZONE, Method, Npub};
 use std::time::Duration;
 
 /// Which relays a fetch may touch (spec §8, the privacy gate).
@@ -23,6 +23,10 @@ pub enum RelayScope {
     /// or chose on the mesh — a public relay must never learn of a domain
     /// that DNS has not vouched for.
     MeshOnly,
+    /// Both sets, every relay heard out: for a publisher that must see the
+    /// whole set (a witness attesting the domain's servers), not a lookup
+    /// racing a budget.
+    Full,
 }
 
 pub struct RelayClient {
@@ -49,7 +53,47 @@ impl RelayClient {
     /// the public ones are tried afterwards in case a path exists.
     /// Signatures are verified by the pool.
     pub async fn fetch_claims(&self, domain: &str, scope: RelayScope) -> Vec<CoreEvent> {
-        self.fetch(KIND_CLAIM, domain, None, scope).await
+        self.fetch(KIND_CLAIM, domain, &[], scope).await
+    }
+
+    /// Attestations (kind 37198, spec §3.2) for `domain` by `witnesses`:
+    /// the filter names the authors, so nobody else's reach the client —
+    /// and it is sent to the mesh relays only, whatever `scope` the claims
+    /// used: the list of whom a user trusts is not for a public relay to
+    /// learn. A witness therefore publishes to a relay on the mesh. Empty
+    /// `witnesses` fetches nothing.
+    pub async fn fetch_attestations(
+        &self,
+        domain: &str,
+        witnesses: &[Npub],
+        _scope: RelayScope,
+    ) -> Vec<CoreEvent> {
+        if witnesses.is_empty() {
+            return Vec::new();
+        }
+        let filter = Self::filter(KIND_ATTESTATION, domain, witnesses);
+        fetch_from(
+            relays_of(self.mesh.as_ref()).await,
+            &filter,
+            self.timeout,
+            None,
+        )
+        .await
+    }
+
+    fn filter(kind: u16, domain: &str, authors: &[Npub]) -> Filter {
+        let mut filter = Filter::new()
+            .kind(Kind::from(kind))
+            .identifier(domain)
+            .limit(32);
+        let keys: Vec<PublicKey> = authors
+            .iter()
+            .filter_map(|a| PublicKey::from_hex(&a.to_hex()).ok())
+            .collect();
+        if !keys.is_empty() {
+            filter = filter.authors(keys);
+        }
+        filter
     }
 
     /// One author's claims for `domain` — a server looking for its own,
@@ -60,7 +104,8 @@ impl RelayClient {
         author: &Npub,
         scope: RelayScope,
     ) -> Vec<CoreEvent> {
-        self.fetch(KIND_CLAIM, domain, Some(author), scope).await
+        self.fetch(KIND_CLAIM, domain, std::slice::from_ref(author), scope)
+            .await
     }
 
     /// The zone record (kind 37199) for `domain` by its server (spec §3.3).
@@ -70,36 +115,34 @@ impl RelayClient {
         author: &Npub,
         scope: RelayScope,
     ) -> Vec<CoreEvent> {
-        self.fetch(KIND_ZONE, domain, Some(author), scope).await
+        self.fetch(KIND_ZONE, domain, std::slice::from_ref(author), scope)
+            .await
     }
 
+    /// `authors` empty: anyone's.
     async fn fetch(
         &self,
         kind: u16,
         domain: &str,
-        author: Option<&Npub>,
+        authors: &[Npub],
         scope: RelayScope,
     ) -> Vec<CoreEvent> {
-        let mut filter = Filter::new()
-            .kind(Kind::from(kind))
-            .identifier(domain)
-            .limit(32);
-        if let Some(a) = author
-            && let Ok(pk) = PublicKey::from_hex(&a.to_hex())
-        {
-            filter = filter.author(pk);
-        }
+        let filter = Self::filter(kind, domain, authors);
         match scope {
             // Online, the TXT record names the server: a claim set short of
             // a slow relay's costs at most that relay's say until the next
             // TXT TTL, so the fast relays set the pace.
-            RelayScope::AfterHit => {
+            RelayScope::AfterHit | RelayScope::Full => {
                 let relays: Vec<Relay> = relays_of(self.public.as_ref())
                     .await
                     .into_iter()
                     .chain(relays_of(self.mesh.as_ref()).await)
                     .collect();
-                fetch_from(relays, &filter, self.timeout, Some(GRACE)).await
+                let grace = match scope {
+                    RelayScope::Full => None,
+                    _ => Some(GRACE),
+                };
+                fetch_from(relays, &filter, self.timeout, grace).await
             }
             // Without the TXT record the claims alone decide, and a conflict
             // is only visible with every relay heard: no grace.
@@ -293,6 +336,57 @@ pub async fn publish_zone(
     .await
 }
 
+/// Publish an attestation (kind 37198, spec §3.2) that `servers` serve
+/// `domain`, verified by `method` at `verified_at`, signed with the
+/// witness's `keys`. Addressable per (witness, domain): the newest replaces
+/// the earlier one, so a witness re-attests the whole server set. `method`
+/// must be `Dnssec` or `Dns`: a single resolver's say is not attested.
+pub async fn publish_attestation(
+    keys: Keys,
+    relays: &[String],
+    domain: &str,
+    servers: &[Npub],
+    method: Method,
+    verified_at: u64,
+    timeout: Duration,
+) -> Result<Vec<String>, String> {
+    attestable(method)?;
+    publish(
+        keys,
+        relays,
+        KIND_ATTESTATION,
+        Attestation::tags(domain, servers, method, verified_at),
+        timeout,
+    )
+    .await
+}
+
+/// A node key for signing: a file (fips's `fips.key`: 64 hex characters,
+/// or 32 raw bytes) or an nsec/hex string. A file that exists but cannot
+/// be read is reported as such — the usual cause is not being in the
+/// `fips` group — rather than as an invalid key.
+pub fn load_keys(spec: &str) -> Result<Keys, String> {
+    let path = std::path::Path::new(spec);
+    let text = if path.exists() {
+        let bytes = std::fs::read(path).map_err(|e| {
+            format!(
+                "cannot read {spec}: {e} (is this user in the group that owns it, usually `fips`?)"
+            )
+        })?;
+        if bytes.len() == 32 {
+            bytes.iter().map(|b| format!("{b:02x}")).collect()
+        } else {
+            String::from_utf8(bytes)
+                .map_err(|_| format!("{spec} is neither text nor a 32-byte key"))?
+        }
+    } else {
+        spec.to_string()
+    };
+    Keys::parse(text.trim()).map_err(|e| {
+        format!("key {spec}: {e} (expected fips's key file, an nsec, or 64 hex characters)")
+    })
+}
+
 async fn publish(
     keys: Keys,
     relays: &[String],
@@ -341,6 +435,33 @@ pub fn claim_event_json(
     signed_json(keys, KIND_CLAIM, Claim::tags(domain, port, dnssec))
 }
 
+/// The signed attestation as JSON, for tests and `fips-pubdom attest
+/// --dry-run`. `method` as for [`publish_attestation`].
+pub fn attestation_event_json(
+    keys: &Keys,
+    domain: &str,
+    servers: &[Npub],
+    method: Method,
+    verified_at: u64,
+) -> Result<String, String> {
+    attestable(method)?;
+    signed_json(
+        keys,
+        KIND_ATTESTATION,
+        Attestation::tags(domain, servers, method, verified_at),
+    )
+}
+
+fn attestable(method: Method) -> Result<(), String> {
+    if method >= Method::Dns {
+        Ok(())
+    } else {
+        Err(format!(
+            "{method:?} is not worth attesting: DNSSEC or two agreeing resolvers only"
+        ))
+    }
+}
+
 /// The zone record as JSON without sending it.
 pub fn zone_event_json(
     keys: &Keys,
@@ -373,6 +494,25 @@ mod tests {
         assert_eq!(claim.domain, "example.org");
         assert_eq!(claim.port, 5355);
         assert_eq!(claim.author.to_hex(), keys.public_key().to_hex());
+    }
+
+    #[test]
+    fn signed_attestation_parses_back_through_core() {
+        let keys = Keys::generate();
+        let server = Npub::from_bytes([4; 32]);
+        let json =
+            attestation_event_json(&keys, "example.org", &[server], Method::Dnssec, 1234).unwrap();
+        let ev = Event::from_json(&json).unwrap();
+        ev.verify().unwrap();
+        let a = Attestation::parse(&convert(ev)).unwrap();
+        assert_eq!(a.witness.to_hex(), keys.public_key().to_hex());
+        assert_eq!(a.servers, vec![server]);
+        assert_eq!((a.method, a.verified_at), (Method::Dnssec, 1234));
+        assert!(
+            attestation_event_json(&keys, "example.org", &[server], Method::DnsSingle, 1234)
+                .is_err(),
+            "a single resolver's verification is refused"
+        );
     }
 
     #[test]

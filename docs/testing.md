@@ -226,6 +226,17 @@ it pins one server and reaches the other only through the zone record;
 and the failover log said "trying the next" with nothing left to try —
 it now says which.
 
+## Level 4e — attestations (not yet run live)
+
+Phase 3 landed with unit coverage only: the policy tables (k witnesses,
+ranking, untrusted and rolled-back events, pins and proofs first) and one
+resolver test that resolves an unpinned, unproven domain offline from two
+configured witnesses and pins it as `attested`. The live run is: a witness
+node (`fips-pubdom attest example.org --key …`, attestation on the mesh
+relay), a client with that witness in `witnesses`, pins emptied, the
+Internet blocked, `fips-pubdom --offline verify example.org` showing the
+attestation and `decision: Bound`, then a lookup answering over the mesh.
+
 ## Level 5 — the phone
 
 Run on a Pixel 9 Pro with fips2go (then its `names` branch; a debug build from

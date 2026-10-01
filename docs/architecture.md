@@ -27,7 +27,7 @@ decisions live; the other crates move bytes.
 | `txt` | the `v=fips1 npub=… port=…` verifier record |
 | `claim` | kind 37197 claims and kind 37199 zone records from a transport-neutral `Event`, with the size limits |
 | `pins` | `Binding`, `Method` (ordered by strength), the `PinStore` trait, the anti-rollback table, the JSON snapshot every platform shares |
-| `policy` | `decide()`: spec §5.1 precedence, §5.3 conflicts, §5.4 pin changes, §5.5 offline; `ingest_claims()`: future-dated and rolled-back events |
+| `policy` | `decide()`: spec §5.1 precedence, §5.3 conflicts, §5.4 pin changes, §5.5 offline, §5.1 step 4 attestations by *k* trusted witnesses; `ingest_claims()` / `ingest_attestations()`: future-dated and rolled-back events, untrusted witnesses |
 | `synth` | DNS wire format via `simple-dns` (what fips uses): the application query, the step 3 exchange, the server's reply, the synthesized answer |
 | `cache` | TTL tables for spec §5.6 |
 

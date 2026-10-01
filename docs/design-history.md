@@ -84,6 +84,24 @@ without the Internet.
   claims alone decide, a conflict is only visible with every relay heard,
   and the fetch still waits for all of them.
 
+- **Attestations come from an explicit witness list, not from the
+  network.** The resolver asks relays for kind 37198 by the configured
+  authors only, so an untrusted key's attestation is never fetched; *k*
+  counts distinct witnesses, default 2, 0 switches the feature off. They
+  are consulted offline only, after pins and proofs and before the
+  unverified opt-in: online the record decides, and a pin is never
+  revised by hearsay. One attestation names every server of the domain
+  (`p` tags), since a witness that verified a domain with redundant
+  servers has verified the set; it vouches only for keys with a claim of
+  their own, the claim being what carries the port. `attest` refuses a
+  single-resolver verification: a witness should not be weaker than what
+  it replaces. A verification older than 30 days does not count, after
+  review: nothing else bounded a decommissioned witness's last word. The
+  attestation filter carries the user's witness list, so it goes to mesh
+  relays only — a public relay learning whom a user trusts is a leak §8's
+  gate never covered. "Default witnesses = the user's synced trusted
+  nodes" is the phone's job, where that list exists.
+
 ## Facts from the fips codebase the design rests on
 
 - fips's Nostr key is the node identity key (`src/nostr/runtime.rs` builds

@@ -5,7 +5,8 @@
 
 use crate::domain::{is_claimable, is_valid_zone_label, normalize};
 use crate::identity::Npub;
-use crate::{DEFAULT_SERVER_PORT, KIND_CLAIM, KIND_ZONE, SERVICE_DNS};
+use crate::pins::Method;
+use crate::{DEFAULT_SERVER_PORT, KIND_ATTESTATION, KIND_CLAIM, KIND_ZONE, SERVICE_DNS};
 use serde::{Deserialize, Serialize};
 
 /// The parts of a Nostr event this crate looks at. `pubdom-resolve` converts
@@ -38,6 +39,12 @@ pub enum ClaimError {
     Service,
     #[error("too many tags")]
     TooLarge,
+    #[error("missing or invalid p tag")]
+    Server,
+    #[error("method is neither dnssec nor dns")]
+    Method,
+    #[error("missing or invalid verified_at tag")]
+    VerifiedAt,
 }
 
 /// Kind 37197: "`author` serves `domain`'s fips DNS on `port`".
@@ -196,6 +203,93 @@ impl ZoneRecord {
     }
 }
 
+/// Kind 37198: "`witness` verified, while online, that `servers` serve
+/// `domain`" (spec §3.2). Worth only the trust the reader places in the
+/// witness: the resolver reads attestations from its configured witnesses
+/// and from nobody else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attestation {
+    pub witness: Npub,
+    pub domain: String,
+    /// The servers the witness verified, one `p` tag each; a witness that
+    /// verified a domain with redundant servers names them all.
+    pub servers: Vec<Npub>,
+    /// How the witness verified: `Dnssec` or `Dns` (several resolvers). A
+    /// single resolver's say is not worth attesting.
+    pub method: Method,
+    /// The witness's own verification time; `created_at` is the event's.
+    pub verified_at: u64,
+    pub created_at: u64,
+}
+
+impl Attestation {
+    pub fn parse(ev: &Event) -> Result<Self, ClaimError> {
+        if ev.kind != KIND_ATTESTATION {
+            return Err(ClaimError::Kind(ev.kind));
+        }
+        if ev.tags.len() > MAX_TAGS {
+            return Err(ClaimError::TooLarge);
+        }
+        let witness = Npub::from_hex(&ev.pubkey).map_err(|_| ClaimError::Author)?;
+        let d = tag_value(&ev.tags, "d").ok_or(ClaimError::Domain)?;
+        let domain = normalize(d).ok_or(ClaimError::Domain)?;
+        if domain != d {
+            return Err(ClaimError::Domain);
+        }
+        if !is_claimable(&domain) {
+            return Err(ClaimError::PublicSuffix);
+        }
+        let mut servers: Vec<Npub> = Vec::new();
+        for t in ev.tags.iter().filter(|t| t.len() >= 2 && t[0] == "p") {
+            let npub = Npub::from_hex(&t[1]).map_err(|_| ClaimError::Server)?;
+            if !servers.contains(&npub) {
+                servers.push(npub);
+            }
+        }
+        if servers.is_empty() {
+            return Err(ClaimError::Server);
+        }
+        let method = match tag_value(&ev.tags, "method") {
+            Some("dnssec") => Method::Dnssec,
+            Some("dns") => Method::Dns,
+            _ => return Err(ClaimError::Method),
+        };
+        let verified_at = tag_value(&ev.tags, "verified_at")
+            .and_then(|v| v.parse::<u64>().ok())
+            .ok_or(ClaimError::VerifiedAt)?;
+        Ok(Self {
+            witness,
+            domain,
+            servers,
+            method,
+            verified_at,
+            created_at: ev.created_at,
+        })
+    }
+
+    /// The tags of an attestation — what a witness publishes. `method`
+    /// below `Dns` is written as `dns`; the publisher refuses it first
+    /// (`pubdom_resolve::relay::publish_attestation`).
+    pub fn tags(
+        domain: &str,
+        servers: &[Npub],
+        method: Method,
+        verified_at: u64,
+    ) -> Vec<Vec<String>> {
+        let mut tags = vec![vec!["d".into(), domain.into()]];
+        for s in servers {
+            tags.push(vec!["p".into(), s.to_hex()]);
+        }
+        let method = match method {
+            Method::Dnssec => "dnssec",
+            _ => "dns",
+        };
+        tags.push(vec!["method".into(), method.into()]);
+        tags.push(vec!["verified_at".into(), verified_at.to_string()]);
+        tags
+    }
+}
+
 fn tag_value<'a>(tags: &'a [Vec<String>], name: &str) -> Option<&'a str> {
     tags.iter()
         .find(|t| t.len() >= 2 && t[0] == name)
@@ -302,5 +396,37 @@ mod tests {
         assert_eq!(z.lookup("git"), Some(other));
         assert_eq!(z.lookup("anything"), Some(z.author));
         assert_eq!(z.lookup("@"), Some(z.author));
+    }
+
+    #[test]
+    fn attestation_round_trip_and_limits() {
+        let w = Npub::from_bytes([9; 32]);
+        let s1 = Npub::from_bytes([1; 32]);
+        let s2 = Npub::from_bytes([2; 32]);
+        let ev = Event {
+            kind: KIND_ATTESTATION,
+            pubkey: w.to_hex(),
+            created_at: 50,
+            tags: Attestation::tags("example.org", &[s1, s2, s1], Method::Dnssec, 40),
+        };
+        let a = Attestation::parse(&ev).unwrap();
+        assert_eq!(a.witness, w);
+        assert_eq!(a.servers, vec![s1, s2], "a repeated p tag counts once");
+        assert_eq!(
+            (a.method, a.verified_at, a.created_at),
+            (Method::Dnssec, 40, 50)
+        );
+        let mut bad = ev.clone();
+        bad.tags.retain(|t| t[0] != "p");
+        assert_eq!(Attestation::parse(&bad), Err(ClaimError::Server));
+        let mut bad = ev.clone();
+        bad.tags.iter_mut().find(|t| t[0] == "method").unwrap()[1] = "dns-single".into();
+        assert_eq!(Attestation::parse(&bad), Err(ClaimError::Method));
+        let mut bad = ev.clone();
+        bad.tags.retain(|t| t[0] != "verified_at");
+        assert_eq!(Attestation::parse(&bad), Err(ClaimError::VerifiedAt));
+        let mut bad = ev;
+        bad.kind = KIND_CLAIM;
+        assert_eq!(Attestation::parse(&bad), Err(ClaimError::Kind(KIND_CLAIM)));
     }
 }

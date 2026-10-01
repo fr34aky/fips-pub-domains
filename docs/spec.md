@@ -99,7 +99,8 @@ Published by the server that serves a domain.
 
 ### 3.2 Attestation — kind 37198 (addressable)
 
-Published by a node that verified a binding while it had Internet access.
+Published by a node (a *witness*) that verified a binding while it had
+Internet access.
 
 ```jsonc
 {
@@ -107,7 +108,7 @@ Published by a node that verified a binding while it had Internet access.
   "pubkey": "<witness hex>",
   "tags": [
     ["d", "example.org"],
-    ["p", "<npubxyz hex>"],
+    ["p", "<npubxyz hex>"],        // one per server the witness verified
     ["method", "dnssec"],          // or "dns" (unsigned DNS, several resolvers)
     ["verified_at", "<unix time>"]
   ],
@@ -115,7 +116,24 @@ Published by a node that verified a binding while it had Internet access.
 }
 ```
 
-An attestation is only worth the trust the reader places in the witness.
+- One attestation per (witness, domain); it names every server the witness
+  verified for the domain (§5.3), so a re-attestation replaces the whole set.
+- `method` is how the witness verified: `dnssec`, or `dns` from several
+  agreeing resolvers. A single resolver's say is not worth attesting.
+- An attestation is only worth the trust the reader places in the witness.
+  A client reads attestations from witnesses it configured explicitly and
+  asks relays for those authors only; an attestation by any other key is
+  never fetched, let alone believed. The client counts the distinct
+  witnesses that name a server and uses it once there are *k* (default 2;
+  0 turns attestations off). It vouches only for keys that claim the domain
+  themselves: the claim says which port the server serves.
+- Attestations are consulted offline only, for a domain with no pin and no
+  usable proof (§5.1). A binding taken on attestations is pinned as
+  `attested`, the weakest method, so any later online verification
+  replaces it (§5.4). A verification older than 30 days no longer counts:
+  a decommissioned witness's last word must not bind a retired server
+  forever. Clients read attestations from relays on the mesh only, so that
+  no public relay learns whom a user trusts; a witness publishes there.
 
 ### 3.3 Zone record — kind 37199 (addressable)
 
@@ -206,8 +224,9 @@ claim for a public suffix (`ch`, `co.uk`) — use a bundled Public Suffix List.
   Zone records (§3.3) from any of the servers are accepted, newest first.
 - Claims whose author the record does *not* name are ignored (online).
   Offline: the pinned servers; otherwise the claim with a valid DNSSEC
-  proof; otherwise the claim with the most trusted attestations. Ties or
-  no evidence → treat as unverified (§5.1 step 5).
+  proof; otherwise every claim attested by *k* trusted witnesses, the one
+  with most witnesses first (§3.2). No evidence → treat as unverified
+  (§5.1 step 5).
 
 ### 5.4 Pinning
 
@@ -216,7 +235,7 @@ claim for a public suffix (`ch`, `co.uk`) — use a bundled Public Suffix List.
   unchanged binding does not rewrite the pin.
 - A **changed** binding is accepted only through a fresh verification of
   equal or stronger method (DNSSEC ≥ multi-resolver DNS ≥ single-resolver
-  DNS ≥ attestation). A pinned binding is never replaced by an unverified
+  DNS ≥ attested). A pinned binding is never replaced by an unverified
   claim.
 - The **same** binding re-verified with a weaker method keeps the pin's
   method: an unsigned replay of the real record must not lower the bar for

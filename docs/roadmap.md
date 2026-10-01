@@ -24,6 +24,12 @@
   (verified live, [testing.md](testing.md) level 4d). Signature lifetime,
   unsigned zones and the built-in root anchors are the limits (spec §5.5).
 
+- Attestations (kind 37198) and the trust setting *k*: witnesses listed
+  in the config, `fips-pubdom attest` to be one; used offline for a domain
+  with no pin and no proof, pinned as `attested`. Unit-tested through the
+  resolver; not yet exercised live (a witness node and an offline client
+  with the witness configured).
+
 ## Next
 
 1. **Registration and the NIP** — submitted 2026-09-28:
@@ -31,8 +37,9 @@
    and [nips #2487](https://github.com/nostr-protocol/nips/pull/2487)
    (NIP-DB). Until merged, the kind numbers are provisional; if others are
    assigned, `pubdom-core::KIND_*` and the docs follow.
-2. **Attestations** (kind 37198) and the trust setting *k*; default
-   witnesses = the user's synced trusted nodes, opt-in.
+2. **Attestations on the phone**: `witnesses` and `attestation_threshold`
+   in fips2go's Settings (the shim reads the same `ResolverConfig`);
+   default witnesses = the user's synced trusted nodes, opt-in.
 3. **Daemon backends**: dnsmasq / NetworkManager, plain `resolv.conf`,
    then macOS (launchd + `networksetup`) and Windows (service + adapter
    DNS); restricted per-domain mode on all three; OpenWrt and pfSense
@@ -77,8 +84,8 @@
   DHCP-provided resolver is common on phones); the verification is then
   `dns-single`, and a later two-resolver or DNSSEC verification upgrades the
   pin.
-- Clippy has not been run on the reference machine (no rustup toolchain);
-  CI should add it.
+- Clippy is not available on the reference machine (no rustup toolchain);
+  CI runs it with `-D warnings`.
 
 ## Open questions
 

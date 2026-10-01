@@ -7,13 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- A server's attestation of its own domain no longer counts toward *k*:
-  with witnesses drawn from the nodes a client knows (the phone's Mesh
-  names), the servers themselves are routinely on the list, and a claim
-  vouched for by its author is just the claim.
-
 ### Changed
 
 - On the resolved and NetworkManager backends the daemon follows its
@@ -25,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A key that claims a domain is no witness for it: its attestations no
+  longer count toward *k*, for itself or for a sibling server. With
+  witnesses drawn from the nodes a client knows (the phone's Mesh names),
+  the servers themselves are routinely on the list, and a claim vouched
+  for by its author — or two claimants vouching for each other — would
+  have been its own proof. `fips-pubdom attest` refuses to run from a
+  key that claims the domain, and `verify` marks such attestations.
 - The daemon's upstreams and `setup`'s snapshot read `resolv.conf` as
   glibc does: a `nameserver` line must start the line and be followed by a
   space or tab, and the address ends at `;` or `#`. An indented line, which

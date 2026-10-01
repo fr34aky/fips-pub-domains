@@ -418,6 +418,20 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             &att_events,
             now,
         );
+        // An attestation by one of the domain's own servers counts for
+        // nothing (spec §3.2); say so, or an `Unverified` next to
+        // "witnesses configured" would be a puzzle.
+        let discounted = attestations
+            .iter()
+            .filter(|a| claims.iter().any(|c| c.author == a.witness))
+            .count();
+        if discounted > 0 {
+            tracing::info!(
+                domain = d,
+                discounted,
+                "attestations by the domain's own servers do not count"
+            );
+        }
         let is_unreachable = matches!(txt, TxtLookup::Unreachable);
         let disputed = matches!(txt, TxtLookup::Disputed);
         let outcome = policy::decide(Input {

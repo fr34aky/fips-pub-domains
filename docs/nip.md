@@ -133,7 +133,9 @@ before use, in this order of strength:
 2. **Proof-verified** — the claim's `dnssec` tag validates against the DNS
    root trust anchor and names the author. Works offline.
 3. **Attested** — at least `k` configured witnesses published kind 37198 for
-   (domain, author).
+   (domain, author). A witness is a third party: an attestation whose
+   author itself claims the domain does not count, for its own claim or
+   for another's.
 4. **Pinned** — the client verified (1–3) earlier and stored the binding.
    A pinned binding is replaced only by a fresh verification of equal or
    stronger method.

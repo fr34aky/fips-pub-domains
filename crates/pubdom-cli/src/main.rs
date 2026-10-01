@@ -182,8 +182,13 @@ async fn main() -> Result<()> {
                 cfg.attestation_threshold
             );
             for a in &attestations {
+                let note = if claims.iter().any(|c| c.author == a.witness) {
+                    " (a server of the domain itself: does not count)"
+                } else {
+                    ""
+                };
                 println!(
-                    "  {} attests {:?} {:?} verified_at {}",
+                    "  {} attests {:?} {:?} verified_at {}{note}",
                     a.witness, a.servers, a.method, a.verified_at
                 );
             }
@@ -330,6 +335,16 @@ async fn main() -> Result<()> {
                     return Err(anyhow!("{domain}: nothing to attest ({other:?})"));
                 }
             };
+            // A witness is a third party: a key that claims the domain is
+            // no witness for it, so attesting from a server would publish
+            // an event no client counts.
+            let own = Npub::from_hex(&keys.public_key().to_hex()).map_err(|e| anyhow!("{e}"))?;
+            if claims.iter().any(|c| c.author == own) {
+                relays.shutdown().await;
+                return Err(anyhow!(
+                    "{domain}: this key claims the domain itself; a witness must be another node"
+                ));
+            }
             let all: Vec<String> = cfg
                 .public_relays
                 .iter()

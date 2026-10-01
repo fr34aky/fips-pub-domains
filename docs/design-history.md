@@ -96,7 +96,14 @@ without the Internet.
   their own, the claim being what carries the port. `attest` refuses a
   single-resolver verification: a witness should not be weaker than what
   it replaces. A verification older than 30 days does not count, after
-  review: nothing else bounded a decommissioned witness's last word. The
+  review: nothing else bounded a decommissioned witness's last word. **A
+  key that claims the domain is no witness for it**, after the phone
+  gained witnesses drawn from its Mesh names, which routinely include the
+  servers: excluding only self-attestation was considered and rejected,
+  since two claimants could then vouch for each other; refusing at the
+  publisher alone was rejected too, since the reader cannot trust
+  publishers to refuse. The rule lives in the policy, `attest` refuses to
+  run from a claimant as a courtesy. The
   attestation filter carries the user's witness list, so it goes to mesh
   relays only — a public relay learning whom a user trusts is a leak §8's
   gate never covered. "Default witnesses = the user's synced trusted

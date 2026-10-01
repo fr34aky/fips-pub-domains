@@ -104,15 +104,22 @@ mod tests {
             h.fetch_add(1, Ordering::SeqCst);
         })
         .expect("a watcher on a temporary directory");
-        std::thread::sleep(Duration::from_millis(200));
-        // Another file in the directory: not our change.
+        // Let the watcher settle, and discard anything it replays from
+        // before it started (FSEvents on macOS reports recent history).
+        std::thread::sleep(SETTLE * 3);
+        hits.store(0, Ordering::SeqCst);
+        // Another file in the directory: not our change. FSEvents coalesces
+        // directory activity, so this is asserted where inotify and
+        // ReadDirectoryChanges report per file.
         std::fs::write(dir.0.join("stub-resolv.conf"), "nameserver 127.0.0.53\n").unwrap();
         std::thread::sleep(SETTLE * 3);
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(
             hits.load(Ordering::SeqCst),
             0,
             "a sibling file is not the upstreams file"
         );
+        hits.store(0, Ordering::SeqCst);
         // As resolved does it: write a new file, rename it into place.
         let tmp = dir.0.join(".resolv.conf.tmp");
         std::fs::write(&tmp, "nameserver 10.0.0.2\n").unwrap();

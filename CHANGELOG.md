@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The daemon's upstreams and `setup`'s snapshot read `resolv.conf` as
+  glibc does: a `nameserver` line must start the line and be followed by a
+  space or tab, and the address ends at `;` or `#`. An indented line, which
+  the system resolver ignores, no longer becomes an upstream. The dnsmasq
+  backend reads dnsmasq's resolv file as dnsmasq does, indented lines
+  included.
+
 ## [0.2.3] - 2026-10-01
 
 ### Added

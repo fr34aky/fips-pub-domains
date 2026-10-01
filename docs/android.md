@@ -13,9 +13,9 @@ the phone can: the mesh transport and the responder registration.
 | `shim/src/names.rs` | builds the resolver over the engine's `MeshLink`, runs it from the DNS proxy's blocking per-query thread on a one-worker tokio runtime, implements `MeshDns` |
 | `shim/src/meshtcp.rs` | relays on the mesh: a loopback listener per relay, admitting only the resolver (random path token), each connection carried over the in-process smoltcp TCP stack to the relay's fips address |
 | `shim/src/meshudp.rs` | one UDP request/response over the mesh from the node's own address through a smoltcp socket — the UDP twin of `meshhttp.rs`; and the ICMPv6 echo that confirms a target node is reachable. `Divert` claims UDP flows and echo replies (by identifier) for it |
-| `shim/src/dns.rs` | the proxy asks the resolver for every non-`.fips` name before the upstreams; `None` means "not over fips" and the query goes upstream unchanged |
-| `shim/src/config.rs` | knobs `names_pins_path` (set = on), `names_mesh_relays`, `names_allow_unverified_offline` |
-| `ConfigStore.kt` / `SettingsFragment.kt` | Settings → *Public domain names over fips* (`public_names`, default on) decides whether the pin path is sent; *Mesh relays for public names* below it lists relays on fips nodes, validated (bech32 checksum) and sent as `names_mesh_relays` while the switch is on |
+| `shim/src/dns.rs` | the proxy asks the resolver for every non-`.fips` name before the upstreams; `Legacy` means "not over fips" and the query goes upstream unchanged, `Pending` (the lookup overran its budget) goes upstream with the answer's TTLs capped |
+| `shim/src/config.rs` | knobs `names_pins_path` (set = on), `names_mesh_relays`, `names_allow_unverified_offline`, `names_witnesses`, `names_attestation_threshold` |
+| `ConfigStore.kt` / `SettingsFragment.kt` | Settings → *Public domain names over fips* (`public_names`, default on) decides whether the pin path is sent; *Mesh relays for public names* below it lists relays on fips nodes, validated (bech32 checksum) and sent as `names_mesh_relays` while the switch is on; *Witnesses for public names* and *Witnesses that must agree* are the attestation knobs (spec §3.2), validated the same way, flagged in place when no mesh relay is set or k exceeds the list, and sent as `names_witnesses` / `names_attestation_threshold` only when the list is non-empty (fips2go #62) |
 
 The pin file is `names-pins.json` in the app's private files directory,
 same schema as the desktop daemon's, so a backup restores it.

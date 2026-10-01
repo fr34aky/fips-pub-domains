@@ -26,9 +26,10 @@
 
 - Attestations (kind 37198) and the trust setting *k*: witnesses listed
   in the config, `fips-pubdom attest` to be one; used offline for a domain
-  with no pin and no proof, pinned as `attested`. Unit-tested through the
-  resolver; not yet exercised live (a witness node and an offline client
-  with the witness configured).
+  with no pin and no proof, pinned as `attested`. On the phone: the
+  witness list and *k* in fips2go's Settings (#62). Unit-tested through
+  the resolver; not yet exercised live (a witness node and an offline
+  client with the witness configured — [testing.md](testing.md) 4e).
 
 ## Next
 
@@ -37,9 +38,9 @@
    and [nips #2487](https://github.com/nostr-protocol/nips/pull/2487)
    (NIP-DB). Until merged, the kind numbers are provisional; if others are
    assigned, `pubdom-core::KIND_*` and the docs follow.
-2. **Attestations on the phone**: `witnesses` and `attestation_threshold`
-   in fips2go's Settings (the shim reads the same `ResolverConfig`);
-   default witnesses = the user's synced trusted nodes, opt-in.
+2. **Default witnesses on the phone** = the user's synced trusted nodes
+   (the Mesh names sync's upstream and the hosts-file entries), opt-in;
+   today the list is typed in Settings.
 3. **Daemon backends**: dnsmasq / NetworkManager, plain `resolv.conf`,
    then macOS (launchd + `networksetup`) and Windows (service + adapter
    DNS); restricted per-domain mode on all three; OpenWrt and pfSense

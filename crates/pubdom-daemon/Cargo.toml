@@ -17,6 +17,7 @@ simple-dns = "0.11"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 notify = "8"
+notify-debouncer-mini = "0.7"
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"

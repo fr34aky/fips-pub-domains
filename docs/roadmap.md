@@ -51,9 +51,10 @@
    today the list is typed in Settings.
 3. **Daemon backends**: macOS (launchd + `networksetup`) and Windows
    (service + adapter DNS); restricted per-domain mode; OpenWrt and
-   pfSense packaging. Done: the upstreams file is followed as the OS
-   rewrites it (the network-change signal on every Linux backend), the
-   30 s poll kept as the fallback. Done on Linux: NetworkManager, standalone dnsmasq and plain
+   pfSense packaging. Implemented, unit-tested, not yet checked live: the
+   upstreams file is followed as resolved or NetworkManager rewrite it,
+   the 30 s poll kept as the fallback (the snapshot backends are static
+   by nature). Done on Linux: NetworkManager, standalone dnsmasq and plain
    `resolv.conf` beside systemd-resolved, with detection and a recorded
    teardown.
 4. **Phone gaps**: TCP fallback for step 3 over the smoltcp stack; an

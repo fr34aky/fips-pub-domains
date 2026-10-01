@@ -158,6 +158,24 @@ pub fn server_reply(query: &[u8], target: Option<Npub>, ttl: u32) -> Option<Vec<
     p.build_bytes_vec().ok()
 }
 
+/// `reply` with every record's TTL capped at `max_ttl`: for a legacy answer
+/// forwarded because the lookup overran its budget, so the application's
+/// resolver drops it about when the lookup has finished and cached. EDNS
+/// lives in the header, not in a record, so it is untouched. `None` when
+/// the message does not parse — the caller forwards it as it came.
+pub fn clamp_ttls(reply: &[u8], max_ttl: u32) -> Option<Vec<u8>> {
+    let mut p = Packet::parse(reply).ok()?;
+    for rr in p
+        .answers
+        .iter_mut()
+        .chain(p.name_servers.iter_mut())
+        .chain(p.additional_records.iter_mut())
+    {
+        rr.ttl = rr.ttl.min(max_ttl);
+    }
+    p.build_bytes_vec().ok()
+}
+
 fn reply_for(q: &Query, rcode: RCODE) -> Option<Packet<'static>> {
     let mut p = Packet::new_reply(q.id);
     if q.recursion_desired {
@@ -273,5 +291,24 @@ mod tests {
             Packet::parse(&p_bytes).unwrap().rcode(),
             RCODE::ServerFailure
         );
+    }
+
+    #[test]
+    fn clamp_ttls_caps_every_record_and_keeps_the_rest() {
+        let q = parse_query(&build_query(7, "www.example.org", QTYPE_AAAA).unwrap()).unwrap();
+        let long = build_answer(&q, npub(), 300).unwrap();
+        let short = clamp_ttls(&long, 5).unwrap();
+        let p = Packet::parse(&short).unwrap();
+        assert_eq!(p.id(), 7);
+        assert_eq!(p.answers.len(), 2, "CNAME and AAAA survive");
+        assert!(p.answers.iter().all(|rr| rr.ttl == 5));
+        assert_eq!(p.questions[0].qname.to_string(), "www.example.org");
+        // A TTL already below the cap is left alone.
+        let brief = build_answer(&q, npub(), 2).unwrap();
+        let kept = clamp_ttls(&brief, 5).unwrap();
+        let p = Packet::parse(&kept).unwrap();
+        assert!(p.answers.iter().all(|rr| rr.ttl == 2));
+        // Garbage is not an answer.
+        assert!(clamp_ttls(b"\x00\x07", 5).is_none());
     }
 }

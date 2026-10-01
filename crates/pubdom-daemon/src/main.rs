@@ -84,7 +84,7 @@ impl State {
     }
 }
 
-async fn handle(state: &State, query: Vec<u8>) -> Option<Vec<u8>> {
+async fn handle(state: &Arc<State>, query: Vec<u8>) -> Option<Vec<u8>> {
     if query.len() < 12 {
         return None; // not a DNS message; nothing to answer
     }
@@ -96,11 +96,23 @@ async fn handle(state: &State, query: Vec<u8>) -> Option<Vec<u8>> {
             None => forward::servfail(&query),
         };
     }
-    let result = match tokio::time::timeout(state.cfg.budget(), state.resolver.lookup(&query)).await
-    {
-        Ok(r) => r,
+    // Not awaited in place: a lookup that overruns the budget carries on
+    // and caches its decision, so the next query is answered at once.
+    let lookup = tokio::spawn({
+        let state = state.clone();
+        let query = query.clone();
+        async move { state.resolver.lookup(&query).await }
+    });
+    let mut overrun = false;
+    let result = match tokio::time::timeout(state.cfg.budget(), lookup).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "lookup failed; falling back to legacy");
+            LookupResult::Passthrough
+        }
         Err(_) => {
-            tracing::warn!("lookup exceeded the budget; falling back to legacy");
+            tracing::warn!("lookup exceeded the budget; falling back to legacy for now");
+            overrun = true;
             LookupResult::Passthrough
         }
     };
@@ -109,6 +121,12 @@ async fn handle(state: &State, query: Vec<u8>) -> Option<Vec<u8>> {
         LookupResult::Passthrough => {
             let upstreams = state.upstreams.read().unwrap().clone();
             match forward::forward(&query, &upstreams).await {
+                // The lookup is still deciding: the stub must not keep the
+                // legacy address for the upstream's TTL (a parked wildcard
+                // gives a real address for 300 s) while it does.
+                Some(r) if overrun => Some(
+                    pubdom_core::synth::clamp_ttls(&r, pubdom_core::OVERRUN_TTL_SECS).unwrap_or(r),
+                ),
                 Some(r) => Some(r),
                 None => forward::servfail(&query),
             }

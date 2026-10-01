@@ -91,18 +91,20 @@ impl RelayClient {
         }
         match scope {
             RelayScope::AfterHit => {
-                let (a, b) = futures::join!(
-                    fetch_one(self.public.as_ref(), &filter, self.timeout),
-                    fetch_one(self.mesh.as_ref(), &filter, self.timeout),
-                );
-                let mut out = a;
-                out.extend(b);
-                out
+                let relays: Vec<Relay> = relays_of(self.public.as_ref())
+                    .await
+                    .into_iter()
+                    .chain(relays_of(self.mesh.as_ref()).await)
+                    .collect();
+                fetch_from(relays, &filter, self.timeout).await
             }
-            RelayScope::MeshOnly => fetch_one(self.mesh.as_ref(), &filter, self.timeout).await,
+            RelayScope::MeshOnly => {
+                fetch_from(relays_of(self.mesh.as_ref()).await, &filter, self.timeout).await
+            }
             RelayScope::Offline => {
                 for client in self.mesh.iter().chain(self.public.iter()) {
-                    let out = fetch_one(Some(client), &filter, self.timeout).await;
+                    let out =
+                        fetch_from(relays_of(Some(client)).await, &filter, self.timeout).await;
                     if !out.is_empty() {
                         return out;
                     }
@@ -119,17 +121,71 @@ impl RelayClient {
     }
 }
 
-async fn fetch_one(client: Option<&Client>, filter: &Filter, timeout: Duration) -> Vec<CoreEvent> {
-    let Some(client) = client else {
-        return Vec::new();
-    };
-    match client.fetch_events(filter.clone(), timeout).await {
-        Ok(events) => events.into_iter().map(convert).collect(),
-        Err(e) => {
-            tracing::debug!(error = %e, "relay fetch failed");
-            Vec::new()
+/// How much longer the other relays get once one has delivered a claim.
+/// A pool-wide fetch waits for every relay to send EOSE or time out, and a
+/// relay that has gone quiet (a half-dead public relay, a mesh relay whose
+/// path is being rebuilt) made every cold lookup pay the whole timeout —
+/// on the phone, most of its budget. Long enough for a relay on the mesh
+/// (a few hundred ms behind a public one) to still be heard.
+const GRACE: Duration = Duration::from_millis(750);
+
+async fn relays_of(client: Option<&Client>) -> Vec<Relay> {
+    match client {
+        Some(c) => c.relays().await.into_values().collect(),
+        None => Vec::new(),
+    }
+}
+
+/// Every relay asked at once, each on its own subscription, and the results
+/// gathered as they come: once one relay has answered with events, the rest
+/// get [`GRACE`], then the fetch returns with what it has. A relay that is
+/// not connected fails at once and counts for nothing.
+async fn fetch_from(relays: Vec<Relay>, filter: &Filter, timeout: Duration) -> Vec<CoreEvent> {
+    let fetches = relays.into_iter().map(|relay| {
+        let filter = filter.clone();
+        async move {
+            relay
+                .fetch_events(filter, timeout, ReqExitPolicy::ExitOnEOSE)
+                .await
+                .map(|events| events.into_iter().map(convert).collect::<Vec<_>>())
+                .map_err(
+                    |e| tracing::debug!(relay = %relay.url(), error = %e, "relay fetch failed"),
+                )
+        }
+    });
+    gather(futures::stream::FuturesUnordered::from_iter(fetches), GRACE).await
+}
+
+/// The gathering rule, apart from nostr-sdk so it can be tested: results
+/// in completion order; the first non-empty one starts the grace clock.
+async fn gather<S, E>(mut results: S, grace: Duration) -> Vec<CoreEvent>
+where
+    S: futures::Stream<Item = Result<Vec<CoreEvent>, E>> + Unpin,
+{
+    use futures::StreamExt;
+    let mut out = Vec::new();
+    let mut deadline: Option<tokio::time::Instant> = None;
+    loop {
+        let next = results.next();
+        let item = match deadline {
+            Some(d) => match tokio::time::timeout_at(d, next).await {
+                Ok(item) => item,
+                Err(_) => break,
+            },
+            None => next.await,
+        };
+        match item {
+            None => break,
+            Some(Ok(events)) => {
+                if !events.is_empty() && deadline.is_none() {
+                    deadline = Some(tokio::time::Instant::now() + grace);
+                }
+                out.extend(events);
+            }
+            Some(Err(_)) => {}
         }
     }
+    out
 }
 
 async fn make(urls: &[String]) -> Option<Client> {
@@ -296,5 +352,71 @@ mod tests {
         assert_eq!(z.names, names);
         assert_eq!(z.lookup("www"), Some(z.author));
         assert_eq!(z.lookup("mail"), None);
+    }
+
+    use futures::stream::FuturesUnordered;
+    use std::future::Future;
+    use std::pin::Pin;
+
+    fn ev(n: u64) -> CoreEvent {
+        CoreEvent {
+            kind: KIND_CLAIM,
+            pubkey: format!("{n:064x}"),
+            created_at: n,
+            tags: Vec::new(),
+        }
+    }
+
+    type Fetch = Pin<Box<dyn Future<Output = Result<Vec<CoreEvent>, ()>> + Send>>;
+
+    fn after(ms: u64, result: Result<Vec<CoreEvent>, ()>) -> Fetch {
+        Box::pin(async move {
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+            result
+        })
+    }
+
+    #[tokio::test]
+    async fn gather_returns_a_grace_after_the_first_claim_not_after_the_slowest_relay() {
+        let fetches: FuturesUnordered<Fetch> = [
+            after(10, Ok(vec![ev(1)])),
+            after(40, Ok(vec![ev(2)])),
+            after(5, Err(())),
+            after(5_000, Ok(vec![ev(3)])),
+        ]
+        .into_iter()
+        .collect();
+        let started = std::time::Instant::now();
+        let out = gather(fetches, Duration::from_millis(200)).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "did not wait for the quiet relay"
+        );
+        let mut got: Vec<u64> = out.iter().map(|e| e.created_at).collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![1, 2],
+            "the fast relays' claims, in whatever order they came"
+        );
+    }
+
+    #[tokio::test]
+    async fn gather_waits_for_a_late_claim_when_the_fast_relays_have_none() {
+        // Empty answers (a relay that never saw the domain) do not start
+        // the clock: the only relay holding the claim may be the slow one.
+        let fetches: FuturesUnordered<Fetch> =
+            [after(5, Ok(Vec::new())), after(300, Ok(vec![ev(9)]))]
+                .into_iter()
+                .collect();
+        let out = gather(fetches, Duration::from_millis(50)).await;
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].created_at, 9);
+    }
+
+    #[tokio::test]
+    async fn gather_with_no_relays_is_empty_at_once() {
+        let fetches: FuturesUnordered<Fetch> = FuturesUnordered::new();
+        assert!(gather(fetches, Duration::from_secs(5)).await.is_empty());
     }
 }

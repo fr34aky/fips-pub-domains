@@ -53,7 +53,12 @@ firewall and the TUN.
 - The whole lookup runs on a 3.5 s budget so the legacy fallback still fits
   inside bionic's 5 s resolver timeout. A lookup that overruns it (offline:
   TXT timeout, then a mesh relay) finishes in the background and caches,
-  so the application's retry resolves.
+  so the application's retry resolves. The legacy answer handed out in the
+  meantime has its TTLs capped at 5 s (`OVERRUN_TTL_SECS`): Android's
+  resolver otherwise kept a parked wildcard's address for its 300 s, which
+  looked like the name never resolving over fips. A browser's own host
+  cache (Chromium: 60 s) is beyond the proxy's reach; a reload after that
+  gets the mesh address.
 
 ## Verifying on a device
 

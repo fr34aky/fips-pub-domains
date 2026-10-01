@@ -38,6 +38,11 @@ pub const DEFAULT_SERVER_PORT: u16 = 5355;
 /// Events dated further in the future than this are ignored (spec §8).
 pub const MAX_FUTURE_SECS: u64 = 600;
 
+/// How old a witness's verification may be and still count (spec §3.2):
+/// a decommissioned witness's last word must not bind a retired server
+/// forever. Witnesses re-attest daily; a month covers a long outage.
+pub const ATTESTATION_MAX_AGE_SECS: u64 = 30 * 86_400;
+
 /// TTL of answers synthesized for applications (spec §7).
 pub const ANSWER_TTL_SECS: u32 = 30;
 

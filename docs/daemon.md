@@ -68,8 +68,9 @@ own other nodes, or a friend's — that publish attestations with
 `fips-pubdom attest` ([operators.md](operators.md), "Witnesses"). Offline,
 for a domain with no pin and no DNSSEC proof in its claim, a server attested
 by `attestation_threshold` of them is used and pinned as `attested`; the
-next online lookup re-verifies it properly. With `witnesses` empty nothing
-changes.
+next online lookup re-verifies it properly. Attestations are read from
+the `mesh_relays` only, so the witness list never reaches a public relay.
+With `witnesses` empty nothing changes.
 
 **Mesh relays** are Nostr relays that run on fips nodes and are reachable
 without the Internet. Configure them by their `.fips` hostname, never as an

@@ -23,6 +23,10 @@ pub enum RelayScope {
     /// or chose on the mesh — a public relay must never learn of a domain
     /// that DNS has not vouched for.
     MeshOnly,
+    /// Both sets, every relay heard out: for a publisher that must see the
+    /// whole set (a witness attesting the domain's servers), not a lookup
+    /// racing a budget.
+    Full,
 }
 
 pub struct RelayClient {
@@ -53,18 +57,43 @@ impl RelayClient {
     }
 
     /// Attestations (kind 37198, spec §3.2) for `domain` by `witnesses`:
-    /// the filter names the authors, so nobody else's reach the client.
-    /// Empty `witnesses` fetches nothing.
+    /// the filter names the authors, so nobody else's reach the client —
+    /// and it is sent to the mesh relays only, whatever `scope` the claims
+    /// used: the list of whom a user trusts is not for a public relay to
+    /// learn. A witness therefore publishes to a relay on the mesh. Empty
+    /// `witnesses` fetches nothing.
     pub async fn fetch_attestations(
         &self,
         domain: &str,
         witnesses: &[Npub],
-        scope: RelayScope,
+        _scope: RelayScope,
     ) -> Vec<CoreEvent> {
         if witnesses.is_empty() {
             return Vec::new();
         }
-        self.fetch(KIND_ATTESTATION, domain, witnesses, scope).await
+        let filter = Self::filter(KIND_ATTESTATION, domain, witnesses);
+        fetch_from(
+            relays_of(self.mesh.as_ref()).await,
+            &filter,
+            self.timeout,
+            None,
+        )
+        .await
+    }
+
+    fn filter(kind: u16, domain: &str, authors: &[Npub]) -> Filter {
+        let mut filter = Filter::new()
+            .kind(Kind::from(kind))
+            .identifier(domain)
+            .limit(32);
+        let keys: Vec<PublicKey> = authors
+            .iter()
+            .filter_map(|a| PublicKey::from_hex(&a.to_hex()).ok())
+            .collect();
+        if !keys.is_empty() {
+            filter = filter.authors(keys);
+        }
+        filter
     }
 
     /// One author's claims for `domain` — a server looking for its own,
@@ -98,28 +127,22 @@ impl RelayClient {
         authors: &[Npub],
         scope: RelayScope,
     ) -> Vec<CoreEvent> {
-        let mut filter = Filter::new()
-            .kind(Kind::from(kind))
-            .identifier(domain)
-            .limit(32);
-        let keys: Vec<PublicKey> = authors
-            .iter()
-            .filter_map(|a| PublicKey::from_hex(&a.to_hex()).ok())
-            .collect();
-        if !keys.is_empty() {
-            filter = filter.authors(keys);
-        }
+        let filter = Self::filter(kind, domain, authors);
         match scope {
             // Online, the TXT record names the server: a claim set short of
             // a slow relay's costs at most that relay's say until the next
             // TXT TTL, so the fast relays set the pace.
-            RelayScope::AfterHit => {
+            RelayScope::AfterHit | RelayScope::Full => {
                 let relays: Vec<Relay> = relays_of(self.public.as_ref())
                     .await
                     .into_iter()
                     .chain(relays_of(self.mesh.as_ref()).await)
                     .collect();
-                fetch_from(relays, &filter, self.timeout, Some(GRACE)).await
+                let grace = match scope {
+                    RelayScope::Full => None,
+                    _ => Some(GRACE),
+                };
+                fetch_from(relays, &filter, self.timeout, grace).await
             }
             // Without the TXT record the claims alone decide, and a conflict
             // is only visible with every relay heard: no grace.
@@ -316,7 +339,8 @@ pub async fn publish_zone(
 /// Publish an attestation (kind 37198, spec §3.2) that `servers` serve
 /// `domain`, verified by `method` at `verified_at`, signed with the
 /// witness's `keys`. Addressable per (witness, domain): the newest replaces
-/// the earlier one, so a witness re-attests the whole server set.
+/// the earlier one, so a witness re-attests the whole server set. `method`
+/// must be `Dnssec` or `Dns`: a single resolver's say is not attested.
 pub async fn publish_attestation(
     keys: Keys,
     relays: &[String],
@@ -326,6 +350,7 @@ pub async fn publish_attestation(
     verified_at: u64,
     timeout: Duration,
 ) -> Result<Vec<String>, String> {
+    attestable(method)?;
     publish(
         keys,
         relays,
@@ -410,9 +435,8 @@ pub fn claim_event_json(
     signed_json(keys, KIND_CLAIM, Claim::tags(domain, port, dnssec))
 }
 
-/// The zone record as JSON without sending it.
 /// The signed attestation as JSON, for tests and `fips-pubdom attest
-/// --dry-run`.
+/// --dry-run`. `method` as for [`publish_attestation`].
 pub fn attestation_event_json(
     keys: &Keys,
     domain: &str,
@@ -420,6 +444,7 @@ pub fn attestation_event_json(
     method: Method,
     verified_at: u64,
 ) -> Result<String, String> {
+    attestable(method)?;
     signed_json(
         keys,
         KIND_ATTESTATION,
@@ -427,6 +452,17 @@ pub fn attestation_event_json(
     )
 }
 
+fn attestable(method: Method) -> Result<(), String> {
+    if method >= Method::Dns {
+        Ok(())
+    } else {
+        Err(format!(
+            "{method:?} is not worth attesting: DNSSEC or two agreeing resolvers only"
+        ))
+    }
+}
+
+/// The zone record as JSON without sending it.
 pub fn zone_event_json(
     keys: &Keys,
     domain: &str,
@@ -472,6 +508,11 @@ mod tests {
         assert_eq!(a.witness.to_hex(), keys.public_key().to_hex());
         assert_eq!(a.servers, vec![server]);
         assert_eq!((a.method, a.verified_at), (Method::Dnssec, 1234));
+        assert!(
+            attestation_event_json(&keys, "example.org", &[server], Method::DnsSingle, 1234)
+                .is_err(),
+            "a single resolver's verification is refused"
+        );
     }
 
     #[test]

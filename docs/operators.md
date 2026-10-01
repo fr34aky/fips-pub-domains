@@ -206,12 +206,15 @@ fips-pubdom attest example.org --key /etc/fips/fips.key
 ```
 
 It verifies the record as a resolver would (DNSSEC, or two agreeing
-resolvers — a single resolver is refused), fetches the claims, and
-publishes one attestation to your public and mesh relays naming every
-server the record and the claims agree on. `--dry-run` prints the signed
-event instead. Run it again whenever the server set changes, and
-periodically (a daily timer is plenty): a client asks for the newest
-attestation per witness. `fips-pubdom attestations example.org` shows
+resolvers — a single resolver is refused), fetches the claims from every
+relay, and publishes one attestation to your public and mesh relays
+naming every server the record and the claims agree on. `--dry-run`
+prints the signed event instead. Clients read attestations from **mesh
+relays only** (their witness list is not for a public relay to see), so
+configure at least one `mesh_relays` entry the clients share. Run it
+again whenever the server set changes, and periodically (a daily timer
+is plenty): a client asks for the newest attestation per witness and
+ignores one verified more than 30 days ago. `fips-pubdom attestations example.org` shows
 what the configured witnesses have published.
 
 ## Checking from another node

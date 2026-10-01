@@ -95,8 +95,12 @@ without the Internet.
   servers has verified the set; it vouches only for keys with a claim of
   their own, the claim being what carries the port. `attest` refuses a
   single-resolver verification: a witness should not be weaker than what
-  it replaces. "Default witnesses = the user's synced trusted nodes" is
-  the phone's job, where that list exists.
+  it replaces. A verification older than 30 days does not count, after
+  review: nothing else bounded a decommissioned witness's last word. The
+  attestation filter carries the user's witness list, so it goes to mesh
+  relays only — a public relay learning whom a user trusts is a leak §8's
+  gate never covered. "Default witnesses = the user's synced trusted
+  nodes" is the phone's job, where that list exists.
 
 ## Facts from the fips codebase the design rests on
 

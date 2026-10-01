@@ -129,8 +129,11 @@ Internet access.
   themselves: the claim says which port the server serves.
 - Attestations are consulted offline only, for a domain with no pin and no
   usable proof (§5.1). A binding taken on attestations is pinned as
-  `attestation`, the weakest method, so any later online verification
-  replaces it (§5.4).
+  `attested`, the weakest method, so any later online verification
+  replaces it (§5.4). A verification older than 30 days no longer counts:
+  a decommissioned witness's last word must not bind a retired server
+  forever. Clients read attestations from relays on the mesh only, so that
+  no public relay learns whom a user trusts; a witness publishes there.
 
 ### 3.3 Zone record — kind 37199 (addressable)
 
@@ -221,8 +224,9 @@ claim for a public suffix (`ch`, `co.uk`) — use a bundled Public Suffix List.
   Zone records (§3.3) from any of the servers are accepted, newest first.
 - Claims whose author the record does *not* name are ignored (online).
   Offline: the pinned servers; otherwise the claim with a valid DNSSEC
-  proof; otherwise the claim with the most trusted attestations. Ties or
-  no evidence → treat as unverified (§5.1 step 5).
+  proof; otherwise every claim attested by *k* trusted witnesses, the one
+  with most witnesses first (§3.2). No evidence → treat as unverified
+  (§5.1 step 5).
 
 ### 5.4 Pinning
 
@@ -231,7 +235,7 @@ claim for a public suffix (`ch`, `co.uk`) — use a bundled Public Suffix List.
   unchanged binding does not rewrite the pin.
 - A **changed** binding is accepted only through a fresh verification of
   equal or stronger method (DNSSEC ≥ multi-resolver DNS ≥ single-resolver
-  DNS ≥ attestation). A pinned binding is never replaced by an unverified
+  DNS ≥ attested). A pinned binding is never replaced by an unverified
   claim.
 - The **same** binding re-verified with a weaker method keeps the pin's
   method: an unsigned replay of the real record must not lower the bar for

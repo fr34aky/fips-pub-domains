@@ -158,9 +158,16 @@ async fn main() -> Result<()> {
             let events = relays.fetch_claims(&domain, scope).await;
             println!("claim events: {}", events.len());
             let claims = policy::ingest_claims(&pins, &domain, &events, pubdom_resolve::now());
-            let att_events = relays
-                .fetch_attestations(&domain, &cfg.witnesses, scope)
-                .await;
+            // As the resolver does: attestations matter offline only, and
+            // ingesting them records rollback state, so none are fetched
+            // while the record decides.
+            let att_events = if matches!(txt, TxtLookup::Unreachable) {
+                relays
+                    .fetch_attestations(&domain, &cfg.witnesses, scope)
+                    .await
+            } else {
+                Vec::new()
+            };
             let attestations = policy::ingest_attestations(
                 &pins,
                 &domain,
@@ -297,7 +304,9 @@ async fn main() -> Result<()> {
             let relays =
                 RelayClient::new(&cfg.public_relays, &cfg.mesh_relays, Duration::from_secs(3))
                     .await;
-            let events = relays.fetch_claims(&domain, RelayScope::AfterHit).await;
+            // Every relay heard out: an attestation names the whole server
+            // set, and a partial one would replace the witness's last.
+            let events = relays.fetch_claims(&domain, RelayScope::Full).await;
             // A witness keeps no pins of its own: the record and the claims
             // of the moment decide, as they would for a first visit.
             let pins = pubdom_core::MemoryPinStore::new();

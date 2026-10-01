@@ -267,7 +267,9 @@ impl Attestation {
         })
     }
 
-    /// The tags of an attestation — what a witness publishes.
+    /// The tags of an attestation — what a witness publishes. `method`
+    /// below `Dns` is written as `dns`; the publisher refuses it first
+    /// (`pubdom_resolve::relay::publish_attestation`).
     pub fn tags(
         domain: &str,
         servers: &[Npub],

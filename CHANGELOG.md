@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and, offline, resolves a domain it has no pin and no proof for once *k*
   of them attest a server; the binding is pinned as `attested`, the
   weakest method, and replaced by the next online verification. Only the
-  configured witnesses' events are fetched. `fips-pubdom attest <domain>
+  configured witnesses' events are fetched, from mesh relays only, and a
+  verification older than 30 days does not count. `fips-pubdom attest <domain>
   --key …` makes a node a witness: it verifies the record online (DNSSEC
   or two agreeing resolvers) and publishes one attestation naming the
   domain's servers; `fips-pubdom attestations <domain>` shows what the

@@ -220,6 +220,13 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         claims: C,
         mesh: Arc<dyn MeshDns>,
     ) -> Self {
+        if !cfg.witnesses.is_empty() && cfg.attestation_threshold > cfg.witnesses.len() {
+            tracing::warn!(
+                witnesses = cfg.witnesses.len(),
+                k = cfg.attestation_threshold,
+                "attestation_threshold exceeds the number of witnesses: attestations can never count"
+            );
+        }
         let proofs: Box<dyn ProofVerifier + Send + Sync> = if cfg.dnssec {
             Box::new(crate::proof::DnssecProofs::default())
         } else {

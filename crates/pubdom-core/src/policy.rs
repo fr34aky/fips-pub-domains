@@ -12,7 +12,7 @@ use crate::domain::is_claimable;
 use crate::identity::Npub;
 use crate::pins::{Binding, Method, PinStore, SeenKey};
 use crate::txt::TxtRecord;
-use crate::{KIND_ATTESTATION, KIND_CLAIM, KIND_ZONE, MAX_FUTURE_SECS};
+use crate::{ATTESTATION_MAX_AGE_SECS, KIND_ATTESTATION, KIND_CLAIM, KIND_ZONE, MAX_FUTURE_SECS};
 
 /// What the legacy DNS said about `_fips-dns.<domain>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -431,9 +431,10 @@ pub fn ingest_claims(store: &dyn PinStore, domain: &str, events: &[Event], now: 
 }
 
 /// Parse attestation events for `domain`, keep those by a trusted
-/// `witness` only, drop what is dated in the future or rolled back (spec
-/// §8), and keep one — the newest — per witness. Anything an untrusted key
-/// says is discarded before it is even remembered.
+/// `witness` only, drop what is dated in the future, verified more than
+/// [`ATTESTATION_MAX_AGE_SECS`] ago, or rolled back (spec §8), and keep one
+/// — the newest — per witness. Anything an untrusted key says is discarded
+/// before it is even remembered.
 pub fn ingest_attestations(
     store: &dyn PinStore,
     domain: &str,
@@ -450,6 +451,7 @@ pub fn ingest_attestations(
             || !witnesses.contains(&att.witness)
             || att.created_at > now + MAX_FUTURE_SECS
             || att.verified_at > now + MAX_FUTURE_SECS
+            || att.verified_at + ATTESTATION_MAX_AGE_SECS < now
         {
             continue;
         }
@@ -1148,23 +1150,30 @@ mod tests {
             tags: Attestation::tags("example.org", &[npub(1)], Method::Dns, verified_at),
         };
         let events = [
-            ev(10, 5, 5),
-            ev(10, 9, 9),            // newer by the same witness wins
-            ev(11, 5, 5),            // untrusted
-            ev(12, NOW + 7200, NOW), // from the future
-            ev(13, NOW, NOW + 7200), // verified in the future
+            ev(10, NOW - 100, NOW - 100),
+            ev(10, NOW - 50, NOW - 50), // newer by the same witness wins
+            ev(11, NOW - 50, NOW - 50), // untrusted
+            ev(12, NOW + 7200, NOW),    // from the future
+            ev(13, NOW, NOW + 7200),    // verified in the future
+            ev(14, NOW, NOW - ATTESTATION_MAX_AGE_SECS - 1), // verified too long ago
         ];
         let out = ingest_attestations(
             &store,
             "example.org",
-            &[npub(10), npub(12), npub(13)],
+            &[npub(10), npub(12), npub(13), npub(14)],
             &events,
             NOW,
         );
         assert_eq!(out.len(), 1);
-        assert_eq!((out[0].witness, out[0].created_at), (npub(10), 9));
+        assert_eq!((out[0].witness, out[0].created_at), (npub(10), NOW - 50));
         // Rollback: the older event by witness 10 is now refused.
-        let out = ingest_attestations(&store, "example.org", &[npub(10)], &[ev(10, 5, 5)], NOW);
+        let out = ingest_attestations(
+            &store,
+            "example.org",
+            &[npub(10)],
+            &[ev(10, NOW - 100, NOW - 100)],
+            NOW,
+        );
         assert!(out.is_empty());
     }
 }

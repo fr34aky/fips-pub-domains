@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `MaybeTxt::set_timeout`: a host that knows the Internet is gone can
+  shorten the TXT lookup's wait (the phone does, from Android's network
+  validation) so a first offline lookup fails into the mesh path within
+  its budget — rather than skip the lookup, which would also skip it on a
+  network that works but was never validated.
+
 - On the resolved and NetworkManager backends the daemon follows its
   upstreams file as the resolver rewrites it, so a network change is
   picked up within a second instead of at the next 30 s poll (kept as

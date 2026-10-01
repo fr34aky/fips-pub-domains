@@ -224,7 +224,9 @@ fn collect_nameservers<'a>(rests: impl Iterator<Item = &'a str>) -> Vec<IpAddr> 
 pub struct MaybeTxt {
     inner: std::sync::Mutex<Option<Arc<TxtVerifier>>>,
     dnssec: bool,
-    timeout: Duration,
+    /// What the verifier is built from, kept so either part can change.
+    upstreams: std::sync::Mutex<Vec<IpAddr>>,
+    timeout: std::sync::Mutex<Duration>,
 }
 
 impl MaybeTxt {
@@ -232,7 +234,8 @@ impl MaybeTxt {
         let me = Self {
             inner: std::sync::Mutex::new(None),
             dnssec,
-            timeout,
+            upstreams: std::sync::Mutex::new(Vec::new()),
+            timeout: std::sync::Mutex::new(timeout),
         };
         me.set_upstreams(upstreams)?;
         Ok(me)
@@ -241,13 +244,35 @@ impl MaybeTxt {
     /// Replace the verifier; an empty list means "no legacy DNS" and every
     /// lookup is `Unreachable`.
     pub fn set_upstreams(&self, upstreams: &[IpAddr]) -> Result<(), String> {
+        *self.upstreams.lock().unwrap() = upstreams.to_vec();
+        self.rebuild()
+    }
+
+    /// How long a TXT lookup may take before it counts as unreachable. A
+    /// host that knows the Internet is gone (the phone, from Android's
+    /// network validation) shortens this so a first offline lookup fails
+    /// into the mesh path within its budget, instead of skipping the lookup
+    /// — which would also skip it on a network that works but was never
+    /// validated.
+    pub fn set_timeout(&self, timeout: Duration) -> Result<(), String> {
+        *self.timeout.lock().unwrap() = timeout;
+        self.rebuild()
+    }
+
+    pub fn timeout(&self) -> Duration {
+        *self.timeout.lock().unwrap()
+    }
+
+    fn rebuild(&self) -> Result<(), String> {
+        let upstreams = self.upstreams.lock().unwrap().clone();
+        let timeout = self.timeout();
         let v = if upstreams.is_empty() {
             None
         } else {
             Some(Arc::new(TxtVerifier::new(
-                upstreams,
+                &upstreams,
                 self.dnssec,
-                self.timeout,
+                timeout,
             )?))
         };
         *self.inner.lock().unwrap() = v;
@@ -293,6 +318,31 @@ mod tests {
         let cfg = Config::default();
         assert!(cfg.current_upstreams().is_empty());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn maybe_txt_keeps_its_parts_when_one_changes() {
+        let t = MaybeTxt::new(
+            &["192.0.2.1".parse().unwrap()],
+            false,
+            Duration::from_millis(1500),
+        )
+        .unwrap();
+        assert!(t.current().is_some());
+        t.set_timeout(Duration::from_millis(500)).unwrap();
+        assert_eq!(t.timeout(), Duration::from_millis(500));
+        assert!(
+            t.current().is_some(),
+            "the upstreams survive a timeout change"
+        );
+        t.set_upstreams(&[]).unwrap();
+        assert!(t.current().is_none());
+        t.set_upstreams(&["192.0.2.2".parse().unwrap()]).unwrap();
+        assert_eq!(
+            t.timeout(),
+            Duration::from_millis(500),
+            "the timeout survives an upstream change"
+        );
     }
 
     #[test]

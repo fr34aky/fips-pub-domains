@@ -244,9 +244,9 @@ fn setup(config_path: &Path, backend: Backend) -> Result<()> {
     Ok(())
 }
 
-fn teardown(backend: Backend) -> Result<()> {
+fn teardown(config_path: &Path, backend: Backend) -> Result<()> {
     let host = backend::Host::system();
-    let (used, notes) = backend::teardown(&host, backend)?;
+    let (used, notes) = backend::teardown(&host, config_path, backend)?;
     println!("backend: {used:?}");
     for n in notes {
         println!("{n}");
@@ -265,6 +265,6 @@ async fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Run => run(Config::load_or_default(&cli.config).map_err(anyhow::Error::msg)?).await,
         Cmd::Setup { backend } => setup(&cli.config, backend),
-        Cmd::Teardown { backend } => teardown(backend),
+        Cmd::Teardown { backend } => teardown(&cli.config, backend),
     }
 }

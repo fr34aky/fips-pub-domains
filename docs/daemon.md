@@ -17,8 +17,8 @@ by files they may have left behind) and records its choice in
 `/etc/fips-pubdom/backend` before touching anything, so `sudo
 fips-pubdomd teardown` undoes the right thing without being told — after
 a `setup` that failed halfway too; `--backend` names one explicitly. A
-second `setup` is refused until `teardown` has run, so the backup of the
-original `resolv.conf` is never overwritten by our own. An installation
+second `setup` is refused until `teardown` has run, so the backups of the
+original `resolv.conf` and config are never overwritten by our own. An installation
 set up before the record existed is torn down by its resolved drop-in.
 On the backends that snapshot upstreams, an `upstreams` list in the
 config is used instead of a snapshot.
@@ -75,9 +75,12 @@ keeps the file in `/etc/fips-pubdom/resolv.conf.bak`, writes one naming
 or when the file is a symlink into something else's directory: whatever
 rewrites the file would undo this. Restart the daemon after `setup`.
 
-`teardown` removes what `setup` wrote, restores the backed-up resolv.conf
-and restarts or reloads the resolver it touched. The config file keeps
-`listen` and `upstreams_from` as `setup` left them.
+`setup` keeps the config as it found it (`config.yaml.before-setup`
+next to it) before rewriting `listen` and `upstreams_from`, and says so
+when the listen addresses changed: restart the daemon then. `teardown`
+removes what `setup` wrote, restores the backed-up resolv.conf and the
+config, and restarts or reloads the resolver it touched — so the next
+`setup`, under whatever backend, starts from your own values.
 
 Other backends (launchd, Windows, OpenWrt, pfSense) are on the
 [roadmap](roadmap.md); the daemon itself is portable

@@ -15,10 +15,11 @@
   domain verified from its claim's DNSSEC proof via a relay on the mesh.
 - Live tests through level 5 ([testing.md](testing.md)).
 - Linux `setup` backends beyond systemd-resolved: NetworkManager
-  (`dns=none`, the daemon on port 53, NM's server list followed),
-  standalone dnsmasq (`no-resolv` + `server=`), plain `resolv.conf`;
-  detected, recorded for `teardown`, exercised in a temporary root by
-  tests.
+  (`dns=none`, the daemon on port 53, NM's server list followed; verified
+  live on Ubuntu 22.04, [testing.md](testing.md) level 6), standalone
+  dnsmasq (`no-resolv` + `server=`) and plain `resolv.conf` (tests in a
+  temporary root only so far); detected, recorded for `teardown`, which
+  restores resolv.conf and the config.
 - Zone records (kind 37199): published by the server with the claim, used
   by the resolver when the server does not answer.
 - Redundant servers: every server the TXT record names is pinned; failover

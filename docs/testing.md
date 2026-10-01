@@ -319,7 +319,10 @@ fix of level 3 is transient, lost with the NM restarts): the daemon's
 start-up warning names it.
 
 **Not yet run live:** the standalone dnsmasq and plain-`resolv.conf`
-backends; tests in a temporary root only.
+backends (tests in a temporary root only), and the upstreams-file
+watcher (unit-tested against a temporary directory; the live check is a
+`resolvectl dns <link> …` change reaching the daemon's "upstreams
+changed" line within a second, under the unit's `ProtectSystem=strict`).
 
 ## Level 5 — the phone
 

@@ -55,9 +55,15 @@ put a daemon in front of all DNS.
 | Android | none: inside fips2go's VpnService process | the shim's `DnsProxy` | — | **done** |
 | iOS | out of scope: no fips node | | | |
 
-Network changes: the daemon re-reads its upstreams every 30 s today; netlink
-/ `SCDynamicStore` / `NotifyAddrChange` watchers are planned so a change is
-followed at once.
+Network changes: on the resolved and NetworkManager backends the daemon
+follows its upstreams file as the resolver rewrites it when a network
+comes or goes (the directory is watched, since both rename a new file
+into place), debounced, with a 30 s re-read as the fallback. The dnsmasq
+and plain-`resolv.conf` backends read a static snapshot that nothing
+rewrites: run `setup` again after a change there. The same mechanism
+serves macOS and Windows once their backends name a file;
+`SCDynamicStore` / `NotifyAddrChange` watchers are only needed where none
+exists.
 
 Known interaction on systemd-resolved: a link's **search domain is also a
 routing domain**, and the longest match beats the global `~.`. A LAN whose

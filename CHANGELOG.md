@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- On the resolved and NetworkManager backends the daemon follows its
+  upstreams file as the resolver rewrites it, so a network change is
+  picked up within a second instead of at the next 30 s poll (kept as
+  the fallback, which also sets the watch up late if the directory did
+  not exist at start). The directory is watched, since both resolvers
+  rename a new file into place.
+
 ### Fixed
 
 - The daemon's upstreams and `setup`'s snapshot read `resolv.conf` as

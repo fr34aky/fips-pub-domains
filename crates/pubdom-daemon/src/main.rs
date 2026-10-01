@@ -9,6 +9,7 @@
 
 mod backend;
 mod forward;
+mod watch;
 
 use anyhow::{Context, Result};
 use backend::Backend;
@@ -52,8 +53,8 @@ enum Cmd {
 struct State {
     cfg: Config,
     resolver: ProdResolver,
-    /// Re-read from `upstreams_from` periodically (a network change
-    /// watcher replaces the polling in a later milestone).
+    /// Re-read from `upstreams_from` when that file changes (`watch.rs`)
+    /// and every 30 s as the fallback.
     upstreams: RwLock<Vec<IpAddr>>,
 }
 
@@ -212,11 +213,24 @@ async fn run(cfg: Config) -> Result<()> {
             }
         }));
     }
+    // The upstreams file changes when the network does: follow it, and keep
+    // the poll for whatever the watcher misses — and to set the watch up
+    // once the directory exists, if it did not at start.
     let st = state.clone();
     tasks.push(tokio::spawn(async move {
+        let start_watch = |st: &Arc<State>| {
+            st.cfg.upstreams_from.as_deref().and_then(|p| {
+                let st = st.clone();
+                watch::watch(p, move || st.refresh_upstreams())
+            })
+        };
+        let mut watcher = start_watch(&st);
         loop {
             tokio::time::sleep(Duration::from_secs(30)).await;
             st.refresh_upstreams();
+            if watcher.is_none() {
+                watcher = start_watch(&st);
+            }
         }
     }));
 

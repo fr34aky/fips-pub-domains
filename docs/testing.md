@@ -226,16 +226,57 @@ it pins one server and reaches the other only through the zone record;
 and the failover log said "trying the next" with nothing left to try —
 it now says which.
 
-## Level 4e — attestations (not yet run live)
+## Level 4e — attestations
 
-Phase 3 landed with unit coverage only: the policy tables (k witnesses,
-ranking, untrusted and rolled-back events, pins and proofs first) and one
-resolver test that resolves an unpinned, unproven domain offline from two
-configured witnesses and pins it as `attested`. The live run is: a witness
-node (`fips-pubdom attest example.org --key …`, attestation on the mesh
-relay), a client with that witness in `witnesses`, pins emptied, the
-Internet blocked, `fips-pubdom --offline verify example.org` showing the
-attestation and `decision: Bound`, then a lookup answering over the mesh.
+Phase 3, run live on 2026-10-01 on the reference node alone, which can
+be both the witness and the client: a witness keeps no pins of its own
+and a client's trust list is just configuration.
+
+**Witness.** `fips-pubdom attest example.org --key /etc/fips/fips.key`
+verified the record (DNSSEC on the first run, two agreeing resolvers on
+the second, which used a config with `dnssec: false`), fetched the claims
+from every relay, and published one attestation naming the one server:
+
+```
+example.org: attested 1 server(s) by Dns, accepted by ws://npub1….fips, wss://relay.damus.io, wss://relay.primal.net, wss://nos.lol
+  npub1…server
+```
+
+Found on the way: the first run used the daemon's config, which lists no
+mesh relay, so the attestation reached the public relays only — and a
+client reads attestations from mesh relays alone (spec §3.2). The
+operators guide says to configure one; this is what it looks like when
+you do not: `attestations by trusted witnesses: 0 (of 1 configured)`.
+
+**Client.** A throwaway config: `dnssec: false` (so the claim's DNSSEC
+proof cannot be used and attestations are the only path), the node's own
+npub as the sole witness, `attestation_threshold: 1`, an empty pin file,
+the mesh relay. Offline:
+
+```
+$ fips-pubdom --config client.yaml --offline verify example.org
+pins: none
+txt: Unreachable (ttl None)
+claim events: 2
+attestations by trusted witnesses: 1 (of 1 configured, k = 1)
+  npub1…witness attests [Npub(npub1…server)] Dns verified_at 1790854805
+  claim by npub1…server port 5355 created_at 1790812492: DNSSEC proof signed at …, valid until …
+  claim by npub1…old port 5355 created_at 1790638494: no DNSSEC proof
+decision: Bound([Binding { domain: "example.org", npub: Npub(npub1…server), port: 5355, method: Attested, … }])
+pin changes: [Put(…)] (not applied by `verify`)
+
+$ fips-pubdom --config client.yaml --offline lookup relay.example.org
+relay.example.org: over fips, rcode NoError
+  relay.example.org 30 CNAME npub1….fips
+  npub1….fips 30 AAAA fd6b:…
+```
+
+The lookup pinned the domain as `attested` (the pin file shows it) and
+step 3 to the server over the mesh answered the name. The second claim,
+by a key the record no longer names and without a proof, played no part:
+attestations vouch only for the server they name, and the witness named
+one. (`www.example.org` is no longer in the server's zone, hence the
+lookup of `relay`.)
 
 ## Level 5 — the phone
 

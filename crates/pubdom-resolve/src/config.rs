@@ -222,40 +222,84 @@ fn collect_nameservers<'a>(rests: impl Iterator<Item = &'a str>) -> Vec<IpAddr> 
 /// laptop that moves networks must verify against the new resolvers, not
 /// keep asking the old ones until they time out.
 pub struct MaybeTxt {
-    inner: std::sync::Mutex<Option<Arc<TxtVerifier>>>,
     dnssec: bool,
+    /// The verifier and what it was built from, under one lock: a change
+    /// to either part rebuilds it from both, and a rebuild that fails
+    /// leaves all three as they were, so what is reported is what runs.
+    parts: std::sync::Mutex<Parts>,
+}
+
+struct Parts {
+    upstreams: Vec<IpAddr>,
     timeout: Duration,
+    verifier: Option<Arc<TxtVerifier>>,
 }
 
 impl MaybeTxt {
     pub fn new(upstreams: &[IpAddr], dnssec: bool, timeout: Duration) -> Result<Self, String> {
         let me = Self {
-            inner: std::sync::Mutex::new(None),
             dnssec,
-            timeout,
+            parts: std::sync::Mutex::new(Parts {
+                upstreams: Vec::new(),
+                timeout,
+                verifier: None,
+            }),
         };
         me.set_upstreams(upstreams)?;
         Ok(me)
     }
 
     /// Replace the verifier; an empty list means "no legacy DNS" and every
-    /// lookup is `Unreachable`.
+    /// lookup is `Unreachable`. Nothing happens when the list is the same.
     pub fn set_upstreams(&self, upstreams: &[IpAddr]) -> Result<(), String> {
-        let v = if upstreams.is_empty() {
-            None
-        } else {
-            Some(Arc::new(TxtVerifier::new(
-                upstreams,
-                self.dnssec,
-                self.timeout,
-            )?))
-        };
-        *self.inner.lock().unwrap() = v;
+        let mut parts = self.parts.lock().unwrap();
+        if parts.upstreams == upstreams && (upstreams.is_empty() || parts.verifier.is_some()) {
+            return Ok(());
+        }
+        let verifier = Self::build(upstreams, self.dnssec, parts.timeout)?;
+        parts.upstreams = upstreams.to_vec();
+        parts.verifier = verifier;
         Ok(())
     }
 
+    /// How long each upstream's TXT lookup may take before the upstream
+    /// counts as unanswering (the verifier allows 200 ms on top). A host
+    /// that knows the Internet is gone — the phone, from Android's network
+    /// validation — shortens this so a first offline lookup fails into the
+    /// mesh path within its budget, instead of skipping the lookup, which
+    /// would also skip it on a network that works but was never validated.
+    /// Nothing happens when the value is the same.
+    pub fn set_timeout(&self, timeout: Duration) -> Result<(), String> {
+        let mut parts = self.parts.lock().unwrap();
+        if parts.timeout == timeout {
+            return Ok(());
+        }
+        let verifier = Self::build(&parts.upstreams, self.dnssec, timeout)?;
+        parts.timeout = timeout;
+        parts.verifier = verifier;
+        Ok(())
+    }
+
+    pub fn timeout(&self) -> Duration {
+        self.parts.lock().unwrap().timeout
+    }
+
+    fn build(
+        upstreams: &[IpAddr],
+        dnssec: bool,
+        timeout: Duration,
+    ) -> Result<Option<Arc<TxtVerifier>>, String> {
+        if upstreams.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(Arc::new(TxtVerifier::new(
+                upstreams, dnssec, timeout,
+            )?)))
+        }
+    }
+
     fn current(&self) -> Option<Arc<TxtVerifier>> {
-        self.inner.lock().unwrap().clone()
+        self.parts.lock().unwrap().verifier.clone()
     }
 }
 
@@ -293,6 +337,38 @@ mod tests {
         let cfg = Config::default();
         assert!(cfg.current_upstreams().is_empty());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn maybe_txt_rebuilds_from_both_parts_when_one_changes() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let t = MaybeTxt::new(&[ip("192.0.2.1")], false, Duration::from_millis(1500)).unwrap();
+        let v = t.current().unwrap();
+        assert_eq!(
+            (v.upstreams(), v.timeout()),
+            (vec![ip("192.0.2.1")], Duration::from_millis(1500))
+        );
+        t.set_timeout(Duration::from_millis(500)).unwrap();
+        let v = t.current().unwrap();
+        assert_eq!(
+            (v.upstreams(), v.timeout()),
+            (vec![ip("192.0.2.1")], Duration::from_millis(500)),
+            "the verifier carries the new timeout and the old upstreams"
+        );
+        t.set_upstreams(&[]).unwrap();
+        assert!(t.current().is_none());
+        t.set_upstreams(&[ip("192.0.2.2")]).unwrap();
+        let v = t.current().unwrap();
+        assert_eq!(
+            (v.upstreams(), v.timeout()),
+            (vec![ip("192.0.2.2")], Duration::from_millis(500)),
+            "the verifier carries the new upstreams and the kept timeout"
+        );
+        // An unchanged value is a no-op: the same verifier instance stays.
+        t.set_timeout(Duration::from_millis(500)).unwrap();
+        assert!(Arc::ptr_eq(&v, &t.current().unwrap()));
+        t.set_upstreams(&[ip("192.0.2.2")]).unwrap();
+        assert!(Arc::ptr_eq(&v, &t.current().unwrap()));
     }
 
     #[test]

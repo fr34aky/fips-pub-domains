@@ -7,12 +7,12 @@
 //! legacy passthrough when online and into the ordinary offline failure
 //! otherwise (spec §5.1, §7).
 
-use crate::claim::{Claim, Event, ZoneRecord};
+use crate::claim::{Attestation, Claim, Event, ZoneRecord};
 use crate::domain::is_claimable;
 use crate::identity::Npub;
 use crate::pins::{Binding, Method, PinStore, SeenKey};
 use crate::txt::TxtRecord;
-use crate::{KIND_CLAIM, KIND_ZONE, MAX_FUTURE_SECS};
+use crate::{KIND_ATTESTATION, KIND_CLAIM, KIND_ZONE, MAX_FUTURE_SECS};
 
 /// What the legacy DNS said about `_fips-dns.<domain>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +109,12 @@ pub struct Input<'a> {
     pub txt: TxtLookup,
     /// Claims for `domain`, already passed through [`ingest_claims`].
     pub claims: &'a [Claim],
+    /// Attestations for `domain` by the witnesses the user trusts, already
+    /// passed through [`ingest_attestations`] (one per witness).
+    pub attestations: &'a [Attestation],
+    /// *k* (spec §5.1 step 4): how many trusted witnesses must attest a
+    /// server for it to count offline. `0` turns attestations off.
+    pub attestation_threshold: usize,
     pub now: u64,
     pub allow_unverified_offline: bool,
     pub proofs: &'a dyn ProofVerifier,
@@ -275,6 +281,16 @@ pub fn decide(input: Input<'_>) -> Outcome {
             if input.claims.is_empty() {
                 return keep(Decision::NotOverFips(Reason::NoClaim));
             }
+            // Attested by at least k trusted witnesses (spec §5.1 step 4):
+            // the weakest verification that still pins, so a later online
+            // lookup of any method replaces it.
+            let attested = attested_servers(&input);
+            if !attested.is_empty() {
+                return Outcome {
+                    changes: attested.iter().cloned().map(PinChange::Put).collect(),
+                    decision: Decision::Bound(attested),
+                };
+            }
             if !input.allow_unverified_offline {
                 return keep(Decision::NotOverFips(Reason::Unverified));
             }
@@ -322,6 +338,42 @@ fn newest_proof(input: &Input<'_>) -> Result<Option<ProvenRecord>, ()> {
         return Err(());
     }
     Ok(proven.pop())
+}
+
+/// Every claimed server that at least `attestation_threshold` distinct
+/// trusted witnesses attest, as an `Attested` binding: most witnesses
+/// first, then the newest claim. A witness's attestation counts for each
+/// server it names; what it says about keys without a claim is ignored,
+/// since only the server's own claim says which port it serves.
+fn attested_servers(input: &Input<'_>) -> Vec<Binding> {
+    let k = input.attestation_threshold;
+    if k == 0 {
+        return Vec::new();
+    }
+    let mut counted: Vec<(&Claim, usize)> = input
+        .claims
+        .iter()
+        .map(|c| {
+            let witnesses = input
+                .attestations
+                .iter()
+                .filter(|a| a.servers.contains(&c.author))
+                .count();
+            (c, witnesses)
+        })
+        .filter(|(_, n)| *n >= k)
+        .collect();
+    counted.sort_by(|(a, na), (b, nb)| nb.cmp(na).then(b.created_at.cmp(&a.created_at)));
+    counted
+        .into_iter()
+        .map(|(c, _)| Binding {
+            domain: input.domain.to_owned(),
+            npub: c.author,
+            port: c.port,
+            method: Method::Attested,
+            verified_at: input.now,
+        })
+        .collect()
 }
 
 /// Every key `record` names that has a claim, as a DNSSEC binding, newest
@@ -373,6 +425,49 @@ pub fn ingest_claims(store: &dyn PinStore, domain: &str, events: &[Event], now: 
             Some(existing) if existing.created_at < claim.created_at => *existing = claim,
             Some(_) => {}
             None => out.push(claim),
+        }
+    }
+    out
+}
+
+/// Parse attestation events for `domain`, keep those by a trusted
+/// `witness` only, drop what is dated in the future or rolled back (spec
+/// §8), and keep one — the newest — per witness. Anything an untrusted key
+/// says is discarded before it is even remembered.
+pub fn ingest_attestations(
+    store: &dyn PinStore,
+    domain: &str,
+    witnesses: &[Npub],
+    events: &[Event],
+    now: u64,
+) -> Vec<Attestation> {
+    let mut out: Vec<Attestation> = Vec::new();
+    for ev in events {
+        let Ok(att) = Attestation::parse(ev) else {
+            continue;
+        };
+        if att.domain != domain
+            || !witnesses.contains(&att.witness)
+            || att.created_at > now + MAX_FUTURE_SECS
+            || att.verified_at > now + MAX_FUTURE_SECS
+        {
+            continue;
+        }
+        let key = SeenKey {
+            kind: KIND_ATTESTATION,
+            author: att.witness,
+            domain: domain.to_owned(),
+        };
+        if let Some(seen) = store.newest_seen(&key)
+            && att.created_at < seen
+        {
+            continue;
+        }
+        store.note_seen(key, att.created_at);
+        match out.iter_mut().find(|a| a.witness == att.witness) {
+            Some(existing) if existing.created_at < att.created_at => *existing = att,
+            Some(_) => {}
+            None => out.push(att),
         }
     }
     out
@@ -456,11 +551,33 @@ mod tests {
         }
     }
     fn run(pins: Vec<Binding>, txt_: TxtLookup, claims: &[Claim], allow: bool) -> Outcome {
+        run_attested(pins, txt_, claims, allow, &[], 2)
+    }
+    fn attestation(witness: u8, servers: &[u8], created_at: u64) -> Attestation {
+        Attestation {
+            witness: npub(witness),
+            domain: "example.org".into(),
+            servers: servers.iter().map(|s| npub(*s)).collect(),
+            method: Method::Dns,
+            verified_at: created_at,
+            created_at,
+        }
+    }
+    fn run_attested(
+        pins: Vec<Binding>,
+        txt_: TxtLookup,
+        claims: &[Claim],
+        allow: bool,
+        attestations: &[Attestation],
+        k: usize,
+    ) -> Outcome {
         decide(Input {
             domain: "example.org",
             pins,
             txt: txt_,
             claims,
+            attestations,
+            attestation_threshold: k,
             now: NOW,
             allow_unverified_offline: allow,
             proofs: &NoProofs,
@@ -733,6 +850,8 @@ mod tests {
             pins: vec![],
             txt: TxtLookup::Unreachable,
             claims: &[claim(3, 9), proven],
+            attestations: &[],
+            attestation_threshold: 2,
             now: NOW,
             allow_unverified_offline: false,
             proofs: &Yes,
@@ -751,6 +870,8 @@ mod tests {
             pins: vec![],
             txt: TxtLookup::Unreachable,
             claims: &[first, claim(3, 9), second],
+            attestations: &[],
+            attestation_threshold: 2,
             now: NOW,
             allow_unverified_offline: false,
             proofs: &Yes,
@@ -768,6 +889,8 @@ mod tests {
             pins: vec![],
             txt: TxtLookup::Unreachable,
             claims: &[retired, current],
+            attestations: &[],
+            attestation_threshold: 2,
             now: NOW,
             allow_unverified_offline: false,
             proofs: &Yes,
@@ -796,6 +919,8 @@ mod tests {
             pins: vec![pin(1, Method::Dns)],
             txt: TxtLookup::Unreachable,
             claims: &[c],
+            attestations: &[],
+            attestation_threshold: 2,
             now: NOW,
             allow_unverified_offline: false,
             proofs: &Named2,
@@ -826,6 +951,8 @@ mod tests {
             pins: vec![],
             txt: TxtLookup::Unreachable,
             claims: &[a, b],
+            attestations: &[],
+            attestation_threshold: 2,
             now: NOW,
             allow_unverified_offline: true,
             proofs: &Tie,
@@ -840,6 +967,8 @@ mod tests {
             pins: vec![],
             txt: txt(&[1], Method::Dnssec),
             claims: &[],
+            attestations: &[],
+            attestation_threshold: 2,
             now: NOW,
             allow_unverified_offline: true,
             proofs: &NoProofs,
@@ -913,5 +1042,129 @@ mod tests {
         foreign.tags[0][1] = "other.org".into();
         let x = ingest_claims(&store, "example.org", &[ev(3, NOW + 3600), foreign], NOW);
         assert!(x.is_empty());
+    }
+
+    /// Spec §5.1 step 4: offline, unpinned, no proof — k trusted witnesses
+    /// make a server usable, pinned as `Attested`; fewer do not.
+    #[test]
+    fn offline_attested_by_k_witnesses_binds_and_pins_as_attested() {
+        let claims = [claim(1, 5)];
+        let one = [attestation(10, &[1], 7)];
+        let two = [attestation(10, &[1], 7), attestation(11, &[1], 8)];
+        let o = run_attested(vec![], TxtLookup::Unreachable, &claims, false, &one, 2);
+        assert_eq!(
+            o.decision,
+            Decision::NotOverFips(Reason::Unverified),
+            "one witness short of k"
+        );
+        let o = run_attested(vec![], TxtLookup::Unreachable, &claims, false, &two, 2);
+        let b = &bound(&o)[0];
+        assert_eq!(
+            (b.npub, b.method, b.port),
+            (npub(1), Method::Attested, 5355)
+        );
+        assert_eq!(o.changes, vec![PinChange::Put(b.clone())]);
+        // k = 1 accepts one; k = 0 is off even with two.
+        assert!(matches!(
+            run_attested(vec![], TxtLookup::Unreachable, &claims, false, &one, 1).decision,
+            Decision::Bound(_)
+        ));
+        assert_eq!(
+            run_attested(vec![], TxtLookup::Unreachable, &claims, false, &two, 0).decision,
+            Decision::NotOverFips(Reason::Unverified)
+        );
+    }
+
+    /// Attestations vouch only for keys that claim the domain, witnesses
+    /// count once each, and the server with more witnesses comes first.
+    #[test]
+    fn attestations_need_a_claim_and_rank_servers_by_witnesses() {
+        let claims = [claim(1, 5), claim(2, 9)];
+        let atts = [
+            attestation(10, &[1, 2, 3], 7),
+            attestation(11, &[2], 8),
+            attestation(12, &[2], 8),
+        ];
+        let o = run_attested(vec![], TxtLookup::Unreachable, &claims, false, &atts, 2);
+        assert_eq!(
+            npubs(&o),
+            vec![npub(2)],
+            "1 has one witness, 3 has no claim"
+        );
+        let o = run_attested(vec![], TxtLookup::Unreachable, &claims, false, &atts, 1);
+        assert_eq!(npubs(&o), vec![npub(2), npub(1)], "most witnesses first");
+        // Two claimed servers each attested by nobody: the unverified rule.
+        let o = run_attested(vec![], TxtLookup::Unreachable, &claims, true, &[], 2);
+        assert_eq!(o.decision, Decision::NotOverFips(Reason::Conflict));
+    }
+
+    /// Pins and proofs come first: an attestation never overrides a pin
+    /// offline, and online the TXT record decides as before.
+    #[test]
+    fn attestations_yield_to_pins_and_to_the_record() {
+        let claims = [claim(1, 5), claim(2, 9)];
+        let atts = [attestation(10, &[2], 7), attestation(11, &[2], 8)];
+        let o = run_attested(
+            vec![pin(1, Method::Dns)],
+            TxtLookup::Unreachable,
+            &claims,
+            false,
+            &atts,
+            2,
+        );
+        assert_eq!(npubs(&o), vec![npub(1)]);
+        assert!(o.changes.is_empty());
+        let o = run_attested(vec![], txt(&[1], Method::Dns), &claims, false, &atts, 2);
+        assert_eq!(
+            npubs(&o),
+            vec![npub(1)],
+            "the record names 1, whatever witnesses say of 2"
+        );
+    }
+
+    /// An attested pin is the weakest kind: any online verification of a
+    /// changed binding replaces it, and the same binding re-verified
+    /// online upgrades the method.
+    #[test]
+    fn attested_pin_is_replaced_by_any_online_verification() {
+        let o = run(
+            vec![pin(1, Method::Attested)],
+            txt(&[1], Method::DnsSingle),
+            &[claim(1, 5)],
+            false,
+        );
+        let b = &bound(&o)[0];
+        assert_eq!(b.method, Method::DnsSingle);
+        assert_eq!(o.changes, vec![PinChange::Put(b.clone())]);
+    }
+
+    #[test]
+    fn ingest_attestations_keeps_trusted_newest_and_drops_the_rest() {
+        let store = MemoryPinStore::new();
+        let ev = |witness: u8, created_at: u64, verified_at: u64| Event {
+            kind: KIND_ATTESTATION,
+            pubkey: npub(witness).to_hex(),
+            created_at,
+            tags: Attestation::tags("example.org", &[npub(1)], Method::Dns, verified_at),
+        };
+        let events = [
+            ev(10, 5, 5),
+            ev(10, 9, 9),            // newer by the same witness wins
+            ev(11, 5, 5),            // untrusted
+            ev(12, NOW + 7200, NOW), // from the future
+            ev(13, NOW, NOW + 7200), // verified in the future
+        ];
+        let out = ingest_attestations(
+            &store,
+            "example.org",
+            &[npub(10), npub(12), npub(13)],
+            &events,
+            NOW,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!((out[0].witness, out[0].created_at), (npub(10), 9));
+        // Rollback: the older event by witness 10 is now refused.
+        let out = ingest_attestations(&store, "example.org", &[npub(10)], &[ev(10, 5, 5)], NOW);
+        assert!(out.is_empty());
     }
 }

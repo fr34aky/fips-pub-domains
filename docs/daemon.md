@@ -51,6 +51,8 @@ responder: "[::1]:5354"                          # fips's .fips responder
 mesh_bind: null                                  # bind mesh queries to this node's fips address
 pins: /var/lib/fips-pubdom/pins.json
 allow_unverified_offline: false                  # resolve unverifiable claims offline, with a WARN per use
+witnesses: []                                    # npubs whose attestations count offline (spec §3.2); nobody else's are fetched
+attestation_threshold: 2                         # k: witnesses that must attest a server; 0 = off
 budget_ms: 4500                                  # whole lookup; on expiry the legacy answer is used
 ```
 
@@ -60,6 +62,14 @@ consecutive failure up to 3 hours, then tried again.
 
 ```yaml
 ```
+
+**Witnesses** are nodes you trust to have verified a domain online — your
+own other nodes, or a friend's — that publish attestations with
+`fips-pubdom attest` ([operators.md](operators.md), "Witnesses"). Offline,
+for a domain with no pin and no DNSSEC proof in its claim, a server attested
+by `attestation_threshold` of them is used and pinned as `attested`; the
+next online lookup re-verifies it properly. With `witnesses` empty nothing
+changes.
 
 **Mesh relays** are Nostr relays that run on fips nodes and are reachable
 without the Internet. Configure them by their `.fips` hostname, never as an

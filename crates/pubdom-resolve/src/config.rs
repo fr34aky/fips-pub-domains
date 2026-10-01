@@ -16,6 +16,8 @@
 //! mesh_bind: "fdd9:…"                          # this node's fips address
 //! pins: /var/lib/fips-pubdom/pins.json
 //! allow_unverified_offline: false
+//! witnesses: ["npub1…", "npub1…"]      # whose attestations count offline (spec §3.2)
+//! attestation_threshold: 2             # k: witnesses that must agree; 0 = off
 //! budget_ms: 4500
 //! ```
 
@@ -24,6 +26,7 @@ use crate::pins::FilePinStore;
 use crate::relay::RelayClient;
 use crate::resolver::{Resolver, ResolverConfig};
 use crate::txt::TxtVerifier;
+use pubdom_core::Npub;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -43,6 +46,12 @@ pub struct Config {
     pub mesh_bind: Option<Ipv6Addr>,
     pub pins: PathBuf,
     pub allow_unverified_offline: bool,
+    /// Witnesses whose attestations (kind 37198) count offline. Nobody
+    /// else's are fetched, let alone believed (spec §3.2, §5.1 step 4).
+    pub witnesses: Vec<Npub>,
+    /// *k*: how many witnesses must attest a server. `0` turns
+    /// attestations off even with witnesses configured.
+    pub attestation_threshold: usize,
     pub budget_ms: u64,
 }
 
@@ -63,6 +72,8 @@ impl Default for Config {
             mesh_bind: None,
             pins: PathBuf::from("/var/lib/fips-pubdom/pins.json"),
             allow_unverified_offline: false,
+            witnesses: Vec::new(),
+            attestation_threshold: d.attestation_threshold,
             budget_ms: 4500,
         }
     }
@@ -143,6 +154,8 @@ impl Config {
             mesh_relays: self.mesh_relays.clone(),
             dnssec: self.dnssec,
             allow_unverified_offline: self.allow_unverified_offline,
+            witnesses: self.witnesses.clone(),
+            attestation_threshold: self.attestation_threshold,
             ..ResolverConfig::default()
         }
     }
@@ -249,5 +262,12 @@ mod tests {
         assert!(!c.dnssec);
         assert_eq!(c.listen.len(), 1);
         assert!(serde_yaml::from_str::<Config>("nonsense: 1\n").is_err());
+        let w = Npub::from_bytes([7; 32]);
+        let y = format!("witnesses: [\"{w}\"]\nattestation_threshold: 1\n");
+        let c: Config = serde_yaml::from_str(&y).unwrap();
+        assert_eq!(c.witnesses, vec![w]);
+        assert_eq!(c.resolver_config().attestation_threshold, 1);
+        assert_eq!(Config::default().attestation_threshold, 2);
+        assert!(Config::default().witnesses.is_empty());
     }
 }

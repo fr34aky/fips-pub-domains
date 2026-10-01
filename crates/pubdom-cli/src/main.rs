@@ -4,10 +4,11 @@
 
 use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
-use pubdom_core::Claim;
-use pubdom_core::policy::{self, Input, NoProofs, ProofVerifier, ProvenRecord, TxtLookup};
-use pubdom_core::{PinStore, synth};
-use pubdom_resolve::relay::RelayScope;
+use pubdom_core::policy::{
+    self, Decision, Input, NoProofs, ProofVerifier, ProvenRecord, TxtLookup,
+};
+use pubdom_core::{Claim, Method, Npub, PinStore, synth};
+use pubdom_resolve::relay::{RelayScope, attestation_event_json, load_keys, publish_attestation};
 use pubdom_resolve::{Config, FilePinStore, LookupResult, RelayClient, TxtVerifier};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -38,6 +39,20 @@ enum Cmd {
     Claims { domain: String },
     /// Fetch and print the zone record the domain's pinned server published.
     Zone { domain: String },
+    /// Be a witness: verify a domain online and publish an attestation
+    /// (kind 37198) naming its servers, signed with this node's key.
+    Attest {
+        domain: String,
+        /// The node key: fips's key file, an nsec, or 64 hex characters.
+        #[arg(long, default_value = "/etc/fips/fips.key")]
+        key: String,
+        /// Print the signed event instead of publishing it.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Fetch and print the attestations the configured witnesses published
+    /// for a domain.
+    Attestations { domain: String },
     /// Pinned bindings.
     Pins {
         #[command(subcommand)]
@@ -143,6 +158,28 @@ async fn main() -> Result<()> {
             let events = relays.fetch_claims(&domain, scope).await;
             println!("claim events: {}", events.len());
             let claims = policy::ingest_claims(&pins, &domain, &events, pubdom_resolve::now());
+            let att_events = relays
+                .fetch_attestations(&domain, &cfg.witnesses, scope)
+                .await;
+            let attestations = policy::ingest_attestations(
+                &pins,
+                &domain,
+                &cfg.witnesses,
+                &att_events,
+                pubdom_resolve::now(),
+            );
+            println!(
+                "attestations by trusted witnesses: {} (of {} configured, k = {})",
+                attestations.len(),
+                cfg.witnesses.len(),
+                cfg.attestation_threshold
+            );
+            for a in &attestations {
+                println!(
+                    "  {} attests {:?} {:?} verified_at {}",
+                    a.witness, a.servers, a.method, a.verified_at
+                );
+            }
             let dnssec = pubdom_resolve::proof::DnssecProofs::default();
             let now = pubdom_resolve::now();
             // Each proof checked once, for the listing and the decision.
@@ -171,6 +208,8 @@ async fn main() -> Result<()> {
                 pins: pinned,
                 txt,
                 claims: &claims,
+                attestations: &attestations,
+                attestation_threshold: cfg.attestation_threshold,
                 now,
                 allow_unverified_offline: cfg.allow_unverified_offline,
                 proofs,
@@ -227,6 +266,118 @@ async fn main() -> Result<()> {
                     }
                     None => println!("{domain}: no zone record from {}", pin.npub),
                 }
+            }
+            relays.shutdown().await;
+        }
+        Cmd::Attest {
+            domain,
+            key,
+            dry_run,
+        } => {
+            let domain =
+                pubdom_core::domain::normalize(&domain).ok_or_else(|| anyhow!("bad domain"))?;
+            if upstreams.is_empty() {
+                return Err(anyhow!(
+                    "attesting needs the legacy DNS: a witness vouches for what it verified online"
+                ));
+            }
+            let keys = load_keys(&key).map_err(anyhow::Error::msg)?;
+            let v = TxtVerifier::new(&upstreams, cfg.dnssec, Duration::from_millis(1500))
+                .map_err(anyhow::Error::msg)?;
+            let (txt, _) = v.lookup(&domain).await;
+            let method = match &txt {
+                TxtLookup::Hit { method, .. } if *method >= Method::Dns => *method,
+                TxtLookup::Hit { method, .. } => {
+                    return Err(anyhow!(
+                        "{domain}: verified by {method:?} only; attesting takes DNSSEC or two agreeing resolvers"
+                    ));
+                }
+                other => return Err(anyhow!("{domain}: no verified record ({other:?})")),
+            };
+            let relays =
+                RelayClient::new(&cfg.public_relays, &cfg.mesh_relays, Duration::from_secs(3))
+                    .await;
+            let events = relays.fetch_claims(&domain, RelayScope::AfterHit).await;
+            // A witness keeps no pins of its own: the record and the claims
+            // of the moment decide, as they would for a first visit.
+            let pins = pubdom_core::MemoryPinStore::new();
+            let now = pubdom_resolve::now();
+            let claims = policy::ingest_claims(&pins, &domain, &events, now);
+            let out = policy::decide(Input {
+                domain: &domain,
+                pins: Vec::new(),
+                txt,
+                claims: &claims,
+                attestations: &[],
+                attestation_threshold: 0,
+                now,
+                allow_unverified_offline: false,
+                proofs: &NoProofs,
+            });
+            let servers: Vec<Npub> = match out.decision {
+                Decision::Bound(b) => b.iter().map(|b| b.npub).collect(),
+                other => {
+                    relays.shutdown().await;
+                    return Err(anyhow!("{domain}: nothing to attest ({other:?})"));
+                }
+            };
+            let all: Vec<String> = cfg
+                .public_relays
+                .iter()
+                .chain(cfg.mesh_relays.iter())
+                .cloned()
+                .collect();
+            relays.shutdown().await;
+            if dry_run {
+                println!(
+                    "{}",
+                    attestation_event_json(&keys, &domain, &servers, method, now)
+                        .map_err(anyhow::Error::msg)?
+                );
+                return Ok(());
+            }
+            let ok = publish_attestation(
+                keys,
+                &all,
+                &domain,
+                &servers,
+                method,
+                now,
+                Duration::from_secs(10),
+            )
+            .await
+            .map_err(anyhow::Error::msg)?;
+            println!(
+                "{domain}: attested {} server(s) by {method:?}, accepted by {}",
+                servers.len(),
+                ok.join(", ")
+            );
+            for s in &servers {
+                println!("  {s}");
+            }
+        }
+        Cmd::Attestations { domain } => {
+            let domain =
+                pubdom_core::domain::normalize(&domain).ok_or_else(|| anyhow!("bad domain"))?;
+            if cfg.witnesses.is_empty() {
+                println!(
+                    "{domain}: no witnesses configured; attestations are fetched from witnesses only"
+                );
+                return Ok(());
+            }
+            let relays =
+                RelayClient::new(&cfg.public_relays, &cfg.mesh_relays, Duration::from_secs(3))
+                    .await;
+            let scope = if cli.offline {
+                RelayScope::Offline
+            } else {
+                RelayScope::AfterHit
+            };
+            for ev in relays
+                .fetch_attestations(&domain, &cfg.witnesses, scope)
+                .await
+            {
+                println!("{}", serde_json::to_string_pretty(&ev)?);
             }
             relays.shutdown().await;
         }

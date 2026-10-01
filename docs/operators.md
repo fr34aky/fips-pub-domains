@@ -187,6 +187,33 @@ fips-pubdom --config /tmp/check.yaml --offline verify example.org
 It should list A's claim with `no DNSSEC proof` and B's with a proof, and
 bind B alone.
 
+## Witnesses
+
+A client that has never seen your domain, is offline, and reaches a relay
+on the mesh verifies it from the DNSSEC proof in your claim (§5.5) — if
+your zone is signed. For an unsigned zone, or for clients that trust a
+few nodes more than they trust DNS, a *witness* can vouch: a node that
+verified the domain online publishes an attestation (kind 37198) naming
+the servers it verified. Clients list the witnesses they trust in their
+config (`witnesses`, `attestation_threshold`, see
+[daemon.md](daemon.md)); an attestation by anyone else is not even
+fetched.
+
+To be a witness, on any node with Internet access and the fips key:
+
+```
+fips-pubdom attest example.org --key /etc/fips/fips.key
+```
+
+It verifies the record as a resolver would (DNSSEC, or two agreeing
+resolvers — a single resolver is refused), fetches the claims, and
+publishes one attestation to your public and mesh relays naming every
+server the record and the claims agree on. `--dry-run` prints the signed
+event instead. Run it again whenever the server set changes, and
+periodically (a daily timer is plenty): a client asks for the newest
+attestation per witness. `fips-pubdom attestations example.org` shows
+what the configured witnesses have published.
+
 ## Checking from another node
 
 From any linked fips node, with the server's fips address:

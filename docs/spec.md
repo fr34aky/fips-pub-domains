@@ -99,7 +99,8 @@ Published by the server that serves a domain.
 
 ### 3.2 Attestation — kind 37198 (addressable)
 
-Published by a node that verified a binding while it had Internet access.
+Published by a node (a *witness*) that verified a binding while it had
+Internet access.
 
 ```jsonc
 {
@@ -107,7 +108,7 @@ Published by a node that verified a binding while it had Internet access.
   "pubkey": "<witness hex>",
   "tags": [
     ["d", "example.org"],
-    ["p", "<npubxyz hex>"],
+    ["p", "<npubxyz hex>"],        // one per server the witness verified
     ["method", "dnssec"],          // or "dns" (unsigned DNS, several resolvers)
     ["verified_at", "<unix time>"]
   ],
@@ -115,7 +116,21 @@ Published by a node that verified a binding while it had Internet access.
 }
 ```
 
-An attestation is only worth the trust the reader places in the witness.
+- One attestation per (witness, domain); it names every server the witness
+  verified for the domain (§5.3), so a re-attestation replaces the whole set.
+- `method` is how the witness verified: `dnssec`, or `dns` from several
+  agreeing resolvers. A single resolver's say is not worth attesting.
+- An attestation is only worth the trust the reader places in the witness.
+  A client reads attestations from witnesses it configured explicitly and
+  asks relays for those authors only; an attestation by any other key is
+  never fetched, let alone believed. The client counts the distinct
+  witnesses that name a server and uses it once there are *k* (default 2;
+  0 turns attestations off). It vouches only for keys that claim the domain
+  themselves: the claim says which port the server serves.
+- Attestations are consulted offline only, for a domain with no pin and no
+  usable proof (§5.1). A binding taken on attestations is pinned as
+  `attestation`, the weakest method, so any later online verification
+  replaces it (§5.4).
 
 ### 3.3 Zone record — kind 37199 (addressable)
 

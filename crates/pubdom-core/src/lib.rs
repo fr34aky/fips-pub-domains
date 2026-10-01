@@ -17,7 +17,7 @@ pub mod policy;
 pub mod synth;
 pub mod txt;
 
-pub use claim::{Claim, Event, ZoneRecord};
+pub use claim::{Attestation, Claim, Event, ZoneRecord};
 pub use identity::Npub;
 pub use pins::{Binding, MemoryPinStore, Method, PinStore};
 pub use policy::{Decision, Outcome, PinChange, Reason, TxtLookup};

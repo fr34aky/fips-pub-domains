@@ -44,6 +44,16 @@ pub trait ClaimSource: Send + Sync {
         author: Npub,
         scope: RelayScope,
     ) -> impl Future<Output = Vec<Event>> + Send;
+
+    /// Attestations (kind 37198) for `domain` by the trusted `witnesses`
+    /// — never by anyone else, so an untrusted key's events are not even
+    /// fetched.
+    fn fetch_attestations(
+        &self,
+        domain: &str,
+        witnesses: &[Npub],
+        scope: RelayScope,
+    ) -> impl Future<Output = Vec<Event>> + Send;
 }
 
 impl TxtSource for TxtVerifier {
@@ -58,6 +68,14 @@ impl ClaimSource for RelayClient {
     }
     async fn fetch_zone(&self, domain: &str, author: Npub, scope: RelayScope) -> Vec<Event> {
         RelayClient::fetch_zone(self, domain, &author, scope).await
+    }
+    async fn fetch_attestations(
+        &self,
+        domain: &str,
+        witnesses: &[Npub],
+        scope: RelayScope,
+    ) -> Vec<Event> {
+        RelayClient::fetch_attestations(self, domain, witnesses, scope).await
     }
 }
 
@@ -75,6 +93,11 @@ pub struct ResolverConfig {
     pub mesh_relays: Vec<String>,
     pub dnssec: bool,
     pub allow_unverified_offline: bool,
+    /// Witnesses whose attestations (spec §3.2) count offline; nobody
+    /// else's are fetched. Empty: attestations are not used.
+    pub witnesses: Vec<Npub>,
+    /// *k*: how many of them must attest a server (spec §5.1 step 4).
+    pub attestation_threshold: usize,
     pub txt_timeout: Duration,
     pub relay_timeout: Duration,
     pub step3_timeout: Duration,
@@ -103,6 +126,8 @@ impl Default for ResolverConfig {
             mesh_relays: Vec::new(),
             dnssec: true,
             allow_unverified_offline: false,
+            witnesses: Vec::new(),
+            attestation_threshold: 2,
             txt_timeout: Duration::from_millis(1500),
             relay_timeout: Duration::from_secs(2),
             step3_timeout: Duration::from_secs(1),
@@ -361,21 +386,31 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         } else {
             (TxtLookup::Unreachable, None)
         };
-        let events = match &txt {
+        let (events, att_events) = match &txt {
             // The privacy gate (spec §8): relays only after a TXT hit …
-            TxtLookup::Hit { .. } => self.claims.fetch_claims(d, RelayScope::AfterHit).await,
-            TxtLookup::Miss { .. } | TxtLookup::Disputed => Vec::new(),
+            TxtLookup::Hit { .. } => (
+                self.claims.fetch_claims(d, RelayScope::AfterHit).await,
+                Vec::new(),
+            ),
+            TxtLookup::Miss { .. } | TxtLookup::Disputed => (Vec::new(), Vec::new()),
             // … or offline, where the claim stands in for the record (§5.5) —
             // unless a pin already answers, which needs no relay at all.
-            TxtLookup::Unreachable if !pins.is_empty() => Vec::new(),
+            TxtLookup::Unreachable if !pins.is_empty() => (Vec::new(), Vec::new()),
             // Believed online but DNS did not answer: a public relay must not
-            // learn the domain; relays on the mesh may.
-            TxtLookup::Unreachable if online => {
-                self.claims.fetch_claims(d, RelayScope::MeshOnly).await
-            }
-            TxtLookup::Unreachable => self.claims.fetch_claims(d, RelayScope::Offline).await,
+            // learn the domain; relays on the mesh may. Attestations by the
+            // trusted witnesses are asked for alongside the claims (§5.1
+            // step 4): with no record and no pin they are what is left.
+            TxtLookup::Unreachable if online => self.fetch_offline(d, RelayScope::MeshOnly).await,
+            TxtLookup::Unreachable => self.fetch_offline(d, RelayScope::Offline).await,
         };
         let claims = policy::ingest_claims(self.pins.as_ref(), d, &events, now);
+        let attestations = policy::ingest_attestations(
+            self.pins.as_ref(),
+            d,
+            &self.cfg.witnesses,
+            &att_events,
+            now,
+        );
         let is_unreachable = matches!(txt, TxtLookup::Unreachable);
         let disputed = matches!(txt, TxtLookup::Disputed);
         let outcome = policy::decide(Input {
@@ -383,6 +418,8 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             pins,
             txt,
             claims: &claims,
+            attestations: &attestations,
+            attestation_threshold: self.cfg.attestation_threshold,
             now,
             allow_unverified_offline: self.cfg.allow_unverified_offline,
             proofs: self.proofs.as_ref(),
@@ -443,6 +480,20 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         };
         self.decisions.put(d.to_string(), cached.clone(), ttl, now);
         cached
+    }
+
+    /// Claims and, when witnesses are configured, their attestations, asked
+    /// for at once.
+    async fn fetch_offline(&self, d: &str, scope: RelayScope) -> (Vec<Event>, Vec<Event>) {
+        let claims = self.claims.fetch_claims(d, scope);
+        if self.cfg.witnesses.is_empty() || self.cfg.attestation_threshold == 0 {
+            return (claims.await, Vec::new());
+        }
+        futures::join!(
+            claims,
+            self.claims
+                .fetch_attestations(d, &self.cfg.witnesses, scope)
+        )
     }
 
     /// Step 3 (spec §6) plus the reachability rule (spec §7). `None` means
@@ -780,6 +831,26 @@ mod tests {
                 .cloned()
                 .collect()
         }
+        async fn fetch_attestations(
+            &self,
+            domain: &str,
+            witnesses: &[Npub],
+            scope: RelayScope,
+        ) -> Vec<Event> {
+            self.1
+                .lock()
+                .unwrap()
+                .push((format!("attestations:{domain}"), scope));
+            self.0
+                .iter()
+                .filter(|e| {
+                    e.kind == pubdom_core::KIND_ATTESTATION
+                        && e.tags[0][1] == domain
+                        && witnesses.iter().any(|w| w.to_hex() == e.pubkey)
+                })
+                .cloned()
+                .collect()
+        }
         async fn fetch_zone(&self, domain: &str, author: Npub, scope: RelayScope) -> Vec<Event> {
             self.1
                 .lock()
@@ -881,6 +952,76 @@ mod tests {
             mesh.clone(),
         );
         (r, mesh)
+    }
+
+    fn attestation_event(witness: Npub, servers: &[Npub], domain: &str) -> Event {
+        Event {
+            kind: pubdom_core::KIND_ATTESTATION,
+            pubkey: witness.to_hex(),
+            created_at: crate::now() - 10,
+            tags: pubdom_core::Attestation::tags(domain, servers, Method::Dns, crate::now() - 10),
+        }
+    }
+
+    /// Spec §5.1 step 4 end to end: offline, unpinned, no proof, the claim
+    /// is used once k configured witnesses attest it, pinned as Attested;
+    /// attestations are fetched in the same scope as the claims, and not
+    /// at all without witnesses.
+    #[tokio::test]
+    async fn offline_attested_claim_resolves_and_pins_as_attested() {
+        let events = vec![
+            claim_event(npub(1), "example.org"),
+            attestation_event(npub(10), &[npub(1)], "example.org"),
+            attestation_event(npub(11), &[npub(1)], "example.org"),
+            attestation_event(npub(12), &[npub(1)], "example.org"), // not trusted
+        ];
+        let build = |witnesses: Vec<Npub>, k: usize| {
+            let pins: Arc<MemoryPinStore> = Arc::new(MemoryPinStore::new());
+            let mesh = Arc::new(FakeMesh {
+                queries: Mutex::new(vec![]),
+                registered: Mutex::new(vec![]),
+                echoes: Mutex::new(vec![]),
+                unreachable: vec![],
+                down: vec![],
+            });
+            let cfg = ResolverConfig {
+                witnesses,
+                attestation_threshold: k,
+                ..Default::default()
+            };
+            let r = Resolver::new(
+                cfg,
+                pins.clone(),
+                FakeTxt(Mutex::new(HashMap::new())),
+                FakeClaims(events.clone(), Mutex::new(vec![])),
+                mesh,
+            );
+            r.set_online(false);
+            (r, pins)
+        };
+        let q = build_query(1, "www.example.org", QTYPE_AAAA).unwrap();
+
+        let (r, pins) = build(vec![npub(10), npub(11)], 2);
+        assert!(matches!(r.lookup(&q).await, LookupResult::Answer(_)));
+        let pinned = pins.get("example.org");
+        assert_eq!(pinned.len(), 1);
+        assert_eq!(
+            (pinned[0].npub, pinned[0].method),
+            (npub(1), Method::Attested)
+        );
+        let asked = r.claims.1.lock().unwrap().clone();
+        assert!(asked.contains(&("attestations:example.org".to_string(), RelayScope::Offline)));
+
+        // One trusted witness short of k: refused, nothing pinned.
+        let (r, pins) = build(vec![npub(10), npub(12)], 3);
+        assert_eq!(r.lookup(&q).await, LookupResult::Passthrough);
+        assert!(pins.get("example.org").is_empty());
+
+        // No witnesses configured: attestations are not even fetched.
+        let (r, _) = build(vec![], 2);
+        assert_eq!(r.lookup(&q).await, LookupResult::Passthrough);
+        let asked = r.claims.1.lock().unwrap().clone();
+        assert!(asked.iter().all(|(d, _)| !d.starts_with("attestations:")));
     }
 
     fn hit(author: Npub) -> TxtLookup {

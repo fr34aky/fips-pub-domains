@@ -304,9 +304,18 @@ fn restore_resolv_conf(host: &Host) -> Result<()> {
     host.remove(RESOLV_BACKUP)
 }
 
+/// `/etc/x` under the host's root. `has_root`, not `is_absolute`: on
+/// Windows, where the tests also run, a path starting with `/` has a root
+/// but no drive and so is not "absolute".
 fn under_root(host: &Host, path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        host.root.join(path.strip_prefix("/").unwrap_or(path))
+    if path.has_root() {
+        let mut rel = PathBuf::new();
+        for c in path.components() {
+            if let std::path::Component::Normal(n) = c {
+                rel.push(n);
+            }
+        }
+        host.root.join(rel)
     } else {
         path.to_path_buf()
     }

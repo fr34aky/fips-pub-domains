@@ -770,7 +770,7 @@ mod tests {
         let (h, ran) = host(&d, &[]);
         h.write(
             RESOLV_CONF,
-            "# by hand\n  nameserver 192.168.1.1\nnameserver 127.0.0.1\nsearch lan\noptions ndots:1\n",
+            "# by hand\nnameserver 192.168.1.1\nnameserver 127.0.0.1\nsearch lan\noptions ndots:1\n",
         )
         .unwrap();
         let (b, _) = setup(&h, &cfg_path(), Backend::Auto).unwrap();
@@ -807,7 +807,7 @@ mod tests {
         assert_eq!(b, Backend::ResolvConf);
         assert_eq!(
             h.read(RESOLV_CONF).unwrap(),
-            "# by hand\n  nameserver 192.168.1.1\nnameserver 127.0.0.1\nsearch lan\noptions ndots:1\n"
+            "# by hand\nnameserver 192.168.1.1\nnameserver 127.0.0.1\nsearch lan\noptions ndots:1\n"
         );
         assert!(
             !h.exists(UPSTREAMS_SNAPSHOT) && !h.exists(STATE_BACKEND) && !h.exists(RESOLV_BACKUP)

@@ -168,18 +168,17 @@ impl Config {
 
 pub type ProdResolver = Resolver<MaybeTxt, RelayClient>;
 
-/// A TXT source that may be absent (mesh-only node, or the system has no
-/// resolvers right now) and can be swapped when the upstreams change — a
-/// laptop that moves networks must verify against the new resolvers, not
-/// keep asking the old ones until they time out.
 /// The `nameserver` entries of a resolv.conf, in order, each once; a
-/// `%scope` suffix dropped. Loopback and the daemon's own addresses are
-/// the caller's business.
+/// `%scope` suffix dropped. As glibc reads the file: the keyword at the
+/// start of the line and followed by a space or tab, so an indented line
+/// or `nameserverX` is ignored, as the system resolver ignores it.
+/// Loopback and the daemon's own addresses are the caller's business.
 pub fn nameservers(text: &str) -> Vec<IpAddr> {
     let mut out: Vec<IpAddr> = Vec::new();
     for ip in text
         .lines()
-        .filter_map(|l| l.trim_start().strip_prefix("nameserver"))
+        .filter_map(|l| l.strip_prefix("nameserver"))
+        .filter(|rest| rest.starts_with([' ', '\t']))
         .filter_map(|rest| rest.split_whitespace().next())
         .filter_map(|s| s.split('%').next().unwrap_or(s).parse::<IpAddr>().ok())
     {
@@ -190,6 +189,10 @@ pub fn nameservers(text: &str) -> Vec<IpAddr> {
     out
 }
 
+/// A TXT source that may be absent (mesh-only node, or the system has no
+/// resolvers right now) and can be swapped when the upstreams change — a
+/// laptop that moves networks must verify against the new resolvers, not
+/// keep asking the old ones until they time out.
 pub struct MaybeTxt {
     inner: std::sync::Mutex<Option<Arc<TxtVerifier>>>,
     dnssec: bool,
@@ -265,11 +268,15 @@ mod tests {
     }
 
     #[test]
-    fn nameservers_parses_indented_scoped_and_repeated_lines_once() {
+    fn nameservers_reads_the_file_as_glibc_does() {
         let got = nameservers(
-            "# c\n  nameserver 10.0.0.1\nnameserver fe80::1%eth0\nnameserver 10.0.0.1\nsearch lan\n",
+            "# c\n  nameserver 10.9.9.9\nnameserver1.2.3.4\nnameserver\t10.0.0.1\nnameserver fe80::1%eth0\nnameserver 10.0.0.1\nsearch lan\n",
         );
-        assert_eq!(got.len(), 2);
+        assert_eq!(
+            got.len(),
+            2,
+            "indented and glued keywords are ignored, repeats kept once"
+        );
         assert_eq!(got[0], "10.0.0.1".parse::<IpAddr>().unwrap());
         assert_eq!(got[1], "fe80::1".parse::<IpAddr>().unwrap());
     }

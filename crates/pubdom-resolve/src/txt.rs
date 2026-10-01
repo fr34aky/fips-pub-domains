@@ -99,6 +99,13 @@ impl TxtVerifier {
         Ok(Self { resolvers, timeout })
     }
 
+    /// The wait given to each upstream's lookup; the verifier allows 200 ms
+    /// on top for hickory's own bookkeeping before it counts the upstream
+    /// as unanswering.
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
     pub fn upstreams(&self) -> Vec<IpAddr> {
         self.resolvers.iter().map(|(ip, _)| *ip).collect()
     }

@@ -82,7 +82,8 @@ lookup(query)
 ```
 
 Budgets (plan values, enforced by per-step timeouts and a whole-lookup
-budget in the daemon and the phone): TXT 1.5 s, relays 2 s, step 3 1 s +
+budget in the daemon and the phone): TXT 1.5 s (500 ms on a phone without
+a validated Internet network, plus 200 ms of slack either way), relays 2 s, step 3 1 s +
 retry, TCP 3 s; a cold online lookup stays under 4.5 s, a pinned mesh
 lookup around 1 s, a cached one milliseconds. The relay fetch asks every
 relay on its own subscription and, after a TXT hit, returns 750 ms after

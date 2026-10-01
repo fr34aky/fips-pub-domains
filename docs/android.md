@@ -47,9 +47,15 @@ firewall and the TUN.
   carries a valid DNSSEC proof (a 0.2.0 server, a signed zone) and the
   phone has a mesh path to the relay. Otherwise such a domain is refused
   offline, as before.
-- **No explicit online flag.** An unreachable upstream simply takes the
-  offline path; `network_hint` flushes the resolver's caches so the next
-  lookup re-decides.
+- **The Internet flag shortens the TXT wait, nothing more.** The
+  VpnService tells the shim whether any non-hotspot network passed
+  Android's validation (fips2go #67); without one the TXT lookup waits
+  500 ms instead of 1.5 s (`MaybeTxt::set_timeout`), so a first offline
+  lookup fails into the mesh-only path within the budget. It is not
+  skipped: a Wi-Fi that works but never passed the probe still verifies
+  online, and the resolver keeps believing it is online, so no public
+  relay is asked without a TXT hit. `network_hint` still flushes the
+  caches on a network change.
 - The whole lookup runs on a 3.5 s budget so the legacy fallback still fits
   inside bionic's 5 s resolver timeout. A lookup that overruns it (offline:
   TXT timeout, then a mesh relay) finishes in the background and caches,

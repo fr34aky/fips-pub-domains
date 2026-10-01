@@ -102,6 +102,15 @@ without the Internet.
   gate never covered. "Default witnesses = the user's synced trusted
   nodes" is the phone's job, where that list exists.
 
+- **NetworkManager is bypassed, not configured.** Its dnsmasq plugin
+  takes the connections' servers over D-Bus and cannot be told to use one
+  server only, so `setup` sets `dns=none` and owns `resolv.conf`; NM still
+  writes `/run/NetworkManager/resolv.conf`, which keeps the upstreams
+  following DHCP. Plain `resolv.conf` and standalone dnsmasq get a static
+  snapshot of their servers instead — nothing else on such a machine
+  tracks them. Where the OS cannot name a port the daemon takes 53;
+  `setup` records its backend so `teardown` needs no flag.
+
 ## Facts from the fips codebase the design rests on
 
 - fips's Nostr key is the node identity key (`src/nostr/runtime.rs` builds

@@ -7,10 +7,12 @@
 //! backend (a global drop-in with `DNS=[::1]:5356` and `Domains=~.`, the
 //! same mechanism fips uses for `.fips`, generalised).
 
+mod backend;
 mod forward;
 
-use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand, ValueEnum};
+use anyhow::{Context, Result};
+use backend::Backend;
+use clap::{Parser, Subcommand};
 use pubdom_resolve::{Config, LookupResult, ProdResolver};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -20,12 +22,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 
 const DEFAULT_CONFIG: &str = "/etc/fips-pubdom/config.yaml";
-/// Sorts after fips's own drop-in (`fips-dns-setup` writes one named after
-/// itself) so the list resets below win: resolved merges every drop-in
-/// into ONE global server pool, and two servers with different routing
-/// domains in one pool are queried interchangeably.
-const RESOLVED_DROPIN: &str = "/etc/systemd/resolved.conf.d/zz-fips-pubdom.conf";
-const RESOLVED_UPSTREAMS: &str = "/run/systemd/resolve/resolv.conf";
 
 #[derive(Parser)]
 #[command(name = "fips-pubdomd", version, about)]
@@ -40,21 +36,17 @@ struct Cli {
 enum Cmd {
     /// Serve DNS (what the service unit runs).
     Run,
-    /// Point the OS at the daemon and write the config.
+    /// Point the OS at the daemon and write the config (docs/daemon.md).
     Setup {
-        #[arg(long, value_enum, default_value_t = Backend::Resolved)]
+        /// Which resolver arrangement to hook into; `auto` detects it.
+        #[arg(long, value_enum, default_value_t = Backend::Auto)]
         backend: Backend,
     },
-    /// Undo `setup`.
+    /// Undo `setup`; without --backend, the one `setup` recorded.
     Teardown {
-        #[arg(long, value_enum, default_value_t = Backend::Resolved)]
+        #[arg(long, value_enum, default_value_t = Backend::Auto)]
         backend: Backend,
     },
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-enum Backend {
-    Resolved,
 }
 
 struct State {
@@ -137,7 +129,17 @@ async fn handle(state: &Arc<State>, query: Vec<u8>) -> Option<Vec<u8>> {
 async fn run(cfg: Config) -> Result<()> {
     let upstreams = cfg.current_upstreams();
     tracing::info!(?upstreams, listen = ?cfg.listen, pins = %cfg.pins.display(), "starting");
-    let shadowed = cfg.link_search_domains();
+    // Only resolved routes a link's search domain past a global server;
+    // glibc and dnsmasq send every name to the daemon.
+    let on_resolved = cfg
+        .upstreams_from
+        .as_deref()
+        .is_some_and(|p| p.starts_with("/run/systemd/resolve"));
+    let shadowed = if on_resolved {
+        cfg.link_search_domains()
+    } else {
+        Vec::new()
+    };
     if !shadowed.is_empty() {
         tracing::warn!(
             domains = ?shadowed,
@@ -227,73 +229,27 @@ async fn run(cfg: Config) -> Result<()> {
 }
 
 fn setup(config_path: &Path, backend: Backend) -> Result<()> {
-    match backend {
-        Backend::Resolved => {
-            if !Path::new("/run/systemd/resolve").exists() {
-                bail!("systemd-resolved is not running; other backends come in a later milestone");
-            }
-            // Snapshot the upstreams first: once the drop-in is in place the
-            // stub file points back at us, but /run/systemd/resolve/resolv.conf
-            // keeps listing the real servers, which the daemon then follows.
-            let mut cfg = Config::load_or_default(config_path).map_err(anyhow::Error::msg)?;
-            cfg.upstreams_from = Some(PathBuf::from(RESOLVED_UPSTREAMS));
-            if let Some(dir) = config_path.parent() {
-                std::fs::create_dir_all(dir)?;
-            }
-            std::fs::write(config_path, serde_yaml::to_string(&cfg)?)?;
-            if let Some(dir) = cfg.pins.parent() {
-                std::fs::create_dir_all(dir)?;
-            }
-            let listen = cfg
-                .listen
-                .iter()
-                .map(|a| match a.ip() {
-                    IpAddr::V6(v6) => format!("[{v6}]:{}", a.port()),
-                    IpAddr::V4(v4) => format!("{v4}:{}", a.port()),
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            std::fs::create_dir_all("/etc/systemd/resolved.conf.d")?;
-            std::fs::write(
-                RESOLVED_DROPIN,
-                format!(
-                    "# Managed by fips-pubdomd setup. All names go through fips-pubdom (full mode);\n\
-                     # names that are not over fips are forwarded to the previous upstreams,\n\
-                     # .fips names to fips's responder. The empty assignments reset the lists\n\
-                     # other drop-ins (fips-dns-setup's) added to the same global pool.\n\
-                     [Resolve]\nDNS=\nDNS={listen}\nDomains=\nDomains=~.\n"
-                ),
-            )?;
-            let st = std::process::Command::new("systemctl")
-                .args(["restart", "systemd-resolved"])
-                .status()?;
-            if !st.success() {
-                bail!("systemctl restart systemd-resolved failed");
-            }
-            println!("wrote {} and {}", config_path.display(), RESOLVED_DROPIN);
-            println!("upstreams now: {:?}", cfg.current_upstreams());
-            println!("start the daemon: systemctl enable --now fips-pubdom");
-        }
+    let host = backend::Host::system();
+    let (used, notes) = backend::setup(&host, config_path, backend)?;
+    println!("backend: {used:?}");
+    println!("wrote {}", config_path.display());
+    for n in notes {
+        println!("{n}");
     }
+    let cfg = Config::load_or_default(config_path).map_err(anyhow::Error::msg)?;
+    println!("upstreams now: {:?}", cfg.current_upstreams());
+    println!(
+        "start (or restart) the daemon: systemctl enable --now fips-pubdom; systemctl restart fips-pubdom"
+    );
     Ok(())
 }
 
 fn teardown(backend: Backend) -> Result<()> {
-    match backend {
-        Backend::Resolved => {
-            match std::fs::remove_file(RESOLVED_DROPIN) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
-            }
-            let st = std::process::Command::new("systemctl")
-                .args(["restart", "systemd-resolved"])
-                .status()?;
-            if !st.success() {
-                bail!("systemctl restart systemd-resolved failed");
-            }
-            println!("removed {RESOLVED_DROPIN}");
-        }
+    let host = backend::Host::system();
+    let (used, notes) = backend::teardown(&host, backend)?;
+    println!("backend: {used:?}");
+    for n in notes {
+        println!("{n}");
     }
     Ok(())
 }

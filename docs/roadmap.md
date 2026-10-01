@@ -14,6 +14,11 @@
   pinned, first-visit discovery, offline, and — offline with no pins — a
   domain verified from its claim's DNSSEC proof via a relay on the mesh.
 - Live tests through level 5 ([testing.md](testing.md)).
+- Linux `setup` backends beyond systemd-resolved: NetworkManager
+  (`dns=none`, the daemon on port 53, NM's server list followed),
+  standalone dnsmasq (`no-resolv` + `server=`), plain `resolv.conf`;
+  detected, recorded for `teardown`, exercised in a temporary root by
+  tests.
 - Zone records (kind 37199): published by the server with the claim, used
   by the resolver when the server does not answer.
 - Redundant servers: every server the TXT record names is pinned; failover
@@ -42,10 +47,12 @@
 2. **Default witnesses on the phone** = the user's synced trusted nodes
    (the Mesh names sync's upstream and the hosts-file entries), opt-in;
    today the list is typed in Settings.
-3. **Daemon backends**: dnsmasq / NetworkManager, plain `resolv.conf`,
-   then macOS (launchd + `networksetup`) and Windows (service + adapter
-   DNS); restricted per-domain mode on all three; OpenWrt and pfSense
-   packaging. Network-change watchers instead of the 30 s poll.
+3. **Daemon backends**: macOS (launchd + `networksetup`) and Windows
+   (service + adapter DNS); restricted per-domain mode; OpenWrt and
+   pfSense packaging. Network-change watchers instead of the 30 s poll.
+   Done on Linux: NetworkManager, standalone dnsmasq and plain
+   `resolv.conf` beside systemd-resolved, with detection and a recorded
+   teardown.
 4. **Phone gaps**: TCP fallback for step 3 over the smoltcp stack; an
    explicit online flag from the VpnService (would skip the TXT wait
    offline, so a first lookup through a mesh relay fits the 3.5 s budget

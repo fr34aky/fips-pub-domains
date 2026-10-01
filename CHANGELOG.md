@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `fips-pubdomd setup` on Linux beyond systemd-resolved: NetworkManager
+  without resolved (`dns=none` drop-in, the daemon on port 53 in
+  `resolv.conf`, NM's own server list followed for the upstreams), a
+  standalone dnsmasq (`no-resolv` and `server=` to the daemon, the servers
+  of its resolv file snapshotted), and a plain `resolv.conf` (the daemon on
+  port 53, the previous `nameserver` lines snapshotted; refused when
+  something else manages the file). `--backend auto` (the default) detects
+  the arrangement, `setup` records it, and `teardown` undoes the recorded
+  one without being told.
+
 - Attestations (kind 37198, spec §3.2, phase 3): a client lists the
   witnesses it trusts (`witnesses`, `attestation_threshold` in the config)
   and, offline, resolves a domain it has no pin and no proof for once *k*

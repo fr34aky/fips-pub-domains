@@ -278,6 +278,17 @@ attestations vouch only for the server they name, and the witness named
 one. (`www.example.org` is no longer in the server's zone, hence the
 lookup of `relay`.)
 
+## Not yet run live: the Linux setup backends
+
+The NetworkManager, dnsmasq and plain-`resolv.conf` backends of
+`fips-pubdomd setup` are exercised by tests in a temporary root with a
+stubbed `systemctl`/`nmcli`; the reference node runs systemd-resolved, so
+none has been run on a real machine. The NetworkManager backend rests on
+NM's documented behaviour of writing `/run/NetworkManager/resolv.conf`
+under `dns=none`; the first live run should confirm that file follows a
+DHCP change. Candidates: a Debian box with NetworkManager and no
+resolved, and a container with dnsmasq.
+
 ## Level 5 — the phone
 
 Run on a Pixel 9 Pro with fips2go (then its `names` branch; a debug build from

@@ -40,3 +40,10 @@ pub const MAX_FUTURE_SECS: u64 = 600;
 
 /// TTL of answers synthesized for applications (spec §7).
 pub const ANSWER_TTL_SECS: u32 = 30;
+
+/// TTL imposed on a legacy answer handed out because the lookup overran its
+/// budget (docs/architecture.md, budgets). The lookup finishes in the
+/// background and caches its decision; the application's resolver must ask
+/// again soon rather than keep the legacy address for the upstream's TTL
+/// (a parked wildcard's 300 s was enough to look like "always legacy").
+pub const OVERRUN_TTL_SECS: u32 = 5;

@@ -158,6 +158,56 @@ pub fn server_reply(query: &[u8], target: Option<Npub>, ttl: u32) -> Option<Vec<
     p.build_bytes_vec().ok()
 }
 
+/// `reply` with every record's TTL capped at `max_ttl`: for a legacy answer
+/// forwarded because the lookup overran its budget, so the application's
+/// resolver drops it about when the lookup has finished and cached. The
+/// TTL fields are patched in place — the message is not re-serialized, so
+/// its size, name compression and EDNS flags stay exactly the upstream's;
+/// the OPT pseudo-record's TTL (extended RCODE, version, DO) is skipped.
+/// `None` when the message does not parse — the caller forwards it as it
+/// came.
+pub fn clamp_ttls(reply: &[u8], max_ttl: u32) -> Option<Vec<u8>> {
+    const TYPE_OPT: u16 = 41;
+    let count = |at: usize| -> Option<usize> {
+        Some(u16::from_be_bytes([*reply.get(at)?, *reply.get(at + 1)?]) as usize)
+    };
+    let (qd, an, ns, ar) = (count(4)?, count(6)?, count(8)?, count(10)?);
+    let mut out = reply.to_vec();
+    let mut pos = 12;
+    for _ in 0..qd {
+        pos = skip_name(reply, pos)? + 4; // QTYPE, QCLASS
+    }
+    for _ in 0..an + ns + ar {
+        pos = skip_name(reply, pos)?;
+        let fixed = reply.get(pos..pos + 10)?;
+        let rtype = u16::from_be_bytes([fixed[0], fixed[1]]);
+        let ttl = u32::from_be_bytes([fixed[4], fixed[5], fixed[6], fixed[7]]);
+        let rdlen = u16::from_be_bytes([fixed[8], fixed[9]]) as usize;
+        if rtype != TYPE_OPT && ttl > max_ttl {
+            out[pos + 4..pos + 8].copy_from_slice(&max_ttl.to_be_bytes());
+        }
+        pos += 10 + rdlen;
+    }
+    (pos <= reply.len()).then_some(out)
+}
+
+/// Offset just past the name at `pos`: labels, or a compression pointer,
+/// which ends it. `None` when truncated or not a name.
+fn skip_name(m: &[u8], mut pos: usize) -> Option<usize> {
+    loop {
+        let len = *m.get(pos)?;
+        match len & 0xc0 {
+            0 if len == 0 => return Some(pos + 1),
+            0 => pos += 1 + len as usize,
+            0xc0 => {
+                m.get(pos + 1)?;
+                return Some(pos + 2);
+            }
+            _ => return None,
+        }
+    }
+}
+
 fn reply_for(q: &Query, rcode: RCODE) -> Option<Packet<'static>> {
     let mut p = Packet::new_reply(q.id);
     if q.recursion_desired {
@@ -273,5 +323,49 @@ mod tests {
             Packet::parse(&p_bytes).unwrap().rcode(),
             RCODE::ServerFailure
         );
+    }
+
+    #[test]
+    fn clamp_ttls_patches_in_place_and_leaves_opt_alone() {
+        let q = parse_query(&build_query(7, "www.example.org", QTYPE_AAAA).unwrap()).unwrap();
+        // Compressed, as an upstream builds it, plus an EDNS OPT record
+        // whose TTL carries the DO bit, not a lifetime.
+        let plain = build_answer(&q, npub(), 300).unwrap();
+        let mut p = Packet::parse(&plain).unwrap();
+        p.additional_records.push(ResourceRecord::new(
+            Name::new_unchecked("."),
+            CLASS::IN,
+            0,
+            RData::A(simple_dns::rdata::A { address: 0 }),
+        ));
+        let mut long = p.build_bytes_vec_compressed().unwrap();
+        // Turn the placeholder into OPT: type 41, class 4096 (UDP size),
+        // TTL 0x0000_8000 (DO), rdlength 0.
+        let n = long.len();
+        long.truncate(n - 4); // drop the A's rdata
+        long[n - 4 - 10..n - 4].copy_from_slice(&[0, 41, 0x10, 0, 0, 0, 0x80, 0, 0, 0]);
+        let short = clamp_ttls(&long, 5).unwrap();
+        assert_eq!(short.len(), long.len(), "patched, not rebuilt");
+        let diffs: Vec<usize> = (0..long.len()).filter(|&i| long[i] != short[i]).collect();
+        assert_eq!(diffs.len(), 4, "two bytes per TTL (300 → 5), two records");
+        let parsed = Packet::parse(&short).unwrap();
+        assert_eq!(parsed.answers.len(), 2);
+        assert!(parsed.answers.iter().all(|rr| rr.ttl == 5));
+        assert_eq!(
+            parsed.opt().map(|o| o.udp_packet_size),
+            Some(4096),
+            "OPT survives"
+        );
+        assert_eq!(
+            &short[short.len() - 6..],
+            &[0, 0, 0x80, 0, 0, 0],
+            "OPT TTL untouched"
+        );
+        // A TTL already below the cap is left alone, bytes equal.
+        let brief = build_answer(&q, npub(), 2).unwrap();
+        assert_eq!(clamp_ttls(&brief, 5).unwrap(), brief);
+        // Garbage and truncation are not answers.
+        assert!(clamp_ttls(b"\x00\x07", 5).is_none());
+        assert!(clamp_ttls(&long[..long.len() - 3], 5).is_none());
     }
 }

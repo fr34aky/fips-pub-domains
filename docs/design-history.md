@@ -68,6 +68,21 @@ without the Internet.
   mesh relay could not verify while the Internet was up.
 - **The daemon owns the resolved pool and forwards `.fips` itself**, after
   the first two-node run showed that resolved merges global drop-ins.
+- **A legacy answer given on a budget overrun is short-lived (5 s)**, after
+  the phone showed a parked wildcard's address for `relay.example.org`
+  "always": one cold lookup had overrun the 3.5 s budget, Android's
+  resolver kept the legacy address for the record's 300 s, and the
+  finished lookup's cached decision was never asked for. Returning
+  SERVFAIL instead was rejected: a name of a bound domain may be `legacy`
+  in the zone, and a lookup that is merely slow must not make it fail.
+  The overrun itself came from the relay fetch waiting for every relay to
+  send EOSE or time out — a half-dead public relay cost 2 s of the 3.5 s
+  on every cold lookup — so each relay now has its own subscription and
+  the others get 750 ms once one has delivered a claim. Only after a TXT
+  hit: the record names the server, so a claim a slow relay would have
+  added costs at most that relay's say until the next TXT TTL. Offline the
+  claims alone decide, a conflict is only visible with every relay heard,
+  and the fetch still waits for all of them.
 
 ## Facts from the fips codebase the design rests on
 

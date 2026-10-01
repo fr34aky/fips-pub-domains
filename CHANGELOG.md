@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A lookup that overran its budget left the application on the legacy
+  address for the upstream record's whole TTL: on the phone, a parked
+  wildcard's 300 s made `relay.example.org` look as if it never resolved
+  over fips. The legacy answer forwarded during an overrun now carries TTLs
+  of at most 5 s (`OVERRUN_TTL_SECS`, `synth::clamp_ttls`), and the daemon
+  lets the overrunning lookup finish in the background, as the phone
+  already did, so the stub's next query is answered from its decision.
+- Cold lookups paid the full 2 s relay timeout whenever one relay in the
+  pool stayed quiet, because the fetch waited for every relay's EOSE. Each
+  relay is now asked on its own subscription; after a TXT hit, once one
+  has delivered a claim the others get 750 ms, then the fetch returns.
+  Offline every relay is still heard, so a conflict between claims stays
+  visible.
+
 ### Added
 
 - docs/operators.md: how to remove a server from a domain — in which order,

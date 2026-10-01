@@ -131,7 +131,7 @@ impl Config {
             return Vec::new();
         };
         text.lines()
-            .filter_map(|l| l.strip_prefix("search"))
+            .filter_map(|l| keyword(l, "search"))
             .flat_map(|rest| rest.split_whitespace().map(str::to_owned))
             // `fips` is fips's own routing domain on its link: by design,
             // and never a bound domain (spec §5.2 rejects unknown TLDs).
@@ -168,20 +168,47 @@ impl Config {
 
 pub type ProdResolver = Resolver<MaybeTxt, RelayClient>;
 
-/// A TXT source that may be absent (mesh-only node, or the system has no
-/// resolvers right now) and can be swapped when the upstreams change — a
-/// laptop that moves networks must verify against the new resolvers, not
-/// keep asking the old ones until they time out.
-/// The `nameserver` entries of a resolv.conf, in order, each once; a
-/// `%scope` suffix dropped. Loopback and the daemon's own addresses are
-/// the caller's business.
+/// `line` with `kw` stripped, if the line is that keyword's as glibc
+/// reads resolv.conf: the keyword at the start of the line, followed by
+/// a space or tab. An indented line or `nameserverX` is not a keyword
+/// line to the system resolver, so it is none to us.
+fn keyword<'a>(line: &'a str, kw: &str) -> Option<&'a str> {
+    line.strip_prefix(kw)
+        .filter(|rest| rest.starts_with([' ', '\t']))
+}
+
+/// The `nameserver` entries of a resolv.conf as glibc takes them (keyword
+/// rule of [`keyword`], the address ended by whitespace, `;` or `#`, a
+/// `%scope` suffix dropped), in order, each once. Loopback and the
+/// daemon's own addresses are the caller's business; glibc's cap of three
+/// servers is not applied, since the file may be read by resolved or
+/// NetworkManager, which have none.
 pub fn nameservers(text: &str) -> Vec<IpAddr> {
+    collect_nameservers(text.lines().filter_map(|l| keyword(l, "nameserver")))
+}
+
+/// The `nameserver` entries as dnsmasq reads its resolv file: tokens
+/// split on whitespace, so an indented line counts. For a file whose
+/// only reader is dnsmasq.
+pub fn nameservers_lenient(text: &str) -> Vec<IpAddr> {
+    collect_nameservers(
+        text.lines()
+            .filter_map(|l| l.trim_start().strip_prefix("nameserver"))
+            .filter(|rest| rest.starts_with([' ', '\t'])),
+    )
+}
+
+fn collect_nameservers<'a>(rests: impl Iterator<Item = &'a str>) -> Vec<IpAddr> {
     let mut out: Vec<IpAddr> = Vec::new();
-    for ip in text
-        .lines()
-        .filter_map(|l| l.trim_start().strip_prefix("nameserver"))
+    for ip in rests
         .filter_map(|rest| rest.split_whitespace().next())
-        .filter_map(|s| s.split('%').next().unwrap_or(s).parse::<IpAddr>().ok())
+        .map(|s| s.split([';', '#']).next().unwrap_or(""))
+        .filter_map(|s| {
+            s.split_once('%')
+                .map_or(s, |(a, _)| a)
+                .parse::<IpAddr>()
+                .ok()
+        })
     {
         if !out.contains(&ip) {
             out.push(ip);
@@ -190,6 +217,10 @@ pub fn nameservers(text: &str) -> Vec<IpAddr> {
     out
 }
 
+/// A TXT source that may be absent (mesh-only node, or the system has no
+/// resolvers right now) and can be swapped when the upstreams change — a
+/// laptop that moves networks must verify against the new resolvers, not
+/// keep asking the old ones until they time out.
 pub struct MaybeTxt {
     inner: std::sync::Mutex<Option<Arc<TxtVerifier>>>,
     dnssec: bool,
@@ -265,13 +296,22 @@ mod tests {
     }
 
     #[test]
-    fn nameservers_parses_indented_scoped_and_repeated_lines_once() {
-        let got = nameservers(
-            "# c\n  nameserver 10.0.0.1\nnameserver fe80::1%eth0\nnameserver 10.0.0.1\nsearch lan\n",
+    fn nameservers_reads_the_file_as_glibc_does() {
+        let text = "# c\n  nameserver 10.9.9.9\nnameserver1.2.3.4\nnameserver\t10.0.0.1\nnameserver fe80::1%eth0\nnameserver 10.0.0.1\nnameserver 192.168.1.1#router\nsearch lan\n";
+        let got = nameservers(text);
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        assert_eq!(
+            got,
+            vec![ip("10.0.0.1"), ip("fe80::1"), ip("192.168.1.1")],
+            "indented and glued keywords ignored, repeats once, a #comment cut"
         );
-        assert_eq!(got.len(), 2);
-        assert_eq!(got[0], "10.0.0.1".parse::<IpAddr>().unwrap());
-        assert_eq!(got[1], "fe80::1".parse::<IpAddr>().unwrap());
+        // dnsmasq's reading takes the indented line too.
+        let lenient = nameservers_lenient(text);
+        assert_eq!(lenient[0], ip("10.9.9.9"));
+        assert_eq!(lenient.len(), 4);
+        // The same keyword rule for search: `searchlist` is not `search`.
+        assert_eq!(keyword("searchlist lan", "search"), None);
+        assert_eq!(keyword("search lan", "search"), Some(" lan"));
     }
 
     #[test]

@@ -12,7 +12,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::ValueEnum;
 use pubdom_resolve::Config;
-use pubdom_resolve::config::nameservers;
+use pubdom_resolve::config::{nameservers, nameservers_lenient};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
@@ -229,18 +229,26 @@ fn resolv_conf_text(cfg: &Config, original: &str, note: &str) -> String {
 /// Where the daemon's upstreams come from on a backend whose resolver
 /// will be pointed at us: the config's own `upstreams` when set, else a
 /// static snapshot of `source`'s servers (its file would then name only
-/// ourselves). `None` means the config's list is used.
-fn upstreams_or_snapshot(host: &Host, cfg: &Config, source: &str) -> Result<Option<Vec<IpAddr>>> {
+/// ourselves). `None` means the config's list is used. `lenient` reads
+/// the file as dnsmasq does (indented lines count); otherwise as glibc.
+fn upstreams_or_snapshot(
+    host: &Host,
+    cfg: &Config,
+    source: &str,
+    lenient: bool,
+) -> Result<Option<Vec<IpAddr>>> {
     if !cfg.upstreams.is_empty() {
         return Ok(None);
     }
     let text = host
         .read(source)
         .ok_or_else(|| anyhow!("cannot read {}", host.path(source).display()))?;
-    let servers: Vec<IpAddr> = nameservers(&text)
-        .into_iter()
-        .filter(|ip| !ip.is_loopback())
-        .collect();
+    let parsed = if lenient {
+        nameservers_lenient(&text)
+    } else {
+        nameservers(&text)
+    };
+    let servers: Vec<IpAddr> = parsed.into_iter().filter(|ip| !ip.is_loopback()).collect();
     if servers.is_empty() {
         bail!(
             "no upstream resolver found in {}; set `upstreams` in the config and run setup again",
@@ -545,7 +553,7 @@ pub fn setup(host: &Host, config_path: &Path, backend: Backend) -> Result<(Backe
                     "dnsmasq already has no-resolv: its servers are server= lines, which cannot be snapshotted; set `upstreams` in the config and run setup again"
                 );
             }
-            let servers = upstreams_or_snapshot(host, &cfg, &resolv_file)?;
+            let servers = upstreams_or_snapshot(host, &cfg, &resolv_file, true)?;
             cfg.upstreams_from = servers
                 .is_some()
                 .then(|| PathBuf::from("/").join(UPSTREAMS_SNAPSHOT));
@@ -573,7 +581,7 @@ pub fn setup(host: &Host, config_path: &Path, backend: Backend) -> Result<(Backe
             }
         }
         Backend::ResolvConf => {
-            let servers = upstreams_or_snapshot(host, &cfg, RESOLV_CONF)?;
+            let servers = upstreams_or_snapshot(host, &cfg, RESOLV_CONF, false)?;
             cfg.upstreams_from = servers
                 .is_some()
                 .then(|| PathBuf::from("/").join(UPSTREAMS_SNAPSHOT));
@@ -770,7 +778,7 @@ mod tests {
         let (h, ran) = host(&d, &[]);
         h.write(
             RESOLV_CONF,
-            "# by hand\n  nameserver 192.168.1.1\nnameserver 127.0.0.1\nsearch lan\noptions ndots:1\n",
+            "# by hand\nnameserver 192.168.1.1\n  nameserver 10.9.9.9\nnameserver 127.0.0.1\nsearch lan\noptions ndots:1\n",
         )
         .unwrap();
         let (b, _) = setup(&h, &cfg_path(), Backend::Auto).unwrap();
@@ -784,6 +792,10 @@ mod tests {
         );
         let snap = h.read(UPSTREAMS_SNAPSHOT).unwrap();
         assert!(snap.contains("nameserver 192.168.1.1\n") && !snap.contains("127.0.0.1"));
+        assert!(
+            !snap.contains("10.9.9.9"),
+            "an indented line is not a server to glibc"
+        );
         let cfg = load_config(&h, &cfg_path()).unwrap();
         assert_eq!(cfg.listen, port53());
         assert_eq!(
@@ -807,7 +819,7 @@ mod tests {
         assert_eq!(b, Backend::ResolvConf);
         assert_eq!(
             h.read(RESOLV_CONF).unwrap(),
-            "# by hand\n  nameserver 192.168.1.1\nnameserver 127.0.0.1\nsearch lan\noptions ndots:1\n"
+            "# by hand\nnameserver 192.168.1.1\n  nameserver 10.9.9.9\nnameserver 127.0.0.1\nsearch lan\noptions ndots:1\n"
         );
         assert!(
             !h.exists(UPSTREAMS_SNAPSHOT) && !h.exists(STATE_BACKEND) && !h.exists(RESOLV_BACKUP)
@@ -964,7 +976,7 @@ mod tests {
         .unwrap();
         h.write(
             "etc/resolv.dnsmasq",
-            "nameserver 9.9.9.9\nnameserver 149.112.112.112\n",
+            "nameserver 9.9.9.9\n  nameserver 149.112.112.112\n",
         )
         .unwrap();
         h.write(RESOLV_CONF, "nameserver 127.0.0.1\n").unwrap();
@@ -979,7 +991,8 @@ mod tests {
         );
         let snap = h.read(UPSTREAMS_SNAPSHOT).unwrap();
         assert!(
-            snap.contains("nameserver 9.9.9.9\n") && snap.contains("nameserver 149.112.112.112\n")
+            snap.contains("nameserver 9.9.9.9\n") && snap.contains("nameserver 149.112.112.112\n"),
+            "dnsmasq takes an indented line, so the snapshot does too: {snap}"
         );
         assert_eq!(ran.borrow().as_slice(), ["systemctl restart dnsmasq"]);
         let cfg = load_config(&h, &cfg_path()).unwrap();

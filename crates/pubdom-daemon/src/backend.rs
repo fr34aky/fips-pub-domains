@@ -201,6 +201,16 @@ fn port53() -> Vec<SocketAddr> {
     vec!["[::1]:53".parse().unwrap(), "127.0.0.1:53".parse().unwrap()]
 }
 
+/// A backend that can name a port takes the default back from one that
+/// could not: port 53 in the config is only ever ours, and resolved or
+/// dnsmasq pointed at it would work but surprise (a live NetworkManager
+/// teardown followed by a resolved setup did exactly that).
+fn default_port_unless_custom(cfg: &mut Config) {
+    if cfg.listen == port53() {
+        cfg.listen = Config::default().listen;
+    }
+}
+
 fn listen_spec(cfg: &Config) -> String {
     cfg.listen
         .iter()
@@ -444,6 +454,7 @@ pub fn setup(host: &Host, config_path: &Path, backend: Backend) -> Result<(Backe
             // but /run/systemd/resolve/resolv.conf keeps listing the real
             // servers, which the daemon then follows.
             cfg.upstreams_from = Some(PathBuf::from("/").join(RESOLVED_UPSTREAMS));
+            default_port_unless_custom(&mut cfg);
             write_config(host, config_path, &cfg)?;
             host.write(
                 RESOLVED_DROPIN,
@@ -506,6 +517,7 @@ pub fn setup(host: &Host, config_path: &Path, backend: Backend) -> Result<(Backe
             cfg.upstreams_from = servers
                 .is_some()
                 .then(|| PathBuf::from("/").join(UPSTREAMS_SNAPSHOT));
+            default_port_unless_custom(&mut cfg);
             write_config(host, config_path, &cfg)?;
             let mut text = String::from(
                 "# Managed by fips-pubdomd setup: dnsmasq forwards every name to fips-pubdomd,\n\
@@ -943,6 +955,13 @@ mod tests {
         let (h, ran) = host(&d, &["systemd-resolved", "NetworkManager"]);
         h.write(RESOLVED_UPSTREAMS, "nameserver 192.168.1.1\n")
             .unwrap();
+        // Port 53 left in the config by a NetworkManager setup goes back
+        // to the default: resolved can name a port.
+        h.write(
+            "etc/fips-pubdom/config.yaml",
+            "listen: [\"[::1]:53\", \"127.0.0.1:53\"]\nupstreams_from: /run/NetworkManager/resolv.conf\n",
+        )
+        .unwrap();
         let (b, _) = setup(&h, &cfg_path(), Backend::Auto).unwrap();
         assert_eq!(b, Backend::Resolved);
         let drop = h.read(RESOLVED_DROPIN).unwrap();
@@ -953,6 +972,12 @@ mod tests {
         assert_eq!(
             ran.borrow().as_slice(),
             ["systemctl restart systemd-resolved"]
+        );
+        let cfg = load_config(&h, &cfg_path()).unwrap();
+        assert_eq!(cfg.listen, Config::default().listen);
+        assert_eq!(
+            cfg.upstreams_from.as_deref(),
+            Some(Path::new("/run/systemd/resolve/resolv.conf"))
         );
         teardown(&h, Backend::Auto).unwrap();
         assert!(!h.exists(RESOLVED_DROPIN));

@@ -278,16 +278,48 @@ attestations vouch only for the server they name, and the witness named
 one. (`www.example.org` is no longer in the server's zone, hence the
 lookup of `relay`.)
 
-## Not yet run live: the Linux setup backends
+## Level 6 — the NetworkManager backend (Ubuntu 22.04, the home node)
 
-The NetworkManager, dnsmasq and plain-`resolv.conf` backends of
-`fips-pubdomd setup` are exercised by tests in a temporary root with a
-stubbed `systemctl`/`nmcli`; the reference node runs systemd-resolved, so
-none has been run on a real machine. The NetworkManager backend rests on
-NM's documented behaviour of writing `/run/NetworkManager/resolv.conf`
-under `dns=none`; the first live run should confirm that file follows a
-DHCP change. Candidates: a Debian box with NetworkManager and no
-resolved, and a container with dnsmasq.
+Run on 2026-10-01 on a node that normally runs systemd-resolved. Steps:
+`fips-pubdomd teardown` (which found the resolved drop-in of an older
+install with no record and removed it), `systemctl disable --now
+systemd-resolved`, the stub symlink removed, NetworkManager restarted.
+
+Found on the way: with resolved stopped, NM still chose its resolved
+mode — `/run/NetworkManager/resolv.conf` named `127.0.0.53` — because
+`/run/systemd/resolve` outlives a stopped resolved and NM goes by it, and
+it created no `/etc/resolv.conf` at all. `setup` handled both: it
+detected NetworkManager (resolved inactive, by `systemctl is-active`),
+recorded an absent resolv.conf, wrote `dns=none`, and after the reload
+NM's file listed the DHCP servers:
+
+```
+backend: NetworkManager
+upstreams now: [192.168.128.254, fd01::1]
+$ cat /run/NetworkManager/resolv.conf
+search example.org
+nameserver 192.168.128.254
+nameserver fd01::1
+```
+
+The daemon on port 53 answered a legacy name through those servers and
+`relay.example.org` over fips, with no resolved-only search-domain
+warning in its log. An NM restart and a connection renewal (`nmcli con
+up`) both left our resolv.conf alone and kept NM's file current — the
+assumption the backend rests on. `teardown` removed the drop-in and our
+resolv.conf (nothing to restore: none had existed), and the node went
+back to resolved with the stub symlink recreated by hand.
+
+Found afterwards: the config kept `listen` on port 53 after the
+NetworkManager teardown, which the following resolved `setup` carried
+into its drop-in — working but surprising; the resolved and dnsmasq
+backends now take the default port back. And back on resolved, the LAN
+search domain shadowed the bound domain again (the `resolvectl domain`
+fix of level 3 is transient, lost with the NM restarts): the daemon's
+start-up warning names it.
+
+**Not yet run live:** the standalone dnsmasq and plain-`resolv.conf`
+backends; tests in a temporary root only.
 
 ## Level 5 — the phone
 

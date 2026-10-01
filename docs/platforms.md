@@ -45,7 +45,7 @@ put a daemon in front of all DNS.
 | platform | service | full mode | restricted mode | status |
 |---|---|---|---|---|
 | Linux, systemd-resolved | `fips-pubdom.service` | global drop-in `DNS=[::1]:5356`, `Domains=~.` (fips's `.fips` mechanism generalised); upstreams followed via `/run/systemd/resolve/resolv.conf` | `resolvectl domain … ~d` / a `Domains=~d` drop-in | **done** |
-| Linux, NetworkManager (no resolved) | same unit | `dns=none` drop-in; the daemon on port 53 in `resolv.conf`; upstreams followed via `/run/NetworkManager/resolv.conf` | `/etc/resolver`-style routing does not exist; see restricted mode | implemented, tested in a temporary root; not yet run live |
+| Linux, NetworkManager (no resolved) | same unit | `dns=none` drop-in; the daemon on port 53 in `resolv.conf`; upstreams followed via `/run/NetworkManager/resolv.conf` | `/etc/resolver`-style routing does not exist; see restricted mode | **done** (full mode; verified live on Ubuntu 22.04, [testing.md](testing.md)) |
 | Linux, standalone dnsmasq | same unit | `no-resolv` + `server=::1#5356`; the servers of its resolv file snapshotted as upstreams | `server=/d/::1#5356` | implemented, tested in a temporary root; not yet run live |
 | Linux, plain `resolv.conf` | same unit | `nameserver ::1`, port 53, previous entries snapshotted as upstreams; refused if another tool rewrites the file | not possible | implemented, tested in a temporary root; not yet run live |
 | OpenWrt / routers | procd | dnsmasq entries in `/etc/config/dhcp`: every LAN client benefits | `server=/d/` | planned |

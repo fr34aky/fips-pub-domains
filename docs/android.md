@@ -60,6 +60,14 @@ firewall and the TUN.
   cache (Chromium: 60 s) is beyond the proxy's reach; a reload after that
   gets the mesh address.
 
+- **Apps with their own Tor.** Amethyst decides per relay URL whether to
+  use its built-in Tor, and the rule only knows literal addresses
+  (loopback, private, unique-local, Yggdrasil's `200::/7`); a public
+  hostname goes through Tor, Tor resolves it on the exit to the legacy
+  address, and the proxy never sees the connection. `ws://<npub>.fips`
+  or a literal `ws://[fd…]:80` reaches the relay over the mesh; a public
+  name does not until Tor is off for that relay. Observed 2026-10-01.
+
 ## Verifying on a device
 
 Install a current fips2go build, connect, then in a captured browser open a

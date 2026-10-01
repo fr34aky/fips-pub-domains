@@ -309,6 +309,13 @@ Note for anyone reading the device: the browser's own host cache
 (Chromium, 60 s) can show the legacy page once more after an overrun; the
 proxy's log, not the page, says what was answered.
 
+The same name in **Amethyst** (`ws://relay.example.org`): the proxy
+answered over fips, but Amethyst routed the relay through its built-in
+Tor (its rule knows only literal local and overlay addresses), so the
+connection went to the legacy address and the relay showed 0 B. The
+`ws://<npub>.fips` entry for the same node carried traffic. An app-side
+limit, noted in [android.md](android.md).
+
 ## Level 5b — the phone, offline, a domain never seen
 
 fips2go with a mesh relay configured (`ws://npub1….fips:80`), its pin file

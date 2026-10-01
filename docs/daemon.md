@@ -172,7 +172,9 @@ daemon warns about this at start (`link search domains route past this
 daemon …`). Fix it on the link:
 `nmcli con mod "<connection>" ipv4.dns-search "" ipv6.dns-search ""`
 (networkd: `UseDomains=no`), or stop the router from pushing it.
-`sudo resolvectl domain <iface> ''` works until the next DHCP renewal.
+`sudo resolvectl domain <iface> ''` works until the next DHCP renewal —
+or the next `setup`, which restarts resolved and so reloads the link's
+search domain.
 
 **Cold lookups take ~2 s.** That is the full chain — TXT, relay, step 3 —
 and it happens once per domain per hour; pinned names answer in

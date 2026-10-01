@@ -33,10 +33,11 @@
 - Attestations (kind 37198) and the trust setting *k*: witnesses listed
   in the config, `fips-pubdom attest` to be one; used offline for a domain
   with no pin and no proof, pinned as `attested`. On the phone: the
-  witness list and *k* in fips2go's Settings (#62). Verified live
-  ([testing.md](testing.md) level 4e): a witness's attestation on the
-  mesh relay, an offline client with no pin and no usable proof binding
-  the server as `attested`.
+  witness list and *k* in fips2go's Settings (#62), the DNSSEC switch
+  and "Forget verified domains" (#65). Verified live on the desktop
+  ([testing.md](testing.md) level 4e) and on the phone (level 5c): a
+  witness's attestation on the mesh relay, an offline client with no pin
+  and no usable proof binding the server as `attested`.
 
 ## Next
 

@@ -411,6 +411,33 @@ connection went to the legacy address and the relay showed 0 B. The
 `ws://<npub>.fips` entry for the same node carried traffic. An app-side
 limit, noted in [android.md](android.md).
 
+## Level 5c — the phone, offline, verified by a witness
+
+2026-10-01, Pixel 9 Pro on the release-signed build with the DNSSEC
+switch (fips2go #65). Settings: witness = the reference node, k = 1,
+DNSSEC off, the mesh relay; **Forget verified domains**; the Internet
+blocked at the router and, since the router still answered DNS itself,
+the Wi-Fi's DNS set static to `192.0.2.1`; mobile data off (Android had
+quietly fallen back to it the first time, and the test ran online); app
+reconnected, after which the node hung under the reference node over the
+LAN (`new_parent=…`) and the relay session came up through it. The first
+lookup overran its budget as every offline first lookup does, the
+decision landed right after, and the retry answered:
+
+```
+public name still deciding; legacy answer for a few seconds qname=relay.example.org qtype=28
+binding verified and pinned domain="example.org" npub=npub1…server method=Attested
+public name answered over fips qname=relay.example.org qtype=1
+```
+
+The browser showed the relay's own page over the mesh. Found on the way:
+with DNSSEC off and the Internet reachable, the same sequence pinned the
+domain with method `Dns` — the switch doing its job, and a reminder that
+"offline" means the TXT upstreams unreachable, not merely a browser that
+cannot load pages. The node's relay connection failed through a dead
+Internet parent until the app was reconnected; the reconnect is what
+made the node pick the LAN peer.
+
 ## Level 5b — the phone, offline, a domain never seen
 
 fips2go with a mesh relay configured (`ws://npub1….fips:80`), its pin file

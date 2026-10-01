@@ -45,8 +45,9 @@ put a daemon in front of all DNS.
 | platform | service | full mode | restricted mode | status |
 |---|---|---|---|---|
 | Linux, systemd-resolved | `fips-pubdom.service` | global drop-in `DNS=[::1]:5356`, `Domains=~.` (fips's `.fips` mechanism generalised); upstreams followed via `/run/systemd/resolve/resolv.conf` | `resolvectl domain … ~d` / a `Domains=~d` drop-in | **done** |
-| Linux, dnsmasq / NM+dnsmasq | same unit | `server=::1#5356` | `server=/d/::1#5356` | planned |
-| Linux, plain `resolv.conf` | same unit | `nameserver ::1`, previous entries as upstreams; refused if another tool rewrites the file | not possible | planned |
+| Linux, NetworkManager (no resolved) | same unit | `dns=none` drop-in; the daemon on port 53 in `resolv.conf`; upstreams followed via `/run/NetworkManager/resolv.conf` | `/etc/resolver`-style routing does not exist; see restricted mode | **done** (full mode) |
+| Linux, standalone dnsmasq | same unit | `no-resolv` + `server=::1#5356`; the servers of its resolv file snapshotted as upstreams | `server=/d/::1#5356` | **done** (full mode) |
+| Linux, plain `resolv.conf` | same unit | `nameserver ::1`, port 53, previous entries snapshotted as upstreams; refused if another tool rewrites the file | not possible | **done** |
 | OpenWrt / routers | procd | dnsmasq entries in `/etc/config/dhcp`: every LAN client benefits | `server=/d/` | planned |
 | FreeBSD / pfSense | rc.d / `config.xml` custom options | unbound forward | `forward-zone` per domain | planned |
 | macOS | launchd plist, socket on `[::1]:53` (`networksetup` cannot name a port) | `networksetup -setdnsservers` on every service | `/etc/resolver/<domain>` files | planned |

@@ -102,7 +102,7 @@ On a machine running fips whose applications should reach bound names:
 ```sh
 sudo install -m755 target/release/fips-pubdomd target/release/fips-pubdom /usr/bin/
 sudo install -m644 packaging/systemd/fips-pubdom.service /etc/systemd/system/
-sudo fips-pubdomd setup                 # systemd-resolved: writes the config and the drop-in
+sudo fips-pubdomd setup                 # detects resolved / NetworkManager / dnsmasq / plain resolv.conf, writes the config
 sudo systemctl daemon-reload
 sudo systemctl enable --now fips-pubdom
 resolvectl query peer.fips              # .fips still works
@@ -113,10 +113,13 @@ On a daemon host the CLI shares the daemon's config and therefore its pin
 file under `/var/lib/fips-pubdom/`, which is root-owned: run it with `sudo`,
 or give yourself a user-level config as in "the CLI only" below.
 
-`setup` currently supports systemd-resolved (Ubuntu, Fedora, Arch, Debian
-with resolved); other backends are on the [roadmap](roadmap.md). Everything
-`setup` changes is undone by `sudo fips-pubdomd teardown`. Configuration,
-behaviour and troubleshooting: [daemon.md](daemon.md).
+`setup` supports systemd-resolved, NetworkManager without resolved, a
+standalone dnsmasq, and a plain `resolv.conf` (detected, or named with
+`--backend`); with NetworkManager or a plain `resolv.conf` the daemon
+listens on port 53, so restart it after `setup`. Other platforms are on
+the [roadmap](roadmap.md). Everything `setup` changes is undone by `sudo
+fips-pubdomd teardown`. Configuration, behaviour and troubleshooting:
+[daemon.md](daemon.md).
 
 To run the daemon without touching the OS resolver — for a look, or for
 tests — give it a config with a writable pin path and explicit upstreams

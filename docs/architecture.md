@@ -119,6 +119,13 @@ only server the OS knows. `setup` writes the OS integration
 `/run/systemd/resolve/resolv.conf`, which keeps listing the real servers
 after the stub points at us.
 
+`backend.rs` is `setup`/`teardown`: detection of the resolver arrangement
+(resolved, NetworkManager, standalone dnsmasq, plain `resolv.conf`), one
+backend each, every path relative to a root and every command through a
+runner so the tests run them in a temporary directory; the chosen backend
+is recorded in `/etc/fips-pubdom/backend` for `teardown`
+([daemon.md](daemon.md)).
+
 ## Decisions worth knowing
 
 - **The npub travels in the answer, not just an address.** A fips node can

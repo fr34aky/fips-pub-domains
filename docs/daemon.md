@@ -6,15 +6,18 @@ everything else is forwarded to the resolvers the machine had before,
 unchanged. On Android the same logic lives inside fips2go
 ([android.md](android.md)).
 
-## What `setup` does (Linux, systemd-resolved)
+## What `setup` does (Linux)
 
 Building and installing — binaries, unit, `sudo fips-pubdomd setup`,
 enabling the service — is one procedure, kept in one place:
 [install.md](install.md). This section explains the OS integration that
-`setup` performs.
+`setup` performs. It detects which resolver arrangement the machine runs
+(`--backend auto`, the default) and records its choice in
+`/etc/fips-pubdom/backend`, so `sudo fips-pubdomd teardown` undoes the
+right thing without being told; `--backend` names one explicitly.
 
-`setup` snapshots the machine's current upstream resolvers, writes
-`/etc/systemd/resolved.conf.d/zz-fips-pubdom.conf`:
+**systemd-resolved** (`resolved`; Ubuntu, Fedora, Arch, Debian with
+resolved). `setup` writes `/etc/systemd/resolved.conf.d/zz-fips-pubdom.conf`:
 
 ```
 [Resolve]
@@ -29,10 +32,44 @@ global drop-in into **one** server pool and queries its members
 interchangeably, so fips's own `.fips` drop-in and this one would otherwise
 share a pool and each see the other's names. The daemon therefore becomes
 the only global server and forwards `.fips` names to fips's responder
-itself. `sudo fips-pubdomd teardown` removes the drop-in and restarts
-resolved; nothing else is left behind.
+itself. The upstreams are followed through
+`/run/systemd/resolve/resolv.conf`, which keeps listing the real servers.
 
-Other backends (dnsmasq, plain `resolv.conf`, launchd, Windows) are on the
+**NetworkManager without resolved** (`networkmanager`; Debian and others
+with NM's `dns=default` or `dns=dnsmasq`). NM cannot be told to use one
+server exclusively — with its dnsmasq plugin it keeps feeding dnsmasq the
+connections' servers over D-Bus — so `setup` takes DNS away from it: a
+drop-in `/etc/NetworkManager/conf.d/zz-fips-pubdom.conf` with `dns=none`
+(reloaded with `nmcli general reload conf`), after which NM leaves
+`/etc/resolv.conf` alone but still writes its list of the connections'
+servers to `/run/NetworkManager/resolv.conf`, which the daemon follows —
+DHCP changes included. `setup` then writes `/etc/resolv.conf` naming the
+daemon (the previous file or symlink is kept in
+`/etc/fips-pubdom/resolv.conf.bak`) and sets `listen` to port 53, since
+resolv.conf cannot carry a port. Restart the daemon after `setup`.
+
+**Standalone dnsmasq** (`dnsmasq`; a server whose local resolver is dnsmasq
+reading `resolv-file`). `setup` snapshots the servers of dnsmasq's resolv
+file into `/etc/fips-pubdom/upstreams.conf`, writes
+`/etc/dnsmasq.d/fips-pubdom.conf` with `no-resolv` and `server=::1#5356` /
+`server=127.0.0.1#5356`, and restarts dnsmasq. The daemon keeps port 5356.
+The snapshot is static: run `setup` again if the machine's resolvers
+change, and remove other `server=` lines from dnsmasq's configuration,
+which it would otherwise keep using.
+
+**Plain resolv.conf** (`resolv-conf`; nothing manages the file). `setup`
+snapshots its `nameserver` lines into `/etc/fips-pubdom/upstreams.conf`,
+keeps the file in `/etc/fips-pubdom/resolv.conf.bak`, writes one naming
+`::1` and `127.0.0.1` (the `search`/`options` lines kept), and sets
+`listen` to port 53. Refused when resolved or NetworkManager is running,
+or when the file is a symlink into something else's directory: whatever
+rewrites the file would undo this. Restart the daemon after `setup`.
+
+`teardown` removes what `setup` wrote, restores the backed-up resolv.conf
+and restarts or reloads the resolver it touched. The config file keeps
+`listen` and `upstreams_from` as `setup` left them.
+
+Other backends (launchd, Windows, OpenWrt, pfSense) are on the
 [roadmap](roadmap.md); the daemon itself is portable
 ([platforms.md](platforms.md)).
 

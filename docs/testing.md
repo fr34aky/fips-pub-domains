@@ -312,8 +312,8 @@ back to resolved with the stub symlink recreated by hand.
 
 Found afterwards: the config kept `listen` on port 53 after the
 NetworkManager teardown, which the following resolved `setup` carried
-into its drop-in — working but surprising; the resolved and dnsmasq
-backends now take the default port back. And back on resolved, the LAN
+into its drop-in — working but surprising; `setup` now backs the config
+up and `teardown` restores it. And back on resolved, the LAN
 search domain shadowed the bound domain again (the `resolvectl domain`
 fix of level 3 is transient, lost with the NM restarts): the daemon's
 start-up warning names it.

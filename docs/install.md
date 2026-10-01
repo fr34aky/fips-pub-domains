@@ -116,7 +116,8 @@ or give yourself a user-level config as in "the CLI only" below.
 `setup` supports systemd-resolved, NetworkManager without resolved, a
 standalone dnsmasq, and a plain `resolv.conf` (detected, or named with
 `--backend`); with NetworkManager or a plain `resolv.conf` the daemon
-listens on port 53, so restart it after `setup`. Other platforms are on
+listens on port 53. `setup` says when the listen addresses changed:
+restart the daemon then, and after `teardown`, which restores the config. Other platforms are on
 the [roadmap](roadmap.md). Everything `setup` changes is undone by `sudo
 fips-pubdomd teardown`. Configuration, behaviour and troubleshooting:
 [daemon.md](daemon.md).

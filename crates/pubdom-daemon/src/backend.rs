@@ -201,16 +201,6 @@ fn port53() -> Vec<SocketAddr> {
     vec!["[::1]:53".parse().unwrap(), "127.0.0.1:53".parse().unwrap()]
 }
 
-/// A backend that can name a port takes the default back from one that
-/// could not: port 53 in the config is only ever ours, and resolved or
-/// dnsmasq pointed at it would work but surprise (a live NetworkManager
-/// teardown followed by a resolved setup did exactly that).
-fn default_port_unless_custom(cfg: &mut Config) {
-    if cfg.listen == port53() {
-        cfg.listen = Config::default().listen;
-    }
-}
-
 fn listen_spec(cfg: &Config) -> String {
     cfg.listen
         .iter()
@@ -348,6 +338,48 @@ fn load_config(host: &Host, config_path: &Path) -> Result<Config> {
     Config::load_or_default(&under_root(host, config_path)).map_err(anyhow::Error::msg)
 }
 
+fn config_backup_path(host: &Host, config_path: &Path) -> PathBuf {
+    let mut p = under_root(host, config_path).into_os_string();
+    p.push(".before-setup");
+    PathBuf::from(p)
+}
+
+/// The config as it was before `setup` rewrote `listen`/`upstreams_from`,
+/// so `teardown` is a real undo and the next `setup` starts from the
+/// operator's own values rather than another backend's. Never over an
+/// existing backup: that is the original.
+fn back_up_config(host: &Host, config_path: &Path) -> Result<()> {
+    let bak = config_backup_path(host, config_path);
+    if bak.exists() {
+        return Ok(());
+    }
+    let src = under_root(host, config_path);
+    let text = match std::fs::read_to_string(&src) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => "#fips-pubdom-absent\n".into(),
+        Err(e) => return Err(e.into()),
+    };
+    if let Some(dir) = bak.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&bak, text).with_context(|| format!("writing {}", bak.display()))
+}
+
+fn restore_config(host: &Host, config_path: &Path) -> Result<bool> {
+    let bak = config_backup_path(host, config_path);
+    let Ok(text) = std::fs::read_to_string(&bak) else {
+        return Ok(false);
+    };
+    let dst = under_root(host, config_path);
+    if text.starts_with("#fips-pubdom-absent") {
+        let _ = std::fs::remove_file(&dst);
+    } else {
+        std::fs::write(&dst, text)?;
+    }
+    std::fs::remove_file(&bak)?;
+    Ok(true)
+}
+
 /// dnsmasq's `resolv-file=`, from its main file or any file in its conf
 /// directory, else /etc/resolv.conf; and whether `no-resolv` is already
 /// set somewhere, in which case its servers are `server=` lines we cannot
@@ -448,13 +480,14 @@ pub fn setup(host: &Host, config_path: &Path, backend: Backend) -> Result<(Backe
         Backend::Auto => unreachable!(),
     }
     host.write(STATE_BACKEND, &format!("{}\n", backend.name()))?;
+    back_up_config(host, config_path)?;
+    let listen_before = cfg.listen.clone();
     match backend {
         Backend::Resolved => {
             // Once the drop-in is in place the stub file points back at us,
             // but /run/systemd/resolve/resolv.conf keeps listing the real
             // servers, which the daemon then follows.
             cfg.upstreams_from = Some(PathBuf::from("/").join(RESOLVED_UPSTREAMS));
-            default_port_unless_custom(&mut cfg);
             write_config(host, config_path, &cfg)?;
             host.write(
                 RESOLVED_DROPIN,
@@ -504,7 +537,6 @@ pub fn setup(host: &Host, config_path: &Path, backend: Backend) -> Result<(Backe
                 host.path(NM_DROPIN).display(),
                 host.path(RESOLV_CONF).display()
             ));
-            notes.push("the daemon now listens on port 53 (restart it after this)".into());
         }
         Backend::Dnsmasq => {
             let (resolv_file, no_resolv) = dnsmasq_resolv_file(host);
@@ -517,7 +549,6 @@ pub fn setup(host: &Host, config_path: &Path, backend: Backend) -> Result<(Backe
             cfg.upstreams_from = servers
                 .is_some()
                 .then(|| PathBuf::from("/").join(UPSTREAMS_SNAPSHOT));
-            default_port_unless_custom(&mut cfg);
             write_config(host, config_path, &cfg)?;
             let mut text = String::from(
                 "# Managed by fips-pubdomd setup: dnsmasq forwards every name to fips-pubdomd,\n\
@@ -566,16 +597,30 @@ pub fn setup(host: &Host, config_path: &Path, backend: Backend) -> Result<(Backe
                 )),
                 None => notes.push(format!("upstreams: the config's own {:?}", cfg.upstreams)),
             }
-            notes.push("the daemon now listens on port 53 (restart it after this)".into());
         }
         Backend::Auto => unreachable!(),
+    }
+    if cfg.listen != listen_before {
+        notes.push(format!(
+            "listen changed from {} to {}: restart the daemon",
+            listen_before
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" "),
+            listen_spec(&cfg)
+        ));
     }
     Ok((backend, notes))
 }
 
 /// Undo `setup`. With `Auto`, the backend `setup` recorded — or, for an
 /// installation older than the record, the resolved drop-in if present.
-pub fn teardown(host: &Host, backend: Backend) -> Result<(Backend, Vec<String>)> {
+pub fn teardown(
+    host: &Host,
+    config_path: &Path,
+    backend: Backend,
+) -> Result<(Backend, Vec<String>)> {
     let backend = match backend {
         Backend::Auto => match host
             .read(STATE_BACKEND)
@@ -624,10 +669,17 @@ pub fn teardown(host: &Host, backend: Backend) -> Result<(Backend, Vec<String>)>
         Backend::Auto => unreachable!(),
     }
     host.remove(STATE_BACKEND)?;
-    notes.push(
-        "the config file keeps `listen`/`upstreams_from` as setup left them; edit or delete it as you see fit"
-            .into(),
-    );
+    if restore_config(host, config_path)? {
+        notes.push(format!(
+            "restored {} to what it was before setup (restart the daemon if it runs)",
+            config_path.display()
+        ));
+    } else {
+        notes.push(
+            "no config backup (setup by an older version): the config keeps `listen`/`upstreams_from` as it left them"
+                .into(),
+        );
+    }
     Ok((backend, notes))
 }
 
@@ -751,7 +803,7 @@ mod tests {
         );
         assert!(h.read(RESOLV_BACKUP).unwrap().contains("# by hand"));
 
-        let (b, _) = teardown(&h, Backend::Auto).unwrap();
+        let (b, _) = teardown(&h, &cfg_path(), Backend::Auto).unwrap();
         assert_eq!(b, Backend::ResolvConf);
         assert_eq!(
             h.read(RESOLV_CONF).unwrap(),
@@ -774,7 +826,7 @@ mod tests {
         // The record is written before the files, so the failed setup can
         // be torn down; a fresh setup is then possible again.
         assert!(h.exists(STATE_BACKEND));
-        teardown(&h, Backend::Auto).unwrap();
+        teardown(&h, &cfg_path(), Backend::Auto).unwrap();
         assert!(!h.exists(STATE_BACKEND));
         // `upstreams` in the config stands in for the snapshot.
         h.write("etc/fips-pubdom/config.yaml", "upstreams: [\"9.9.9.9\"]\n")
@@ -791,7 +843,7 @@ mod tests {
             cfg.current_upstreams(),
             vec!["9.9.9.9".parse::<IpAddr>().unwrap()]
         );
-        teardown(&h, Backend::Auto).unwrap();
+        teardown(&h, &cfg_path(), Backend::Auto).unwrap();
         let (h, _) = host(&d, &["NetworkManager"]);
         let err = setup(&h, &cfg_path(), Backend::ResolvConf)
             .unwrap_err()
@@ -811,8 +863,14 @@ mod tests {
         .unwrap();
         std::fs::create_dir_all(h.path("etc")).unwrap();
         symlink("/run/NetworkManager/resolv.conf", &h.path(RESOLV_CONF)).unwrap();
-        let (b, _) = setup(&h, &cfg_path(), Backend::Auto).unwrap();
+        let (b, notes) = setup(&h, &cfg_path(), Backend::Auto).unwrap();
         assert_eq!(b, Backend::NetworkManager);
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains("listen changed") && n.contains(":53")),
+            "{notes:?}"
+        );
         assert_eq!(
             h.read(NM_DROPIN).unwrap().trim_end().lines().last(),
             Some("dns=none")
@@ -828,13 +886,20 @@ mod tests {
         );
         assert_eq!(cfg.listen, port53());
 
-        teardown(&h, Backend::Auto).unwrap();
+        teardown(&h, &cfg_path(), Backend::Auto).unwrap();
         assert!(h.is_symlink(RESOLV_CONF), "the symlink is back");
         assert_eq!(
             std::fs::read_link(h.path(RESOLV_CONF)).unwrap(),
             Path::new("/run/NetworkManager/resolv.conf")
         );
         assert!(!h.exists(NM_DROPIN));
+        // No config existed before setup: teardown removes the one it wrote,
+        // so a later setup under another backend starts from the defaults.
+        assert!(!h.path("etc/fips-pubdom/config.yaml").exists());
+        assert_eq!(
+            load_config(&h, &cfg_path()).unwrap().listen,
+            Config::default().listen
+        );
     }
 
     #[test]
@@ -875,7 +940,7 @@ mod tests {
             ]
         );
         assert!(h.exists(NM_DROPIN) && h.exists(STATE_BACKEND));
-        teardown(&h, Backend::Auto).unwrap();
+        teardown(&h, &cfg_path(), Backend::Auto).unwrap();
         assert!(!h.exists(NM_DROPIN) && !h.exists(STATE_BACKEND));
         // Second attempt: nmcli still missing, systemctl reload works.
         setup(&h, &cfg_path(), Backend::NetworkManager).unwrap();
@@ -929,7 +994,7 @@ mod tests {
             "resolv.conf untouched"
         );
 
-        teardown(&h, Backend::Auto).unwrap();
+        teardown(&h, &cfg_path(), Backend::Auto).unwrap();
         assert!(!h.exists(DNSMASQ_DROPIN) && !h.exists(UPSTREAMS_SNAPSHOT));
         assert_eq!(
             ran.borrow().last().map(String::as_str),
@@ -946,7 +1011,7 @@ mod tests {
             err.contains("no-resolv") && err.contains("upstreams"),
             "{err}"
         );
-        teardown(&h, Backend::Auto).unwrap();
+        teardown(&h, &cfg_path(), Backend::Auto).unwrap();
     }
 
     #[test]
@@ -955,18 +1020,18 @@ mod tests {
         let (h, ran) = host(&d, &["systemd-resolved", "NetworkManager"]);
         h.write(RESOLVED_UPSTREAMS, "nameserver 192.168.1.1\n")
             .unwrap();
-        // Port 53 left in the config by a NetworkManager setup goes back
-        // to the default: resolved can name a port.
-        h.write(
-            "etc/fips-pubdom/config.yaml",
-            "listen: [\"[::1]:53\", \"127.0.0.1:53\"]\nupstreams_from: /run/NetworkManager/resolv.conf\n",
-        )
-        .unwrap();
-        let (b, _) = setup(&h, &cfg_path(), Backend::Auto).unwrap();
+        // A custom listen address is the operator's and stays.
+        h.write("etc/fips-pubdom/config.yaml", "listen: [\"[::1]:5300\"]\n")
+            .unwrap();
+        let (b, notes) = setup(&h, &cfg_path(), Backend::Auto).unwrap();
         assert_eq!(b, Backend::Resolved);
+        assert!(
+            notes.iter().all(|n| !n.contains("listen changed")),
+            "{notes:?}"
+        );
         let drop = h.read(RESOLVED_DROPIN).unwrap();
         assert!(
-            drop.contains("DNS=\nDNS=[::1]:5356 127.0.0.1:5356\nDomains=\nDomains=~.\n"),
+            drop.contains("DNS=\nDNS=[::1]:5300\nDomains=\nDomains=~.\n"),
             "{drop}"
         );
         assert_eq!(
@@ -974,24 +1039,36 @@ mod tests {
             ["systemctl restart systemd-resolved"]
         );
         let cfg = load_config(&h, &cfg_path()).unwrap();
-        assert_eq!(cfg.listen, Config::default().listen);
+        assert_eq!(
+            cfg.listen,
+            vec!["[::1]:5300".parse::<SocketAddr>().unwrap()]
+        );
         assert_eq!(
             cfg.upstreams_from.as_deref(),
             Some(Path::new("/run/systemd/resolve/resolv.conf"))
         );
-        teardown(&h, Backend::Auto).unwrap();
+        teardown(&h, &cfg_path(), Backend::Auto).unwrap();
         assert!(!h.exists(RESOLVED_DROPIN));
+        // Teardown restored the config: the upstreams_from setup added is gone.
+        let cfg = load_config(&h, &cfg_path()).unwrap();
+        assert_eq!(cfg.upstreams_from, None);
+        assert_eq!(
+            cfg.listen,
+            vec!["[::1]:5300".parse::<SocketAddr>().unwrap()]
+        );
     }
 
     #[test]
     fn teardown_without_a_record_falls_back_to_the_resolved_drop_in() {
         let d = tmp();
         let (h, _) = host(&d, &[]);
-        let err = teardown(&h, Backend::Auto).unwrap_err().to_string();
+        let err = teardown(&h, &cfg_path(), Backend::Auto)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("--backend"), "{err}");
         // An installation set up by 0.2.x: the drop-in exists, no record.
         h.write(RESOLVED_DROPIN, "[Resolve]\n").unwrap();
-        let (b, _) = teardown(&h, Backend::Auto).unwrap();
+        let (b, _) = teardown(&h, &cfg_path(), Backend::Auto).unwrap();
         assert_eq!(b, Backend::Resolved);
         assert!(!h.exists(RESOLVED_DROPIN));
     }

@@ -17,9 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   port 53, the previous `nameserver` lines snapshotted; refused when
   something else manages the file). `--backend auto` (the default) detects
   the arrangement, `setup` records it, and `teardown` undoes the recorded
-  one without being told. The NetworkManager backend is verified live;
-  the resolved and dnsmasq backends take the default port back from a
-  port-53 `listen` another backend left in the config.
+  one without being told, restoring resolv.conf and the config to what
+  they were. The NetworkManager backend is verified live.
 
 - Attestations (kind 37198, spec §3.2, phase 3): a client lists the
   witnesses it trusts (`witnesses`, `attestation_threshold` in the config)

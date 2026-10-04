@@ -105,6 +105,9 @@
   rather than dead is what a first lookup now costs. Asking the second
   after a short delay would help, but changes which server's answer wins
   on a split-horizon network; open.
+- A first visit no longer survives a forged "no record" by way of the
+  mesh relays (spec §5.1); an opt-in "always validate" setting would
+  restore that at the old cost. Not implemented.
 - The phone's shim does not yet fetch the legacy answer alongside the
   decision or release it on the first denial; it gets the plain probe
   with the next pin.

@@ -56,6 +56,8 @@ struct State {
     /// Re-read from `upstreams_from` when that file changes (`watch.rs`)
     /// and every 30 s as the fallback.
     upstreams: RwLock<Vec<IpAddr>>,
+    /// When a query last re-read the upstreams for want of any (seconds).
+    looked: std::sync::atomic::AtomicU64,
 }
 
 impl State {
@@ -92,8 +94,12 @@ async fn handle(state: &Arc<State>, query: Vec<u8>) -> Option<Vec<u8>> {
     // No upstream yet — the daemon came up before the network did — or
     // none any more: look again now rather than at the next poll. At boot
     // this window was thirty seconds of failed lookups.
+    // At most once a second: a machine with no network asks all day.
     if state.upstreams.read().unwrap().is_empty() {
-        state.refresh_upstreams();
+        let now = pubdom_resolve::now();
+        if state.looked.swap(now, std::sync::atomic::Ordering::Relaxed) != now {
+            state.refresh_upstreams();
+        }
     }
     let upstreams = state.upstreams.read().unwrap().clone();
     // Almost every name is not over fips, and its answer should not wait
@@ -133,14 +139,18 @@ async fn handle(state: &Arc<State>, query: Vec<u8>) -> Option<Vec<u8>> {
         // they say. Waiting for the slowest of them cost every first
         // lookup hundreds of milliseconds.
         _ = state.resolver.denied_by_an_upstream(&query), if legacy.is_some() => {
-            if let Some(l) = legacy.take() {
-                fetched = Some(l.await.ok().flatten());
-            }
-            // The decision may be in by the time the legacy answer is — at
-            // once when it was cached — and then nothing needs clamping.
-            match lookup.is_finished().then_some(&mut lookup) {
-                Some(done) => done.await.unwrap_or(LookupResult::Passthrough),
-                None => {
+            // The decision may be in before the legacy answer is — at once
+            // when it was cached — and then it is the answer, and nothing
+            // needs clamping.
+            let mut l = legacy.take().expect("guarded by the branch's condition");
+            tokio::select! {
+                biased;
+                done = &mut lookup => {
+                    legacy = Some(l);
+                    done.unwrap_or(LookupResult::Passthrough)
+                }
+                reply = &mut l => {
+                    fetched = Some(reply.ok().flatten());
                     overrun = true;
                     LookupResult::Passthrough
                 }
@@ -202,6 +212,7 @@ async fn run(cfg: Config) -> Result<()> {
         cfg,
         resolver,
         upstreams: RwLock::new(upstreams),
+        looked: Default::default(),
     });
 
     let mut tasks = Vec::new();

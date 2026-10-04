@@ -43,7 +43,7 @@ use std::time::Duration;
 pub struct TxtVerifier {
     resolvers: Vec<(IpAddr, TokioResolver)>,
     /// The same upstreams without validation, for [`TxtVerifier::probe`];
-    /// empty when `dnssec` is off, where the lookup itself is plain.
+    /// empty when `dnssec` is off, where `resolvers` are plain already.
     plain: Vec<(IpAddr, TokioResolver)>,
     timeout: Duration,
 }
@@ -130,11 +130,14 @@ impl TxtVerifier {
         domain: &str,
         first_denial: &(dyn Fn() + Sync),
     ) -> crate::resolver::Probe {
-        if self.plain.is_empty() {
-            return crate::resolver::Probe::Unknown;
-        }
+        // With `dnssec` off the lookup's own resolvers are the plain ones.
+        let plain = if self.plain.is_empty() {
+            &self.resolvers
+        } else {
+            &self.plain
+        };
         let name = format!("{}.", txt_name(domain));
-        let futs = self.plain.iter().map(|(ip, r)| {
+        let futs = plain.iter().map(|(ip, r)| {
             let name = name.clone();
             async move {
                 let seen = match tokio::time::timeout(

@@ -345,6 +345,10 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             return std::future::pending().await;
         };
         let candidates = domain::candidates(&q.name);
+        if candidates.is_empty() {
+            // Nothing is being decided; the lookup itself returns at once.
+            return std::future::pending().await;
+        }
         loop {
             let woken = self.denial.notified();
             tokio::pin!(woken);
@@ -418,10 +422,16 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         if chosen.is_none() {
             // Every candidate at once — a name is one to several domains
             // deep, and asking them in turn made each first lookup pay for
-            // all of them in sequence. The longest bound one still wins.
-            let decisions =
-                futures::future::join_all(candidates.iter().map(|d| self.decision(d))).await;
-            for (d, decision) in candidates.iter().zip(decisions).rev() {
+            // all of them in sequence. They are still heard longest first,
+            // and the first bound one ends it: a bound subdomain does not
+            // wait for what its parent turns out to be.
+            use futures::StreamExt;
+            let mut decisions: futures::stream::FuturesOrdered<_> = candidates
+                .iter()
+                .rev()
+                .map(|d| async move { (d, self.decision(d).await) })
+                .collect();
+            while let Some((d, decision)) = decisions.next().await {
                 if let CachedDecision::Use(b, unverified) = decision {
                     chosen = Some((d.clone(), b, unverified));
                     break;
@@ -493,7 +503,13 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             match self.txt.probe(d, &first_denial).await {
                 Probe::Absent { method } => (TxtLookup::Miss { method }, None),
                 Probe::Unreachable => (TxtLookup::Unreachable, None),
-                Probe::Present | Probe::Unknown => self.txt.lookup(d).await,
+                Probe::Present | Probe::Unknown => {
+                    // A record after all (a slower upstream had it): the
+                    // first one's denial must not keep releasing legacy
+                    // answers while the record is verified.
+                    self.denied.remove(&d.to_string());
+                    self.txt.lookup(d).await
+                }
             }
         } else {
             self.txt.lookup(d).await
@@ -1031,6 +1047,48 @@ mod tests {
                 .await
                 .is_err()
         );
+
+        // A bound subdomain whose decision is cached does not wait for its
+        // parent's: the parent's probe here never returns.
+        struct StuckParent;
+        impl TxtSource for StuckParent {
+            async fn lookup(&self, domain: &str) -> (TxtLookup, Option<u32>) {
+                assert_eq!(domain, "sub.example.org");
+                (hit(npub(1)), Some(300))
+            }
+            async fn probe(&self, domain: &str, _: &(dyn Fn() + Sync)) -> Probe {
+                match domain {
+                    "sub.example.org" => Probe::Present,
+                    "example.org" => std::future::pending().await,
+                    _ => Probe::Absent {
+                        method: Method::Dns,
+                    },
+                }
+            }
+        }
+        let mesh = Arc::new(FakeMesh {
+            queries: Mutex::new(vec![]),
+            registered: Mutex::new(vec![]),
+            echoes: Mutex::new(vec![]),
+            unreachable: vec![],
+            down: vec![],
+        });
+        let r = Resolver::new(
+            ResolverConfig::default(),
+            Arc::new(MemoryPinStore::new()),
+            StuckParent,
+            FakeClaims(
+                vec![claim_event(npub(1), "sub.example.org")],
+                Mutex::new(vec![]),
+            ),
+            mesh,
+        );
+        let sub = build_query(1, "www.sub.example.org", QTYPE_AAAA).unwrap();
+        let answer = tokio::time::timeout(Duration::from_secs(5), r.lookup(&sub)).await;
+        // (The fake zone has no such host, so the answer is the legacy one;
+        // what matters is that the lookup ended, on the subdomain's binding.)
+        assert!(answer.is_ok(), "waited for the parent domain");
+        assert!(!r.pins().get("sub.example.org").is_empty());
 
         // Pinned: the validated lookup at once, no probe for that domain —
         // forgetting a pin takes a denial as strong as the pin.

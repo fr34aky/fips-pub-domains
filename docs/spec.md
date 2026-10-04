@@ -213,8 +213,13 @@ it on every first lookup. A resolver MAY therefore ask for the record
 without validation first, **for a domain it holds no pin for**, and take
 "no record" from every resolver that answers as the miss; a record from
 any of them is then looked up again with validation, and that lookup
-decides. A forged "no" yields the legacy answer, which whoever can forge
-DNS can cause anyway. A pinned domain MUST NOT take this path: a pin is
+decides. A forged "no" yields the legacy answer. Whoever can forge DNS
+can usually cause that anyway, with one exception this path gives up: a
+forged denial of a *signed* domain fails validation, counts as DNS being
+unreachable, and sends a validating resolver to the mesh relays, where
+the claim's DNSSEC proof or attestations (§5.1, 3 and 4) can still bind
+the domain on a first visit. A resolver that probes plainly loses that
+on first visits, and keeps it for every pinned domain. A pinned domain MUST NOT take this path: a pin is
 forgotten only on a denial as strong as the pin (§5.4). A resolver MAY
 also hand out the legacy answer as soon as one resolver has denied the
 record for every candidate domain, before the others have answered, if

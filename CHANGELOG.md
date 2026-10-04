@@ -16,10 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the legacy answer alongside and hands it out — short-lived, 5 s — as
   soon as one upstream has denied the record for every domain the name
   could belong to; the decision waits for the others and is cached.
-  Measured on the reference machine: 0.5–1 s per first lookup before,
-  the upstream's own answer time after. Pinned domains are still
-  validated every time: forgetting a pin takes a denial as strong as the
-  pin. `TxtSource::probe` and `Resolver::denied_by_an_upstream` are the
+  Measured on the reference machine: 0.5–1 s per first lookup before;
+  after, a median of 171 ms where the first upstream alone takes 54 ms —
+  what is left is mostly that upstream answering the forwarded query.
+  An answer released early is asked for again by the stub after its 5 s.
+  Pinned domains are still validated every time: forgetting a pin takes
+  a denial as strong as the pin. The price: on a first visit, a forged
+  plain "no record" now ends the lookup with the legacy answer, where a
+  forged denial of a signed domain used to fail validation and send the
+  resolver to the mesh relays, which could still bind the domain from
+  the claim's DNSSEC proof or from attestations. `TxtSource::probe` and `Resolver::denied_by_an_upstream` are the
   library side; a `TxtSource` without a probe behaves as before.
 
 - `MaybeTxt::set_timeout`: a host that knows the Internet is gone can

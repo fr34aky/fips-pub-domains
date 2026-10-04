@@ -26,6 +26,42 @@ use std::time::Duration;
 /// Where the TXT record comes from — hickory in production, a table in tests.
 pub trait TxtSource: Send + Sync {
     fn lookup(&self, domain: &str) -> impl Future<Output = (TxtLookup, Option<u32>)> + Send;
+
+    /// A cheap, unvalidated look at whether the record exists at all, for
+    /// a domain with no pin: almost every name a machine resolves has none,
+    /// and proving that under DNSSEC costs the zone's keys and the chain
+    /// above it — half a second and more per first lookup, where a plain
+    /// "no" costs one round trip. A forged "no" only yields the legacy
+    /// answer, which whoever can forge DNS can cause anyway; a pinned
+    /// domain never takes this path, since forgetting a pin needs a denial
+    /// as strong as the pin (spec §5.4). `Unknown`: no cheap answer, do the
+    /// full lookup.
+    ///
+    /// `first_denial` is called when the first upstream to answer says
+    /// there is no record, before the others have answered: enough for a
+    /// host to stop holding the legacy answer back
+    /// ([`Resolver::denied_by_an_upstream`]), not enough to decide on.
+    fn probe(
+        &self,
+        _domain: &str,
+        _first_denial: &(dyn Fn() + Sync),
+    ) -> impl Future<Output = Probe> + Send {
+        async { Probe::Unknown }
+    }
+}
+
+/// What [`TxtSource::probe`] saw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Probe {
+    /// At least one upstream returned a `_fips-dns` record: verify it.
+    Present,
+    /// Every upstream that answered said there is none; `method` counts
+    /// them (`Dns` for two or more, `DnsSingle` for one).
+    Absent { method: pubdom_core::Method },
+    /// No upstream answered.
+    Unreachable,
+    /// The source has no cheap probe.
+    Unknown,
 }
 
 /// Where claims and zone records come from — relays in production, a
@@ -206,6 +242,11 @@ pub struct Resolver<T: TxtSource, C: ClaimSource> {
     /// the periodic re-check of a failed server. The entry outlives its
     /// window so the next failure knows the streak; an answer clears it.
     down: TtlCache<Npub, Down>,
+    /// Domains for which a probe's first answer was "no record", for the
+    /// few seconds their lookup may still run; `denial` wakes whoever
+    /// waits on them ([`Resolver::denied_by_an_upstream`]).
+    denied: TtlCache<String, ()>,
+    denial: tokio::sync::Notify,
     /// Single-flight per domain: a browser's first visit fires A, AAAA and
     /// HTTPS queries at once, and only one of them should pay for the TXT
     /// and relay round trips (and write the pin).
@@ -248,6 +289,8 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             disputes_logged: TtlCache::new(256),
             zones: TtlCache::new(1024),
             down: TtlCache::new(1024),
+            denied: TtlCache::new(1024),
+            denial: tokio::sync::Notify::new(),
             inflight: Mutex::new(HashMap::new()),
         }
     }
@@ -275,6 +318,53 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         self.pins.as_ref()
     }
 
+    /// Whether any domain `query`'s name could belong to is pinned. A host
+    /// uses this to fetch the legacy answer alongside the lookup for names
+    /// that are almost certainly not over fips, without telling the
+    /// upstream about a name it would otherwise answer from a pin.
+    pub fn has_pin_for(&self, query: &[u8]) -> bool {
+        synth::parse_query(query).is_some_and(|q| {
+            domain::candidates(&q.name)
+                .iter()
+                .any(|d| !self.pins.get(d).is_empty())
+        })
+    }
+
+    /// Completes once, for every domain `query`'s name could belong to,
+    /// an upstream has said there is no record (or that is already
+    /// decided) and none is pinned; never completes otherwise. The decision
+    /// itself waits for every upstream — a record anywhere outranks a
+    /// denial — but nearly every name a machine resolves has no record, and
+    /// its legacy answer need not wait for the slowest resolver to agree.
+    /// A host that answers on this hands out the legacy answer short-lived
+    /// ([`pubdom_core::OVERRUN_TTL_SECS`]), as on a budget overrun: should
+    /// another upstream produce a record after all, the name moves to fips
+    /// within seconds.
+    pub async fn denied_by_an_upstream(&self, query: &[u8]) {
+        let Some(q) = synth::parse_query(query) else {
+            return std::future::pending().await;
+        };
+        let candidates = domain::candidates(&q.name);
+        loop {
+            let woken = self.denial.notified();
+            tokio::pin!(woken);
+            woken.as_mut().enable();
+            let now = crate::now();
+            let all = candidates.iter().all(|d| {
+                self.pins.get(d).is_empty()
+                    && (self.denied.get(&d.to_string(), now).is_some()
+                        || matches!(
+                            self.decisions.get(&d.to_string(), now),
+                            Some(CachedDecision::NotOverFips)
+                        ))
+            });
+            if all {
+                return;
+            }
+            woken.await;
+        }
+    }
+
     pub fn flush_caches(&self) {
         self.decisions.clear();
         self.step3.clear();
@@ -284,6 +374,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         self.disputes_logged.clear();
         self.zones.clear();
         self.down.clear();
+        self.denied.clear();
     }
 
     /// The whole of spec §5–§7 for one application query.
@@ -324,16 +415,17 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         {
             chosen = Some((d.clone(), b, unverified));
         }
-        for d in candidates.iter().rev() {
-            if chosen.is_some() {
-                break;
-            }
-            match self.decision(d).await {
-                CachedDecision::Use(b, unverified) => {
+        if chosen.is_none() {
+            // Every candidate at once — a name is one to several domains
+            // deep, and asking them in turn made each first lookup pay for
+            // all of them in sequence. The longest bound one still wins.
+            let decisions =
+                futures::future::join_all(candidates.iter().map(|d| self.decision(d))).await;
+            for (d, decision) in candidates.iter().zip(decisions).rev() {
+                if let CachedDecision::Use(b, unverified) = decision {
                     chosen = Some((d.clone(), b, unverified));
                     break;
                 }
-                CachedDecision::NotOverFips => {}
             }
         }
         let Some((bound_domain, servers, unverified)) = chosen else {
@@ -388,10 +480,23 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         let now = crate::now();
         let pins = self.pins.get(d);
         let online = self.is_online();
-        let (txt, txt_ttl) = if online {
-            self.txt.lookup(d).await
-        } else {
+        let (txt, txt_ttl) = if !online {
             (TxtLookup::Unreachable, None)
+        } else if pins.is_empty() {
+            // No pin to protect: a plain look first, the validated lookup
+            // only when there is a record to validate.
+            let first_denial = || {
+                self.denied
+                    .put(d.to_string(), (), Duration::from_secs(10), now);
+                self.denial.notify_waiters();
+            };
+            match self.txt.probe(d, &first_denial).await {
+                Probe::Absent { method } => (TxtLookup::Miss { method }, None),
+                Probe::Unreachable => (TxtLookup::Unreachable, None),
+                Probe::Present | Probe::Unknown => self.txt.lookup(d).await,
+            }
+        } else {
+            self.txt.lookup(d).await
         };
         let (events, att_events) = match &txt {
             // The privacy gate (spec §8): relays only after a TXT hit …
@@ -827,6 +932,132 @@ mod tests {
 
     fn npub(b: u8) -> Npub {
         Npub::from_bytes([b; 32])
+    }
+
+    /// A TXT source with a probe: what it was asked, in order.
+    struct ProbingTxt {
+        probes: HashMap<String, Probe>,
+        full: HashMap<String, TxtLookup>,
+        asked: Mutex<Vec<String>>,
+    }
+    impl TxtSource for ProbingTxt {
+        async fn lookup(&self, domain: &str) -> (TxtLookup, Option<u32>) {
+            self.asked.lock().unwrap().push(format!("lookup:{domain}"));
+            (
+                self.full.get(domain).cloned().unwrap_or(TxtLookup::Miss {
+                    method: Method::Dnssec,
+                }),
+                Some(300),
+            )
+        }
+        async fn probe(&self, domain: &str, first_denial: &(dyn Fn() + Sync)) -> Probe {
+            self.asked.lock().unwrap().push(format!("probe:{domain}"));
+            let probe = self.probes.get(domain).copied().unwrap_or(Probe::Absent {
+                method: Method::Dns,
+            });
+            if matches!(probe, Probe::Absent { .. }) {
+                first_denial();
+            }
+            probe
+        }
+    }
+
+    /// An unpinned domain is probed plainly; the validated lookup runs only
+    /// where the probe saw a record, and a pinned domain is never probed.
+    #[tokio::test]
+    async fn unpinned_domains_are_probed_before_the_validated_lookup() {
+        let build = |pins: Arc<MemoryPinStore>, txt: ProbingTxt, claims: Vec<Event>| {
+            let mesh = Arc::new(FakeMesh {
+                queries: Mutex::new(vec![]),
+                registered: Mutex::new(vec![]),
+                echoes: Mutex::new(vec![]),
+                unreachable: vec![],
+                down: vec![],
+            });
+            Resolver::new(
+                ResolverConfig::default(),
+                pins,
+                txt,
+                FakeClaims(claims, Mutex::new(vec![])),
+                mesh,
+            )
+        };
+        // Nothing there: two probes (both candidates), no validated lookup,
+        // no relay asked.
+        let r = build(
+            Arc::new(MemoryPinStore::new()),
+            ProbingTxt {
+                probes: HashMap::new(),
+                full: HashMap::new(),
+                asked: Mutex::new(vec![]),
+            },
+            vec![],
+        );
+        let q = build_query(1, "www.example.net", QTYPE_AAAA).unwrap();
+        assert_eq!(r.lookup(&q).await, LookupResult::Passthrough);
+        let mut asked = r.txt.asked.lock().unwrap().clone();
+        asked.sort();
+        assert_eq!(asked, vec!["probe:example.net", "probe:www.example.net"]);
+        assert!(r.claims.1.lock().unwrap().is_empty());
+        assert!(!r.has_pin_for(&q));
+        // … and a host waiting to release the legacy answer is let go.
+        tokio::time::timeout(Duration::from_secs(1), r.denied_by_an_upstream(&q))
+            .await
+            .expect("every candidate was denied");
+
+        // A record at the registrable domain: probed, then validated, then
+        // bound and answered.
+        let r = build(
+            Arc::new(MemoryPinStore::new()),
+            ProbingTxt {
+                probes: HashMap::from([("example.org".to_string(), Probe::Present)]),
+                full: HashMap::from([("example.org".to_string(), hit(npub(1)))]),
+                asked: Mutex::new(vec![]),
+            },
+            vec![claim_event(npub(1), "example.org")],
+        );
+        let q = build_query(1, "www.example.org", QTYPE_AAAA).unwrap();
+        assert!(matches!(r.lookup(&q).await, LookupResult::Answer(_)));
+        let asked = r.txt.asked.lock().unwrap().clone();
+        assert!(asked.contains(&"lookup:example.org".to_string()));
+        assert!(
+            !asked.contains(&"lookup:www.example.org".to_string()),
+            "{asked:?}"
+        );
+        assert!(r.has_pin_for(&q), "now pinned");
+        // One candidate denied, the other bound: the legacy answer waits.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), r.denied_by_an_upstream(&q))
+                .await
+                .is_err()
+        );
+
+        // Pinned: the validated lookup at once, no probe for that domain —
+        // forgetting a pin takes a denial as strong as the pin.
+        let pins = Arc::new(MemoryPinStore::new());
+        pins.put(Binding {
+            domain: "example.org".into(),
+            npub: npub(1),
+            port: 5355,
+            method: Method::Dnssec,
+            verified_at: 1,
+        });
+        let r = build(
+            pins,
+            ProbingTxt {
+                probes: HashMap::new(),
+                full: HashMap::from([("example.org".to_string(), hit(npub(1)))]),
+                asked: Mutex::new(vec![]),
+            },
+            vec![claim_event(npub(1), "example.org")],
+        );
+        assert!(matches!(r.lookup(&q).await, LookupResult::Answer(_)));
+        let asked = r.txt.asked.lock().unwrap().clone();
+        assert!(asked.contains(&"lookup:example.org".to_string()));
+        assert!(
+            !asked.contains(&"probe:example.org".to_string()),
+            "{asked:?}"
+        );
     }
 
     struct FakeTxt(Mutex<HashMap<String, TxtLookup>>);

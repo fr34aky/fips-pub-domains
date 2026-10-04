@@ -52,10 +52,11 @@
    (#17).
 3. **Daemon backends**: macOS (launchd + `networksetup`) and Windows
    (service + adapter DNS); restricted per-domain mode; OpenWrt and
-   pfSense packaging. Implemented, unit-tested, not yet checked live: the
-   upstreams file is followed as resolved or NetworkManager rewrite it,
-   the 30 s poll kept as the fallback (the snapshot backends are static
-   by nature). Done on Linux: NetworkManager, standalone dnsmasq and plain
+   pfSense packaging. Implemented and unit-tested; seen live only on a
+   scratch instance ([testing.md](testing.md) level 3d), not under
+   resolved or NetworkManager themselves: the upstreams file is followed
+   as they rewrite it, the 30 s poll kept as the fallback (the snapshot
+   backends are static by nature). Done on Linux: NetworkManager, standalone dnsmasq and plain
    `resolv.conf` beside systemd-resolved, with detection and a recorded
    teardown.
 4. **Phone gaps**: TCP fallback for step 3 over the smoltcp stack;
@@ -99,6 +100,14 @@
   DHCP-provided resolver is common on phones); the verification is then
   `dns-single`, and a later two-resolver or DNSSEC verification upgrades the
   pin.
+- The daemon forwards to the first upstream and tries the next only on
+  a 2 s timeout, as a stub resolver would; a first upstream that is slow
+  rather than dead is what a first lookup now costs. Asking the second
+  after a short delay would help, but changes which server's answer wins
+  on a split-horizon network; open.
+- The phone's shim does not yet fetch the legacy answer alongside the
+  decision or release it on the first denial; it gets the plain probe
+  with the next pin.
 - Clippy is not available on the reference machine (no rustup toolchain);
   CI runs it with `-D warnings`.
 

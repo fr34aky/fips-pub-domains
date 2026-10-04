@@ -96,6 +96,33 @@ daemon now forwards `.fips` itself and its drop-in resets the lists), and
 the LAN's DHCP search domain `example.org` shadowed the daemon for the very
 domain under test until removed from the link ([daemon.md](daemon.md)).
 
+## Level 3d — first lookups and the boot window (2026-10-04)
+
+The installed 0.2.2 daemon on the reference machine (two upstream
+routers, the first one slow on names it has not cached): a first lookup
+of an ordinary name took 0.5–1 s where the router answered in tens of
+milliseconds, and after a boot nothing resolved for up to 30 s — the
+daemon had started with `upstreams=[]`. A scratch instance of the new
+build (`listen` on a spare loopback port, `upstreams_from` a file in a
+temporary directory, an empty pin store):
+
+```
+upstreams file empty:        SERVFAIL after 2.1 s
+file gains the two servers:  log "upstreams changed" within a second;
+                             the next query, a name never asked, answers
+first lookups, 12 names never asked:   32–600 ms, median 171
+the first upstream alone, 12 others:   12–256 ms, median 54
+repeat within seconds:                  1–2 ms
+first visit to a bound domain, no pin: 878 ms, verified, pinned, answered over fips
+```
+
+The daemon's debug log shows what is left: the plain probes are answered
+by the faster upstream in 5–50 ms, and the lookup then waits for the
+first upstream's own answer to the forwarded query. One name whose zone
+neither router could resolve took the forwarder's 2 s timeout, as it
+does without the daemon. Still to do on an installed 0.2.4: the same
+across a real boot.
+
 ## Level 4 — offline
 
 On the client node, with legacy DNS blocked but the mesh intact

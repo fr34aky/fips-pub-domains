@@ -310,6 +310,17 @@ impl crate::resolver::TxtSource for MaybeTxt {
             None => (pubdom_core::policy::TxtLookup::Unreachable, None),
         }
     }
+
+    async fn probe(
+        &self,
+        domain: &str,
+        first_denial: &(dyn Fn() + Sync),
+    ) -> crate::resolver::Probe {
+        match self.current() {
+            Some(t) => t.probe(domain, first_denial).await,
+            None => crate::resolver::Probe::Unreachable,
+        }
+    }
 }
 
 #[cfg(test)]

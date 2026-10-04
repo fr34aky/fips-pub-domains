@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The first lookup of an ordinary name no longer waits for a DNSSEC
+  proof that it has no `_fips-dns` record. A domain with no pin is asked
+  plainly first, every candidate domain and every upstream at once; the
+  validated lookup runs only where a record exists. The daemon fetches
+  the legacy answer alongside and hands it out — short-lived, 5 s — as
+  soon as one upstream has denied the record for every domain the name
+  could belong to; the decision waits for the others and is cached.
+  Measured on the reference machine: 0.5–1 s per first lookup before,
+  the upstream's own answer time after. Pinned domains are still
+  validated every time: forgetting a pin takes a denial as strong as the
+  pin. `TxtSource::probe` and `Resolver::denied_by_an_upstream` are the
+  library side; a `TxtSource` without a probe behaves as before.
+
 - `MaybeTxt::set_timeout`: a host that knows the Internet is gone can
   shorten the TXT lookup's wait (the phone does, from Android's network
   validation) so a first offline lookup fails into the mesh path within
@@ -23,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rename a new file into place.
 
 ### Fixed
+
+- A daemon that started before the network had upstreams answered
+  SERVFAIL until the next 30 s poll — at boot, half a minute of "site not
+  available". A query that finds no upstreams now re-reads the upstreams
+  file first.
 
 - A key that claims a domain is no witness for it: its attestations no
   longer count toward *k*, for itself or for a sibling server. With

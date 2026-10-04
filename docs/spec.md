@@ -207,6 +207,26 @@ does the application see a failure — and that is the same failure any
 offline machine sees. Non-participating domains therefore behave exactly
 as before.
 
+Nearly every name a machine resolves belongs to a domain with no record,
+and proving that under DNSSEC costs the zone's keys and the chain above
+it on every first lookup. A resolver MAY therefore ask for the record
+without validation first, **for a domain it holds no pin for**, and take
+"no record" from every resolver that answers as the miss; a record from
+any of them is then looked up again with validation, and that lookup
+decides. A forged "no" yields the legacy answer. Whoever can forge DNS
+can usually cause that anyway, with one exception this path gives up: a
+forged denial of a *signed* domain fails validation, counts as DNS being
+unreachable, and sends a validating resolver to the mesh relays, where
+the claim's DNSSEC proof or attestations (§5.1, 3 and 4) can still bind
+the domain on a first visit. A resolver that probes plainly loses that
+on first visits, and keeps it for every pinned domain. A pinned domain MUST NOT take this path: a pin is
+forgotten only on a denial as strong as the pin (§5.4). A resolver MAY
+also hand out the legacy answer as soon as one resolver has denied the
+record for every candidate domain, before the others have answered, if
+it limits that answer's TTL to seconds: records outrank denials, so a
+record another resolver then produces must take effect at the next
+query.
+
 ### 5.2 Which domain is "the domain of N"
 
 Walk `N` from the right: `www.example.org` → try `example.org`, then

@@ -118,6 +118,26 @@ without the Internet.
   tracks them. Where the OS cannot name a port the daemon takes 53;
   `setup` records its backend so `teardown` needs no flag.
 
+- **An unpinned domain is probed plainly; only a record is validated**,
+  after the daemon made every first lookup on a desktop 0.5–1 s slower:
+  a validated denial per candidate domain, in sequence, from every
+  upstream, and the legacy answer fetched only afterwards. The validated
+  "no" guards the pin of a pinned domain, and there it stays. For an
+  unpinned one it bought one thing, given up knowingly: a forged denial
+  of a signed domain failed validation and sent the resolver to the mesh
+  relays, where a first visit could still be bound from the claim's
+  DNSSEC proof or attestations; a plain forged "no" now ends in the
+  legacy answer. Paying a validated denial on every name a machine
+  resolves for that case was the wrong price; a setting that restores
+  it for those who want it is open. The legacy answer is released
+  on the first upstream's denial rather than after a fixed delay: a
+  timer would give the legacy address to the first visit of a bound
+  domain whenever its record was slow to arrive, which is the failure
+  the overrun TTL was introduced against. Rejected: answering legacy
+  first and deciding in the background for every name (same failure,
+  always), and skipping the probe for names seen before (a cache of
+  everything the user resolves, on disk).
+
 ## Facts from the fips codebase the design rests on
 
 - fips's Nostr key is the node identity key (`src/nostr/runtime.rs` builds

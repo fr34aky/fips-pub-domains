@@ -42,7 +42,18 @@ use std::time::Duration;
 
 pub struct TxtVerifier {
     resolvers: Vec<(IpAddr, TokioResolver)>,
+    /// The same upstreams without validation, for [`TxtVerifier::probe`];
+    /// empty when `dnssec` is off, where `resolvers` are plain already.
+    plain: Vec<(IpAddr, TokioResolver)>,
     timeout: Duration,
+}
+
+/// One upstream's plain answer to the probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Seen {
+    Record,
+    Nothing,
+    Failed,
 }
 
 /// One upstream's answer. `secure` on a miss: the denial (NSEC/NSEC3)
@@ -78,8 +89,7 @@ impl TxtVerifier {
         };
         // The same server twice must not count as two agreeing resolvers.
         let ips = unique(ips);
-        let mut resolvers = Vec::new();
-        for ip in ips {
+        let build = |ip: IpAddr, validate: bool| -> Result<TokioResolver, String> {
             let conf = ResolverConfig::from_parts(
                 None,
                 Vec::new(),
@@ -88,15 +98,83 @@ impl TxtVerifier {
             let mut opts = ResolverOpts::default();
             opts.timeout = timeout;
             opts.attempts = 1;
-            opts.validate = dnssec;
+            opts.validate = validate;
             opts.cache_size = 0; // the resolver above us keeps its own caches (spec §5.6)
-            let r = Resolver::builder_with_config(conf, TokioRuntimeProvider::default())
+            Resolver::builder_with_config(conf, TokioRuntimeProvider::default())
                 .with_options(opts)
                 .build()
-                .map_err(|e| e.to_string())?;
-            resolvers.push((ip, r));
+                .map_err(|e| e.to_string())
+        };
+        let mut resolvers = Vec::new();
+        let mut plain = Vec::new();
+        for ip in ips {
+            resolvers.push((ip, build(ip, dnssec)?));
+            if dnssec {
+                plain.push((ip, build(ip, false)?));
+            }
         }
-        Ok(Self { resolvers, timeout })
+        Ok(Self {
+            resolvers,
+            plain,
+            timeout,
+        })
+    }
+
+    /// A plain look at whether the record exists, every upstream at once
+    /// (`TxtSource::probe`). A TXT answer that holds no record of ours is
+    /// "nothing", as in the full lookup. A record from any upstream ends
+    /// the probe at once; `first_denial` is called if the first upstream
+    /// to answer has nothing.
+    pub async fn probe(
+        &self,
+        domain: &str,
+        first_denial: &(dyn Fn() + Sync),
+    ) -> crate::resolver::Probe {
+        // With `dnssec` off the lookup's own resolvers are the plain ones.
+        let plain = if self.plain.is_empty() {
+            &self.resolvers
+        } else {
+            &self.plain
+        };
+        let name = format!("{}.", txt_name(domain));
+        let futs = plain.iter().map(|(ip, r)| {
+            let name = name.clone();
+            async move {
+                let seen = match tokio::time::timeout(
+                    self.timeout + Duration::from_millis(200),
+                    r.lookup(&name, RecordType::TXT),
+                )
+                .await
+                {
+                    Ok(Ok(lookup)) => {
+                        let ours = lookup.answers().iter().any(|rec| {
+                            matches!(&rec.data, RData::TXT(txt) if TxtRecord::parse(&txt.to_string()).is_some())
+                        });
+                        if ours { Seen::Record } else { Seen::Nothing }
+                    }
+                    Ok(Err(NetError::Dns(DnsError::NoRecordsFound(_)))) => Seen::Nothing,
+                    Ok(Err(e)) => {
+                        tracing::debug!(%name, upstream = %ip, error = %e, "TXT probe failed");
+                        Seen::Failed
+                    }
+                    Err(_) => Seen::Failed,
+                };
+                tracing::debug!(upstream = %ip, ?seen, "TXT probe");
+                seen
+            }
+        });
+        use futures::StreamExt;
+        let mut pending: futures::stream::FuturesUnordered<_> = futs.collect();
+        let mut seen = Vec::new();
+        while let Some(one) = pending.next().await {
+            match one {
+                Seen::Record => return crate::resolver::Probe::Present,
+                Seen::Nothing if !seen.contains(&Seen::Nothing) => first_denial(),
+                _ => {}
+            }
+            seen.push(one);
+        }
+        combine_probe(&seen)
     }
 
     /// The wait given to each upstream's lookup; the verifier allows 200 ms
@@ -238,6 +316,26 @@ impl TxtVerifier {
     }
 }
 
+/// Any record anywhere means "go and validate" (records outrank denials: a
+/// stale negative cache must not hide a fresh record); otherwise the
+/// upstreams that answered all said nothing, and their number is the
+/// denial's strength; none answering is unreachable.
+fn combine_probe(seen: &[Seen]) -> crate::resolver::Probe {
+    use crate::resolver::Probe;
+    if seen.contains(&Seen::Record) {
+        return Probe::Present;
+    }
+    match seen.iter().filter(|s| **s == Seen::Nothing).count() {
+        0 => Probe::Unreachable,
+        1 => Probe::Absent {
+            method: Method::DnsSingle,
+        },
+        _ => Probe::Absent {
+            method: Method::Dns,
+        },
+    }
+}
+
 fn combine(answers: &[One]) -> (TxtLookup, Option<u32>) {
     let secure = |a: &&One| {
         matches!(
@@ -353,6 +451,34 @@ fn unique(ips: Vec<IpAddr>) -> Vec<IpAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probe_any_record_means_validate_and_denials_are_counted() {
+        use crate::resolver::Probe;
+        assert_eq!(combine_probe(&[]), Probe::Unreachable);
+        assert_eq!(
+            combine_probe(&[Seen::Failed, Seen::Failed]),
+            Probe::Unreachable
+        );
+        assert_eq!(
+            combine_probe(&[Seen::Nothing, Seen::Failed]),
+            Probe::Absent {
+                method: Method::DnsSingle
+            }
+        );
+        assert_eq!(
+            combine_probe(&[Seen::Nothing, Seen::Nothing]),
+            Probe::Absent {
+                method: Method::Dns
+            }
+        );
+        // A record from one upstream outranks any number of denials: a
+        // stale negative cache must not hide a fresh record.
+        assert_eq!(
+            combine_probe(&[Seen::Nothing, Seen::Record, Seen::Nothing]),
+            Probe::Present
+        );
+    }
 
     fn hit(authors: &[u8], secure: bool) -> One {
         One::Hit {

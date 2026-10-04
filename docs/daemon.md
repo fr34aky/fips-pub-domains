@@ -160,6 +160,7 @@ existed.
 | offline, domain pinned | the mesh answer, no DNS, no relays |
 | offline, unpinned, claim on a mesh relay | refused (legacy fails too) — unless `allow_unverified_offline` |
 | any error or the budget exceeded | the legacy answer |
+| no pin, and one upstream has no record for any candidate domain | the legacy answer at once (TTL 5 s until every upstream has answered) |
 
 ## Troubleshooting
 
@@ -176,10 +177,25 @@ daemon …`). Fix it on the link:
 or the next `setup`, which restarts resolved and so reloads the link's
 search domain.
 
-**Cold lookups take ~2 s.** That is the full chain — TXT, relay, step 3 —
-and it happens once per domain per hour; pinned names answer in
-milliseconds. If every lookup is slow, a configured relay is unreachable:
-check `journalctl -u fips-pubdom` for `Connection failed`.
+**Cold lookups take ~2 s.** For a domain that *is* over fips that is the
+full chain — TXT, relay, step 3 — and it happens once per domain per
+hour; pinned names answer in milliseconds. If every such lookup is slow,
+a configured relay is unreachable: check `journalctl -u fips-pubdom` for
+`Connection failed`.
+
+**Ordinary names are slow the first time.** They should cost what the
+upstream itself takes: the daemon asks for the `_fips-dns` record plainly
+and releases the legacy answer as soon as one upstream says there is
+none. Before 0.2.4 each first lookup waited 0.5–1 s for a DNSSEC-validated
+denial from every upstream — upgrade. On 0.2.4 and later, compare
+`dig @<upstream> <name>` with `dig -p 5356 @127.0.0.1 <name>` for a name
+not asked before: if the upstream is as slow, it is the upstream. The
+answers are forwarded from the first upstream listed, the next one only
+when it times out.
+
+**Nothing resolves for half a minute after boot.** Before 0.2.4 a daemon
+started ahead of the network kept an empty upstream list until its 30 s
+poll. Upgrade; it now re-reads the list when a query finds it empty.
 
 **`.fips` names stopped resolving after setup.** The daemon forwards them to
 `responder`; make sure fips's responder is at `[::1]:5354` (fips's default)

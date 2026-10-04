@@ -56,6 +56,8 @@ struct State {
     /// Re-read from `upstreams_from` when that file changes (`watch.rs`)
     /// and every 30 s as the fallback.
     upstreams: RwLock<Vec<IpAddr>>,
+    /// When a query last re-read the upstreams for want of any (seconds).
+    looked: std::sync::atomic::AtomicU64,
 }
 
 impl State {
@@ -89,31 +91,86 @@ async fn handle(state: &Arc<State>, query: Vec<u8>) -> Option<Vec<u8>> {
             None => forward::servfail(&query),
         };
     }
+    // No upstream yet — the daemon came up before the network did — or
+    // none any more: look again now rather than at the next poll. At boot
+    // this window was thirty seconds of failed lookups.
+    // At most once a second: a machine with no network asks all day.
+    if state.upstreams.read().unwrap().is_empty() {
+        let now = pubdom_resolve::now();
+        if state.looked.swap(now, std::sync::atomic::Ordering::Relaxed) != now {
+            state.refresh_upstreams();
+        }
+    }
+    let upstreams = state.upstreams.read().unwrap().clone();
+    // Almost every name is not over fips, and its answer should not wait
+    // for us to find that out: fetch it alongside the decision. Not for a
+    // name under a pinned domain, which is answered from the pin without
+    // the upstream hearing of it.
+    let mut legacy = (!upstreams.is_empty() && !state.resolver.has_pin_for(&query)).then(|| {
+        let (query, upstreams) = (query.clone(), upstreams.clone());
+        tokio::spawn(async move { forward::forward(&query, &upstreams).await })
+    });
     // Not awaited in place: a lookup that overruns the budget carries on
     // and caches its decision, so the next query is answered at once.
-    let lookup = tokio::spawn({
+    let mut lookup = tokio::spawn({
         let state = state.clone();
         let query = query.clone();
         async move { state.resolver.lookup(&query).await }
     });
     let mut overrun = false;
-    let result = match tokio::time::timeout(state.cfg.budget(), lookup).await {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => {
-            tracing::warn!(error = %e, "lookup failed; falling back to legacy");
-            LookupResult::Passthrough
-        }
-        Err(_) => {
-            tracing::warn!("lookup exceeded the budget; falling back to legacy for now");
-            overrun = true;
-            LookupResult::Passthrough
+    let mut fetched = None;
+    let result = tokio::select! {
+        biased;
+        joined = tokio::time::timeout(state.cfg.budget(), &mut lookup) => match joined {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "lookup failed; falling back to legacy");
+                LookupResult::Passthrough
+            }
+            Err(_) => {
+                tracing::warn!("lookup exceeded the budget; falling back to legacy for now");
+                overrun = true;
+                LookupResult::Passthrough
+            }
+        },
+        // One upstream has no record for any domain this name could belong
+        // to: the legacy answer goes out now, short-lived like an overrun's,
+        // while the lookup waits for the other upstreams and caches what
+        // they say. Waiting for the slowest of them cost every first
+        // lookup hundreds of milliseconds.
+        _ = state.resolver.denied_by_an_upstream(&query), if legacy.is_some() => {
+            // The decision may be in before the legacy answer is — at once
+            // when it was cached — and then it is the answer, and nothing
+            // needs clamping.
+            let mut l = legacy.take().expect("guarded by the branch's condition");
+            tokio::select! {
+                biased;
+                done = &mut lookup => {
+                    legacy = Some(l);
+                    done.unwrap_or(LookupResult::Passthrough)
+                }
+                reply = &mut l => {
+                    fetched = Some(reply.ok().flatten());
+                    overrun = true;
+                    LookupResult::Passthrough
+                }
+            }
         }
     };
     match result {
-        LookupResult::Answer(a) => Some(a),
+        LookupResult::Answer(a) => {
+            if let Some(l) = legacy {
+                l.abort();
+            }
+            Some(a)
+        }
         LookupResult::Passthrough => {
-            let upstreams = state.upstreams.read().unwrap().clone();
-            match forward::forward(&query, &upstreams).await {
+            let reply = match (fetched, legacy) {
+                (Some(reply), _) => reply,
+                (None, Some(l)) => l.await.ok().flatten(),
+                (None, None) => forward::forward(&query, &upstreams).await,
+            };
+            match reply {
                 // The lookup is still deciding: the stub must not keep the
                 // legacy address for the upstream's TTL (a parked wildcard
                 // gives a real address for 300 s) while it does.
@@ -155,6 +212,7 @@ async fn run(cfg: Config) -> Result<()> {
         cfg,
         resolver,
         upstreams: RwLock::new(upstreams),
+        looked: Default::default(),
     });
 
     let mut tasks = Vec::new();

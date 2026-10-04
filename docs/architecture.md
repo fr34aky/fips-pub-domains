@@ -60,10 +60,13 @@ through `spawn_blocking`.
 ```
 lookup(query)
   parse question ─ not a hostname / public suffix / unknown TLD ─► Passthrough
-  candidates, longest first (offline: pinned candidate first, no relay round trip)
+  candidates, decided concurrently, the longest bound one wins
+    (offline: pinned candidate first, no relay round trip)
   ┌ decision(domain)   [cached per domain, TTL per outcome]
   │   pin ← pin store
-  │   online:  TXT ← every upstream in parallel
+  │   online:  unpinned: plain probe ← every upstream in parallel;
+  │              "no record" from all that answer → Miss, nothing validated
+  │            TXT (validated) ← every upstream in parallel
   │            Hit  → claims ← public + mesh relays   (the privacy gate: relays only after a hit)
   │            Miss → no claims; the pin, if any, is forgotten
   │   offline: pinned → no relays; else claims ← mesh relays, then public
@@ -96,6 +99,15 @@ legacy answer forwarded meanwhile has its TTLs capped at
 `OVERRUN_TTL_SECS` (5 s), so the stub resolver asks again about when the
 decision is in, instead of keeping the upstream's address for its TTL.
 
+An ordinary name — no pin, no record — costs one plain TXT query per
+candidate domain and upstream, all at once, and the daemon does not hold
+its answer back for the slowest of them: the legacy answer is fetched
+alongside the lookup (not for a name under a pinned domain, which the
+upstream need not hear of), and `Resolver::denied_by_an_upstream`
+releases it once one upstream has denied the record for every candidate.
+If the decision is not in by then the answer goes out with the overrun
+TTL; the lookup carries on and caches what all upstreams said.
+
 ### pubdom-server
 
 A UDP+TCP DNS server bound to the node's own fips address (default port
@@ -118,7 +130,9 @@ is forwarded byte for byte to the upstreams (UDP, TCP on truncation);
 only server the OS knows. `setup` writes the OS integration
 ([daemon.md](daemon.md)); the upstreams are followed through
 `/run/systemd/resolve/resolv.conf`, which keeps listing the real servers
-after the stub points at us.
+after the stub points at us — watched for changes, polled every 30 s as
+the fallback, and re-read on the spot by a query that finds no upstreams
+(the daemon routinely starts before the network has any).
 
 `backend.rs` is `setup`/`teardown`: detection of the resolver arrangement
 (resolved, NetworkManager, standalone dnsmasq, plain `resolv.conf`), one

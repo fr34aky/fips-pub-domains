@@ -128,8 +128,8 @@ without the Internet.
   relays, where a first visit could still be bound from the claim's
   DNSSEC proof or attestations; a plain forged "no" now ends in the
   legacy answer. Paying a validated denial on every name a machine
-  resolves for that case was the wrong price; a setting that restores
-  it for those who want it is open. The legacy answer is released
+  resolves for that case was the wrong price as a default;
+  `plain_probe: false` restores it for those who want it. The legacy answer is released
   on the first upstream's denial rather than after a fixed delay: a
   timer would give the legacy address to the first visit of a bound
   domain whenever its record was slow to arrive, which is the failure

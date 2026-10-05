@@ -64,7 +64,8 @@ lookup(query)
     (offline: pinned candidate first, no relay round trip)
   ┌ decision(domain)   [cached per domain, TTL per outcome]
   │   pin ← pin store
-  │   online:  unpinned: plain probe ← every upstream in parallel;
+  │   online:  unpinned (unless `plain_probe: false` with `dnssec`):
+  │              plain probe ← every upstream in parallel;
   │              "no record" from all that answer → Miss, nothing validated
   │            TXT (validated) ← every upstream in parallel
   │            Hit  → claims ← public + mesh relays   (the privacy gate: relays only after a hit)

@@ -120,8 +120,11 @@ The daemon's debug log shows what is left: the plain probes are answered
 by the faster upstream in 5–50 ms, and the lookup then waits for the
 first upstream's own answer to the forwarded query. One name whose zone
 neither router could resolve took the forwarder's 2 s timeout, as it
-does without the daemon. Still to do on an installed 0.2.4: the same
-across a real boot.
+does without the daemon.
+
+Installed as 0.2.4 on the reference machine and rebooted (2026-10-05):
+names resolve directly after the boot, where 0.2.2 gave "site not
+available" for the first half minute.
 
 ## Level 4 — offline
 

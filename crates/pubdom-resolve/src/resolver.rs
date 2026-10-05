@@ -133,7 +133,10 @@ pub struct ResolverConfig {
     /// lookup is the validated one, as before 0.2.4 — each first lookup of
     /// an ordinary name then pays for a validated denial, and in return a
     /// forged "no record" for a signed domain fails validation and sends
-    /// the resolver to the mesh relays instead of the legacy answer.
+    /// the resolver to the mesh relays instead of the legacy answer. On a
+    /// network that strips DNSSEC that holds for every domain, as before
+    /// 0.2.4: each unpinned one is then asked for on the mesh relays.
+    /// Without `dnssec` there is nothing to validate and the probe stays.
     pub plain_probe: bool,
     pub allow_unverified_offline: bool,
     /// Witnesses whose attestations (spec §3.2) count offline; nobody
@@ -500,7 +503,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         let online = self.is_online();
         let (txt, txt_ttl) = if !online {
             (TxtLookup::Unreachable, None)
-        } else if pins.is_empty() && self.cfg.plain_probe {
+        } else if pins.is_empty() && (self.cfg.plain_probe || !self.cfg.dnssec) {
             // No pin to protect: a plain look first, the validated lookup
             // only when there is a record to validate.
             let first_denial = || {
@@ -1156,13 +1159,69 @@ mod tests {
         let mut asked = r.txt.asked.lock().unwrap().clone();
         asked.sort();
         assert_eq!(asked, vec!["lookup:example.net", "lookup:www.example.net"]);
-        // The decision is cached, so a host waiting on it is let go by
-        // that; before it was, nothing had marked the domains as denied.
+        // No probe, so no early denial either: a host gets the legacy
+        // answer when the lookup returns, not before.
         assert!(
             r.denied
                 .get(&"example.net".to_string(), crate::now())
                 .is_none()
         );
+    }
+
+    /// What the switch is for: the network answers a plain "no record",
+    /// the validated lookup fails. With the probe that is the end — legacy,
+    /// no relay asked; without it DNS counts as unreachable and the mesh
+    /// relays are asked. And without `dnssec` the probe stays regardless.
+    #[tokio::test]
+    async fn a_forged_denial_reaches_the_mesh_relays_only_without_the_probe() {
+        let build = |plain_probe: bool, dnssec: bool| {
+            let mesh = Arc::new(FakeMesh {
+                queries: Mutex::new(vec![]),
+                registered: Mutex::new(vec![]),
+                echoes: Mutex::new(vec![]),
+                unreachable: vec![],
+                down: vec![],
+            });
+            Resolver::new(
+                ResolverConfig {
+                    plain_probe,
+                    dnssec,
+                    ..ResolverConfig::default()
+                },
+                Arc::new(MemoryPinStore::new()),
+                ProbingTxt {
+                    probes: HashMap::new(), // every probe: "no record"
+                    full: HashMap::from([
+                        ("example.org".to_string(), TxtLookup::Unreachable),
+                        ("www.example.org".to_string(), TxtLookup::Unreachable),
+                    ]),
+                    asked: Mutex::new(vec![]),
+                },
+                FakeClaims(vec![], Mutex::new(vec![])),
+                mesh,
+            )
+        };
+        let q = build_query(1, "www.example.org", QTYPE_AAAA).unwrap();
+
+        let r = build(true, true);
+        assert_eq!(r.lookup(&q).await, LookupResult::Passthrough);
+        assert!(r.claims.1.lock().unwrap().is_empty());
+
+        let r = build(false, true);
+        r.lookup(&q).await;
+        let asked = r.claims.1.lock().unwrap().clone();
+        assert!(
+            asked.contains(&("example.org".to_string(), RelayScope::MeshOnly)),
+            "{asked:?}"
+        );
+        let txt = r.txt.asked.lock().unwrap().clone();
+        assert!(txt.iter().all(|a| a.starts_with("lookup:")), "{txt:?}");
+
+        let r = build(false, false);
+        r.lookup(&q).await;
+        let txt = r.txt.asked.lock().unwrap().clone();
+        assert!(txt.iter().any(|a| a.starts_with("probe:")), "{txt:?}");
+        assert!(r.claims.1.lock().unwrap().is_empty());
     }
 
     struct FakeTxt(Mutex<HashMap<String, TxtLookup>>);

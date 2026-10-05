@@ -124,8 +124,14 @@ fails validation, counts as DNS being unreachable, and the resolver asks
 the `mesh_relays`, where the claim's DNSSEC proof or your witnesses can
 still bind the domain. The price is what 0.2.4 removed: each first
 lookup of an ordinary name waits for a validated denial from every
-upstream, typically 0.5–1 s. Domains already pinned are validated
-either way.
+upstream, typically 0.5–1 s, and the legacy answer is no longer released
+on the first upstream's denial. On a network that strips DNSSEC from
+its answers every validated lookup fails, signed domain or not: each
+unpinned domain the machine resolves is then asked for on the
+`mesh_relays` (never the public ones) and its first lookup takes the TXT
+timeout plus that fetch. Domains already pinned are validated either
+way. With `dnssec: false` there is nothing to validate, and the setting
+has no effect.
 
 **Witnesses** are nodes you trust to have verified a domain online — your
 own other nodes, or a friend's — that publish attestations with

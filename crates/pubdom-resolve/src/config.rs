@@ -7,7 +7,7 @@
 //! upstreams: ["9.9.9.9", "1.1.1.1"]            # empty: the system's
 //! upstreams_from: /run/systemd/resolve/resolv.conf   # re-read periodically
 //! dnssec: true
-//! plain_probe: true                    # false: validate every "no record" too
+//! plain_probe: true                    # false: validate every "no record" too (needs dnssec)
 //! public_relays: ["wss://relay.damus.io", "wss://nos.lol"]
 //! mesh_relays: ["ws://npub1….fips:80"]   # by .fips name, never an [fd…] literal:
 //!                                        # nostr-sdk mangles bracketed IPv6, and
@@ -421,5 +421,8 @@ mod tests {
         assert_eq!(c.resolver_config().attestation_threshold, 1);
         assert_eq!(Config::default().attestation_threshold, 2);
         assert!(Config::default().witnesses.is_empty());
+        assert!(Config::default().resolver_config().plain_probe);
+        let c: Config = serde_yaml::from_str("plain_probe: false\n").unwrap();
+        assert!(!c.resolver_config().plain_probe);
     }
 }

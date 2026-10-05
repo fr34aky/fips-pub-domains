@@ -114,8 +114,9 @@
   only while Android reports a validated Internet: without one, a router
   with no uplink answering "no record" would end the lookup before the
   mesh-only path. Fetching the legacy answer alongside the decision and
-  releasing it on the first denial is merged there (fips2go #72), not
-  yet in a release or checked on the phone.
+  releasing it on the first denial is in fips2go 0.9.3 (#72); on the
+  phone it was checked to work, its speed-up not measured (the release
+  build does not log at debug).
 - Clippy is not available on the reference machine (no rustup toolchain);
   CI runs it with `-D warnings`.
 

@@ -110,11 +110,12 @@
   validated denial at its old cost ([daemon.md](daemon.md)). The phone
   has no switch for it; there the probe is already off whenever the
   Internet is not validated.
-- The phone's shim does not yet fetch the legacy answer alongside the
-  decision or release it on the first denial. It has the plain probe
-  (fips2go #70, pinned at 0.2.4), used only while Android reports a
-  validated Internet: without one, a router with no uplink answering
-  "no record" would end the lookup before the mesh-only path.
+- The phone has the plain probe (fips2go #70, pinned at 0.2.4), used
+  only while Android reports a validated Internet: without one, a router
+  with no uplink answering "no record" would end the lookup before the
+  mesh-only path. Fetching the legacy answer alongside the decision and
+  releasing it on the first denial is in review there (fips2go #72), not
+  yet in a release or checked on the phone.
 - Clippy is not available on the reference machine (no rustup toolchain);
   CI runs it with `-D warnings`.
 

@@ -109,8 +109,10 @@
   mesh relays (spec §5.1); an opt-in "always validate" setting would
   restore that at the old cost. Not implemented.
 - The phone's shim does not yet fetch the legacy answer alongside the
-  decision or release it on the first denial; it gets the plain probe
-  with the next pin.
+  decision or release it on the first denial. It has the plain probe
+  (fips2go #70, pinned at 0.2.4), used only while Android reports a
+  validated Internet: without one, a router with no uplink answering
+  "no record" would end the lookup before the mesh-only path.
 - Clippy is not available on the reference machine (no rustup toolchain);
   CI runs it with `-D warnings`.
 

@@ -7,6 +7,7 @@
 //! upstreams: ["9.9.9.9", "1.1.1.1"]            # empty: the system's
 //! upstreams_from: /run/systemd/resolve/resolv.conf   # re-read periodically
 //! dnssec: true
+//! plain_probe: true                    # false: validate every "no record" too
 //! public_relays: ["wss://relay.damus.io", "wss://nos.lol"]
 //! mesh_relays: ["ws://npub1….fips:80"]   # by .fips name, never an [fd…] literal:
 //!                                        # nostr-sdk mangles bracketed IPv6, and
@@ -40,6 +41,9 @@ pub struct Config {
     pub upstreams: Vec<IpAddr>,
     pub upstreams_from: Option<PathBuf>,
     pub dnssec: bool,
+    /// `false`: no plain probe for unpinned domains; every `_fips-dns`
+    /// lookup is validated (`ResolverConfig::plain_probe`).
+    pub plain_probe: bool,
     pub public_relays: Vec<String>,
     pub mesh_relays: Vec<String>,
     pub responder: SocketAddr,
@@ -66,6 +70,7 @@ impl Default for Config {
             upstreams: Vec::new(),
             upstreams_from: None,
             dnssec: d.dnssec,
+            plain_probe: d.plain_probe,
             public_relays: d.public_relays,
             mesh_relays: d.mesh_relays,
             responder: "[::1]:5354".parse().unwrap(),
@@ -144,6 +149,7 @@ impl Config {
             public_relays: self.public_relays.clone(),
             mesh_relays: self.mesh_relays.clone(),
             dnssec: self.dnssec,
+            plain_probe: self.plain_probe,
             allow_unverified_offline: self.allow_unverified_offline,
             witnesses: self.witnesses.clone(),
             attestation_threshold: self.attestation_threshold,

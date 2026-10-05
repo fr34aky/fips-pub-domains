@@ -95,6 +95,7 @@ listen: ["[::1]:5356", "127.0.0.1:5356"]
 upstreams: []                                    # explicit legacy resolvers; empty → follow upstreams_from
 upstreams_from: /run/systemd/resolve/resolv.conf # written by setup; followed as it changes (and every 30 s), minus ourselves
 dnssec: true                                     # validate TXT answers and accept DNSSEC proofs in claims (unsigned zones still work, as method dns)
+plain_probe: true                                # ask an unpinned domain plainly first; false = validate every "no record" (see below)
 public_relays: ["wss://relay.damus.io", "wss://nos.lol", "wss://relay.primal.net", "wss://relay.nostr.band"]
 mesh_relays: ["ws://npub1….fips:80"]             # relays on fips nodes, by .fips name (see below)
 responder: "[::1]:5354"                          # fips's .fips responder
@@ -112,6 +113,19 @@ consecutive failure up to 3 hours, then tried again.
 
 ```yaml
 ```
+
+**`plain_probe: false`** is for a machine on networks you do not trust
+that should reach bound domains it has never visited. By default a
+domain with no pin is asked for its record without validation, and "no
+record" ends in the legacy answer; whoever controls the network's DNS
+can therefore keep a first visit off fips. With the probe off every
+lookup is validated: a forged "no record" for a DNSSEC-signed domain
+fails validation, counts as DNS being unreachable, and the resolver asks
+the `mesh_relays`, where the claim's DNSSEC proof or your witnesses can
+still bind the domain. The price is what 0.2.4 removed: each first
+lookup of an ordinary name waits for a validated denial from every
+upstream, typically 0.5–1 s. Domains already pinned are validated
+either way.
 
 **Witnesses** are nodes you trust to have verified a domain online — your
 own other nodes, or a friend's — that publish attestations with

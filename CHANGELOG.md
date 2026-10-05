@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `plain_probe: false` (daemon config, `ResolverConfig::plain_probe`)
+  turns the plain probe of 0.2.4 off: every `_fips-dns` lookup is
+  validated again, so a forged "no record" for a signed domain sends a
+  first visit to the mesh relays instead of the legacy answer — at the
+  cost of a validated denial per first lookup of an ordinary name.
+  Default `true`, unchanged behaviour.
+
 ## [0.2.4] - 2026-10-04
 
 ### Changed

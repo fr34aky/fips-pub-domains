@@ -128,6 +128,13 @@ pub struct ResolverConfig {
     pub public_relays: Vec<String>,
     pub mesh_relays: Vec<String>,
     pub dnssec: bool,
+    /// Ask for an unpinned domain's record without validation first and
+    /// take "no record" as the answer ([`TxtSource::probe`]). Off: every
+    /// lookup is the validated one, as before 0.2.4 — each first lookup of
+    /// an ordinary name then pays for a validated denial, and in return a
+    /// forged "no record" for a signed domain fails validation and sends
+    /// the resolver to the mesh relays instead of the legacy answer.
+    pub plain_probe: bool,
     pub allow_unverified_offline: bool,
     /// Witnesses whose attestations (spec §3.2) count offline; nobody
     /// else's are fetched. Empty: attestations are not used.
@@ -161,6 +168,7 @@ impl Default for ResolverConfig {
             ],
             mesh_relays: Vec::new(),
             dnssec: true,
+            plain_probe: true,
             allow_unverified_offline: false,
             witnesses: Vec::new(),
             attestation_threshold: 2,
@@ -492,7 +500,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         let online = self.is_online();
         let (txt, txt_ttl) = if !online {
             (TxtLookup::Unreachable, None)
-        } else if pins.is_empty() {
+        } else if pins.is_empty() && self.cfg.plain_probe {
             // No pin to protect: a plain look first, the validated lookup
             // only when there is a record to validate.
             let first_denial = || {
@@ -1115,6 +1123,45 @@ mod tests {
         assert!(
             !asked.contains(&"probe:example.org".to_string()),
             "{asked:?}"
+        );
+    }
+
+    /// `plain_probe: false`: nothing is probed, every candidate gets the
+    /// validated lookup, and no early denial releases the legacy answer.
+    #[tokio::test]
+    async fn without_the_plain_probe_every_lookup_is_validated() {
+        let mesh = Arc::new(FakeMesh {
+            queries: Mutex::new(vec![]),
+            registered: Mutex::new(vec![]),
+            echoes: Mutex::new(vec![]),
+            unreachable: vec![],
+            down: vec![],
+        });
+        let r = Resolver::new(
+            ResolverConfig {
+                plain_probe: false,
+                ..ResolverConfig::default()
+            },
+            Arc::new(MemoryPinStore::new()),
+            ProbingTxt {
+                probes: HashMap::new(),
+                full: HashMap::new(),
+                asked: Mutex::new(vec![]),
+            },
+            FakeClaims(vec![], Mutex::new(vec![])),
+            mesh,
+        );
+        let q = build_query(1, "www.example.net", QTYPE_AAAA).unwrap();
+        assert_eq!(r.lookup(&q).await, LookupResult::Passthrough);
+        let mut asked = r.txt.asked.lock().unwrap().clone();
+        asked.sort();
+        assert_eq!(asked, vec!["lookup:example.net", "lookup:www.example.net"]);
+        // The decision is cached, so a host waiting on it is let go by
+        // that; before it was, nothing had marked the domains as denied.
+        assert!(
+            r.denied
+                .get(&"example.net".to_string(), crate::now())
+                .is_none()
         );
     }
 

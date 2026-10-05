@@ -106,8 +106,10 @@
   after a short delay would help, but changes which server's answer wins
   on a split-horizon network; open.
 - A first visit no longer survives a forged "no record" by way of the
-  mesh relays (spec §5.1); an opt-in "always validate" setting would
-  restore that at the old cost. Not implemented.
+  mesh relays (spec §5.1) unless `plain_probe: false` restores the
+  validated denial at its old cost ([daemon.md](daemon.md)). The phone
+  has no switch for it; there the probe is already off whenever the
+  Internet is not validated.
 - The phone's shim does not yet fetch the legacy answer alongside the
   decision or release it on the first denial. It has the plain probe
   (fips2go #70, pinned at 0.2.4), used only while Android reports a

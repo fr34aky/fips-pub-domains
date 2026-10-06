@@ -132,8 +132,8 @@ Grouped by component. Each item says what, why, and where it stands.
   one `select!`, the proxy as blocking threads); a shared helper in
   `pubdom-resolve` would need an async DNS proxy on the phone. The
   daemon starts the legacy fetch only after one poll of the lookup
-  found it pending; the phone's thread per query should follow the
-  same rule (the lookup tells the proxy when to start it).
+  found it pending (#23); the phone follows the same rule — the lookup
+  tells the proxy when to start the thread (fips2go #79, in review).
 - **TCP fallback for step 3** over the smoltcp stack. Low value: a step 3
   answer is one CNAME and never truncates.
 - **Upstream ports** kept for the TXT verifier (the shim hands the

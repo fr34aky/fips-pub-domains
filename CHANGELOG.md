@@ -15,8 +15,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still waits for every upstream, validated answers outranking the rest.
   Before, the setting also gave up the early release.
 
-### Changed
-
 - The daemon polls a lookup once before fetching the legacy answer
   alongside it: a name whose decision is cached (or that is not a
   hostname, or asks for a record type that is never over fips) is

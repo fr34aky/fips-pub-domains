@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- With `plain_probe: false` (and for a `TxtSource` with no probe) the
+  validated lookup releases the legacy answer on the first upstream's
+  "no record", as the probe does (`TxtSource::lookup_with`); the decision
+  still waits for every upstream, validated answers outranking the rest.
+  Before, the setting also gave up the early release.
+
+### Added
+
+- `pubdom_core::unavailable_ttl(retry_in)`: the TTL cap for the legacy
+  answer of an unavailable name, for every host to share.
+
 ## [0.2.5] - 2026-10-06
 
 ### Changed

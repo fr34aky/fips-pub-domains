@@ -29,6 +29,22 @@ use std::time::Duration;
 pub trait TxtSource: Send + Sync {
     fn lookup(&self, domain: &str) -> impl Future<Output = (TxtLookup, Option<u32>)> + Send;
 
+    /// [`TxtSource::lookup`], calling `first_denial` when the first
+    /// upstream to answer says "no record" before any has produced a
+    /// record — the same release a probe gives
+    /// ([`Resolver::denied_by_an_upstream`]), for lookups that run without
+    /// a probe. The decision still waits for every upstream, validated
+    /// answers outranking the rest; only the legacy answer stops waiting.
+    /// The default never calls it; a source that cannot tell says nothing
+    /// early. A wrapper must forward this, or it loses the release.
+    fn lookup_with(
+        &self,
+        domain: &str,
+        _first_denial: &(dyn Fn() + Sync),
+    ) -> impl Future<Output = (TxtLookup, Option<u32>)> + Send {
+        self.lookup(domain)
+    }
+
     /// A cheap, unvalidated look at whether the record exists at all, for
     /// a domain with no pin: almost every name a machine resolves has none,
     /// and proving that under DNSSEC costs the zone's keys and the chain
@@ -94,9 +110,21 @@ pub trait ClaimSource: Send + Sync {
     ) -> impl Future<Output = Vec<Event>> + Send;
 }
 
+// Every method forwarded: a wrapper that forwards `lookup` alone silently
+// loses the probe and the early release (the trait's defaults say nothing).
 impl TxtSource for TxtVerifier {
     async fn lookup(&self, domain: &str) -> (TxtLookup, Option<u32>) {
         TxtVerifier::lookup(self, domain).await
+    }
+    async fn lookup_with(
+        &self,
+        domain: &str,
+        first_denial: &(dyn Fn() + Sync),
+    ) -> (TxtLookup, Option<u32>) {
+        TxtVerifier::lookup_with(self, domain, first_denial).await
+    }
+    async fn probe(&self, domain: &str, first_denial: &(dyn Fn() + Sync)) -> Probe {
+        TxtVerifier::probe(self, domain, first_denial).await
     }
 }
 
@@ -550,30 +578,41 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         let now = crate::now();
         let pins = self.pins.get(d);
         let online = self.is_online();
+        let first_denial = || {
+            self.denied
+                .put(d.to_string(), (), Duration::from_secs(10), now);
+            self.denial.notify_waiters();
+        };
         let (txt, txt_ttl) = if !online {
             (TxtLookup::Unreachable, None)
         } else if pins.is_empty() && (self.cfg.plain_probe || !self.cfg.dnssec) {
             // No pin to protect: a plain look first, the validated lookup
             // only when there is a record to validate.
-            let first_denial = || {
-                self.denied
-                    .put(d.to_string(), (), Duration::from_secs(10), now);
-                self.denial.notify_waiters();
-            };
             match self.txt.probe(d, &first_denial).await {
                 Probe::Absent { method } => (TxtLookup::Miss { method }, None),
                 Probe::Unreachable => (TxtLookup::Unreachable, None),
-                Probe::Present | Probe::Unknown => {
+                Probe::Present => {
                     // A record after all (a slower upstream had it): the
                     // first one's denial must not keep releasing legacy
                     // answers while the record is verified.
                     self.denied.remove(&d.to_string());
                     self.txt.lookup(d).await
                 }
+                // Nothing cheap was learned: the validated lookup releases
+                // on its own first denial.
+                Probe::Unknown => self.txt.lookup_with(d, &first_denial).await,
             }
+        } else if pins.is_empty() {
+            // No probe (`plain_probe: false`): the first denial releases the
+            // legacy answer the way a probe's would.
+            self.txt.lookup_with(d, &first_denial).await
         } else {
             self.txt.lookup(d).await
         };
+        if matches!(txt, TxtLookup::Hit { .. }) {
+            // A record outranks whatever denial was released on.
+            self.denied.remove(&d.to_string());
+        }
         let (events, att_events) = match &txt {
             // The privacy gate (spec §8): relays only after a TXT hit …
             TxtLookup::Hit { .. } => (
@@ -1059,6 +1098,17 @@ mod tests {
                 Some(300),
             )
         }
+        async fn lookup_with(
+            &self,
+            domain: &str,
+            first_denial: &(dyn Fn() + Sync),
+        ) -> (TxtLookup, Option<u32>) {
+            let r = self.lookup(domain).await;
+            if matches!(r.0, TxtLookup::Miss { .. }) {
+                first_denial();
+            }
+            r
+        }
         async fn probe(&self, domain: &str, first_denial: &(dyn Fn() + Sync)) -> Probe {
             self.asked.lock().unwrap().push(format!("probe:{domain}"));
             let probe = self.probes.get(domain).copied().unwrap_or(Probe::Absent {
@@ -1212,7 +1262,7 @@ mod tests {
     }
 
     /// `plain_probe: false`: nothing is probed, every candidate gets the
-    /// validated lookup, and no early denial releases the legacy answer.
+    /// validated lookup, whose first denial releases the legacy answer.
     #[tokio::test]
     async fn without_the_plain_probe_every_lookup_is_validated() {
         let mesh = Arc::new(FakeMesh {
@@ -1241,13 +1291,13 @@ mod tests {
         let mut asked = r.txt.asked.lock().unwrap().clone();
         asked.sort();
         assert_eq!(asked, vec!["lookup:example.net", "lookup:www.example.net"]);
-        // No probe, so no early denial either: a host gets the legacy
-        // answer when the lookup returns, not before.
-        assert!(
-            r.denied
-                .get(&"example.net".to_string(), crate::now())
-                .is_none()
-        );
+        // The lookups' denials release the legacy answer as a probe's would
+        // (the marks themselves: the cached decisions would satisfy a
+        // waiter regardless).
+        let now = crate::now();
+        for d in ["example.net", "www.example.net"] {
+            assert!(r.denied.get(&d.to_string(), now).is_some(), "{d} released");
+        }
     }
 
     /// What the switch is for: the network answers a plain "no record",

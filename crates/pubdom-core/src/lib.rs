@@ -52,3 +52,14 @@ pub const ANSWER_TTL_SECS: u32 = 30;
 /// again soon rather than keep the legacy address for the upstream's TTL
 /// (a parked wildcard's 300 s was enough to look like "always legacy").
 pub const OVERRUN_TTL_SECS: u32 = 5;
+
+/// The TTL cap a host puts on the legacy answer for a name that is over
+/// fips but whose servers are unreachable right now (the resolver's
+/// `Unavailable { retry_in }`): until the next attempt, and at least
+/// [`OVERRUN_TTL_SECS`]. One definition for every host, so the daemon and
+/// the phone cap alike.
+pub fn unavailable_ttl(retry_in: std::time::Duration) -> u32 {
+    u32::try_from(retry_in.as_secs())
+        .unwrap_or(u32::MAX)
+        .max(OVERRUN_TTL_SECS)
+}

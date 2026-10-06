@@ -13,7 +13,7 @@ the phone can: the mesh transport and the responder registration.
 | `shim/src/names.rs` | builds the resolver over the engine's `MeshLink`, runs it from the DNS proxy's blocking per-query thread on a one-worker tokio runtime, implements `MeshDns` |
 | `shim/src/meshtcp.rs` | relays on the mesh: a loopback listener per relay, admitting only the resolver (random path token), each connection carried over the in-process smoltcp TCP stack to the relay's fips address |
 | `shim/src/meshudp.rs` | one UDP request/response over the mesh from the node's own address through a smoltcp socket — the UDP twin of `meshhttp.rs`; and the ICMPv6 echo that confirms a target node is reachable. `Divert` claims UDP flows and echo replies (by identifier) for it |
-| `shim/src/dns.rs` | the proxy asks the resolver for every non-`.fips` name before the upstreams; `Legacy` means "not over fips" and the query goes upstream unchanged, `Pending` (the lookup overran its budget) goes upstream with the answer's TTLs capped |
+| `shim/src/dns.rs` | the proxy asks the resolver for every non-`.fips` name before the upstreams; `Legacy` means "not over fips" and the query goes upstream unchanged, `Pending` (the lookup overran its budget) goes upstream with the answer's TTLs capped at 5 s, `Capped(n)` (over fips, but no server or target node reachable now — `LookupResult::Unavailable`) with them capped at *n* s, the time to the next attempt; `Early` releases the legacy answer once one upstream has denied the record for every candidate domain (with a validated Internet only), fetched alongside the lookup |
 | `shim/src/config.rs` | knobs `names_pins_path` (set = on), `names_mesh_relays`, `names_allow_unverified_offline`, `names_witnesses`, `names_attestation_threshold`, `names_dnssec` (absent = on; off closes the proof path so witnesses alone vouch offline) |
 | `ConfigStore.kt` / `SettingsFragment.kt` | Settings → *Public domain names over fips* (`public_names`, default on) decides whether the pin path is sent; *Mesh relays for public names* below it lists relays on fips nodes, validated (bech32 checksum) and sent as `names_mesh_relays` while the switch is on; *Witnesses for public names* and *Witnesses that must agree* are the attestation knobs (spec §3.2), validated the same way, flagged in place when no mesh relay is set or k exceeds the list, and sent as `names_witnesses` / `names_attestation_threshold` only when the list is non-empty (fips2go #62); *DNSSEC for public names* (on by default, always sent as `names_dnssec`) is the resolver's `dnssec`, off to exercise the witness path, with *Forget verified domains* deleting the pin file (fips2go #65); *Trust my Mesh names as witnesses* (off by default) adds the hosts file's nodes — the sync upstream first, then each name's node, 32 in total with the typed ones — to the list (fips2go #66) |
 
@@ -65,6 +65,17 @@ firewall and the TUN.
   looked like the name never resolving over fips. A browser's own host
   cache (Chromium: 60 s) is beyond the proxy's reach; a reload after that
   gets the mesh address.
+- A name over fips whose server does not answer, with no zone record (or
+  a target node that answers no echo), gets the legacy answer with its
+  TTLs capped at the time to the resolver's next attempt — 20 s after a
+  first failure, growing to 3 h for a server that stays down
+  (`LookupResult::Unavailable`, spec §5.3 and §6). Right after connecting
+  the mesh session to the server is not up yet, so the first lookup of a
+  bound name is usually this case; the retry 20 s later finds it.
+- With a validated Internet, the legacy answer for a name under no
+  verified domain is fetched while the lookup runs and handed out as
+  soon as one upstream has denied the `_fips-dns` record for every
+  candidate domain, as the desktop daemon does (fips2go 0.9.3).
 
 - **Apps with their own Tor.** Amethyst decides per relay URL whether to
   use its built-in Tor, and the rule only knows literal addresses

@@ -67,14 +67,11 @@ registered and the [NIP](docs/nip.md) is a draft. See
 
 ## Quick start
 
-Build and install first — [docs/install.md](docs/install.md) covers
-prerequisites, `cargo build --release`, and where each binary and unit goes
-for each role. In short:
-
-```sh
-cargo build --release
-sudo install -m755 target/release/fips-pubdom target/release/fips-pubdomd target/release/fips-pubdom-server /usr/bin/
-```
+Install first — [docs/install.md](docs/install.md) has one
+self-contained section per role (the domain server, the desktop
+resolver, the CLI): release archives or `cargo build --release`, where
+each binary and unit goes, upgrading and uninstalling. A machine usually
+needs one role.
 
 ### Serve a domain
 
@@ -119,7 +116,7 @@ offline discovery. [docs/android.md](docs/android.md).
 
 | | |
 |---|---|
-| [docs/install.md](docs/install.md) | building and installing each component; upgrading; uninstalling |
+| [docs/install.md](docs/install.md) | installing, upgrading and uninstalling, one section per role: domain server, desktop resolver, CLI |
 | [docs/spec.md](docs/spec.md) | the protocol: events, records, verification precedence, wire format, OS integration, security |
 | [docs/nip.md](docs/nip.md) | the Nostr NIP draft (kinds 37197–37199, placeholders) |
 | [docs/architecture.md](docs/architecture.md) | crates, data flow, the decisions behind them |

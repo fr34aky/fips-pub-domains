@@ -125,8 +125,8 @@ fails validation, counts as DNS being unreachable, and the resolver asks
 the `mesh_relays`, where the claim's DNSSEC proof or your witnesses can
 still bind the domain. The price is what 0.2.4 removed: each first
 lookup of an ordinary name waits for a validated denial from every
-upstream, typically 0.5–1 s, and the legacy answer is no longer released
-on the first upstream's denial. On a network that strips DNSSEC from
+upstream, typically 0.5–1 s; the legacy answer is still released as soon
+as one upstream's validated denial is in. On a network that strips DNSSEC from
 its answers every validated lookup fails, signed domain or not: each
 unpinned domain the machine resolves is then asked for on the
 `mesh_relays` (never the public ones) and its first lookup takes the TXT

@@ -58,11 +58,10 @@ Grouped by component. Each item says what, why, and where it stands.
 
 ### Desktop resolver
 
-- **Release the legacy answer on the first *validated* denial** when
-  `plain_probe: false`. Today that setting also loses the early release,
-  so every first lookup waits for the slowest upstream; the validated
-  lookup would have to report its first secure denial through the same
-  hook the probe uses. Worth doing if anyone runs with the switch.
+- Done: **the legacy answer is released on the first *validated*
+  denial** when `plain_probe: false` (`TxtSource::lookup_with`), so the
+  setting costs the validated denial, not the wait for the slowest
+  upstream.
 - **Hedged forwarding.** The daemon forwards to the first upstream and
   tries the next only after a 2 s timeout, as a stub resolver would. A
   first upstream that is slow rather than dead — the reference machine's
@@ -82,6 +81,9 @@ Grouped by component. Each item says what, why, and where it stands.
   nodes silently; `probe` on the control socket answers definitively
   (`bloom_miss` in ~60 ms) and would be better where it is available —
   the desktop, not the phone's shim. It is a mutating command.
+- Done: `pubdom_core::unavailable_ttl` is the one definition of the cap
+  on an unavailable name's legacy answer; the phone takes it with its
+  next pin.
 - **One wake-up per denial.** `Resolver::denied_by_an_upstream` uses one
   `Notify` for all domains, so each first denial wakes every waiting
   query, which rescans its candidates. Fine at a desktop's query rate; a

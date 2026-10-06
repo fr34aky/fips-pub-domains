@@ -169,11 +169,9 @@ async fn handle(state: &Arc<State>, query: Vec<u8>) -> Option<Vec<u8>> {
             // stands in until a server or node is asked again — at least
             // the overrun TTL, at most the upstream's own.
             let cap = match result {
-                LookupResult::Unavailable { retry_in } => Some(
-                    u32::try_from(retry_in.as_secs())
-                        .unwrap_or(u32::MAX)
-                        .max(pubdom_core::OVERRUN_TTL_SECS),
-                ),
+                LookupResult::Unavailable { retry_in } => {
+                    Some(pubdom_core::unavailable_ttl(retry_in))
+                }
                 _ if overrun => Some(pubdom_core::OVERRUN_TTL_SECS),
                 _ => None,
             };

@@ -317,6 +317,17 @@ impl crate::resolver::TxtSource for MaybeTxt {
         }
     }
 
+    async fn lookup_with(
+        &self,
+        domain: &str,
+        first_denial: &(dyn Fn() + Sync),
+    ) -> (pubdom_core::policy::TxtLookup, Option<u32>) {
+        match self.current() {
+            Some(t) => t.lookup_with(domain, first_denial).await,
+            None => (pubdom_core::policy::TxtLookup::Unreachable, None),
+        }
+    }
+
     async fn probe(
         &self,
         domain: &str,

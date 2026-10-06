@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- With `plain_probe: false` the legacy answer is released on the first
+  *validated* denial, as the probe releases it on a plain one
+  (`TxtSource::lookup_with`); the decision still waits for every
+  upstream. Before, the setting also gave up the early release.
+
+### Added
+
+- `pubdom_core::unavailable_ttl(retry_in)`: the TTL cap for the legacy
+  answer of an unavailable name, for every host to share.
+
 ## [0.2.5] - 2026-10-06
 
 ### Changed

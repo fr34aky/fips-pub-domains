@@ -191,6 +191,19 @@ impl TxtVerifier {
     /// Ask every upstream in parallel and combine (module docs). The second
     /// value is the record TTL to cache a hit for, before the §5.6 cap.
     pub async fn lookup(&self, domain: &str) -> (TxtLookup, Option<u32>) {
+        self.lookup_with(domain, &|| {}).await
+    }
+
+    /// The validated lookup, calling `first_denial` when the first upstream
+    /// to answer returns a validated "no record" (`TxtSource::lookup_with`):
+    /// validated answers outrank the rest, so that denial already says
+    /// where the lookup is heading, though the decision waits for every
+    /// upstream (a record anywhere outranks a denial).
+    pub async fn lookup_with(
+        &self,
+        domain: &str,
+        first_denial: &(dyn Fn() + Sync),
+    ) -> (TxtLookup, Option<u32>) {
         let name = format!("{}.", txt_name(domain));
         let futs = self.resolvers.iter().map(|(ip, r)| {
             let name = name.clone();
@@ -205,7 +218,19 @@ impl TxtVerifier {
                 one
             }
         });
-        let answers: Vec<One> = futures::future::join_all(futs).await;
+        use futures::StreamExt;
+        let mut pending: futures::stream::FuturesUnordered<_> = futs.collect();
+        let mut answers = Vec::new();
+        while let Some(one) = pending.next().await {
+            if matches!(one, One::Miss { secure: true })
+                && !answers
+                    .iter()
+                    .any(|a| matches!(a, One::Miss { secure: true }))
+            {
+                first_denial();
+            }
+            answers.push(one);
+        }
         combine(&answers)
     }
 

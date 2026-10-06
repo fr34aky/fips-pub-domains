@@ -29,6 +29,19 @@ use std::time::Duration;
 pub trait TxtSource: Send + Sync {
     fn lookup(&self, domain: &str) -> impl Future<Output = (TxtLookup, Option<u32>)> + Send;
 
+    /// [`TxtSource::lookup`], calling `first_denial` when the first
+    /// upstream to answer returns a *validated* "no record" — the same
+    /// release a probe gives ([`Resolver::denied_by_an_upstream`]), for
+    /// hosts that run with `plain_probe: false`. The default never calls
+    /// it; a source that cannot tell says nothing early.
+    fn lookup_with(
+        &self,
+        domain: &str,
+        _first_denial: &(dyn Fn() + Sync),
+    ) -> impl Future<Output = (TxtLookup, Option<u32>)> + Send {
+        self.lookup(domain)
+    }
+
     /// A cheap, unvalidated look at whether the record exists at all, for
     /// a domain with no pin: almost every name a machine resolves has none,
     /// and proving that under DNSSEC costs the zone's keys and the chain
@@ -550,16 +563,16 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         let now = crate::now();
         let pins = self.pins.get(d);
         let online = self.is_online();
+        let first_denial = || {
+            self.denied
+                .put(d.to_string(), (), Duration::from_secs(10), now);
+            self.denial.notify_waiters();
+        };
         let (txt, txt_ttl) = if !online {
             (TxtLookup::Unreachable, None)
         } else if pins.is_empty() && (self.cfg.plain_probe || !self.cfg.dnssec) {
             // No pin to protect: a plain look first, the validated lookup
             // only when there is a record to validate.
-            let first_denial = || {
-                self.denied
-                    .put(d.to_string(), (), Duration::from_secs(10), now);
-                self.denial.notify_waiters();
-            };
             match self.txt.probe(d, &first_denial).await {
                 Probe::Absent { method } => (TxtLookup::Miss { method }, None),
                 Probe::Unreachable => (TxtLookup::Unreachable, None),
@@ -571,6 +584,10 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
                     self.txt.lookup(d).await
                 }
             }
+        } else if pins.is_empty() {
+            // No probe (`plain_probe: false`): the first validated denial
+            // releases the legacy answer the way a probe's would.
+            self.txt.lookup_with(d, &first_denial).await
         } else {
             self.txt.lookup(d).await
         };
@@ -1059,6 +1076,17 @@ mod tests {
                 Some(300),
             )
         }
+        async fn lookup_with(
+            &self,
+            domain: &str,
+            first_denial: &(dyn Fn() + Sync),
+        ) -> (TxtLookup, Option<u32>) {
+            let r = self.lookup(domain).await;
+            if matches!(r.0, TxtLookup::Miss { .. }) {
+                first_denial();
+            }
+            r
+        }
         async fn probe(&self, domain: &str, first_denial: &(dyn Fn() + Sync)) -> Probe {
             self.asked.lock().unwrap().push(format!("probe:{domain}"));
             let probe = self.probes.get(domain).copied().unwrap_or(Probe::Absent {
@@ -1241,13 +1269,10 @@ mod tests {
         let mut asked = r.txt.asked.lock().unwrap().clone();
         asked.sort();
         assert_eq!(asked, vec!["lookup:example.net", "lookup:www.example.net"]);
-        // No probe, so no early denial either: a host gets the legacy
-        // answer when the lookup returns, not before.
-        assert!(
-            r.denied
-                .get(&"example.net".to_string(), crate::now())
-                .is_none()
-        );
+        // The validated denials release the legacy answer as a probe's would.
+        tokio::time::timeout(Duration::from_secs(1), r.denied_by_an_upstream(&q))
+            .await
+            .expect("every candidate was denied, validated");
     }
 
     /// What the switch is for: the network answers a plain "no record",

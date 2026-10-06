@@ -111,10 +111,12 @@ Grouped by component. Each item says what, why, and where it stands.
   the log; the late reply then arrives as an "unsolicited mesh packet").
   Without a zone record covering the name that lookup ended in the
   legacy address for the record's TTL, with the server backed off for 5
-  minutes. Library side done (`LookupResult::Unavailable`, 5 s TTL on
-  that legacy answer, first backoff 20 s), on the desktop daemon; the
-  phone needs the new variant mapped to `Pending` with the next pin, and
-  a check on the device.
+  minutes. Done on both sides (`LookupResult::Unavailable { retry_in }`,
+  the legacy answer's TTL capped at the next retry, first backoff 20 s;
+  fips2go #74 pins it and forwards such a name as `Capped`), neither in
+  a release, and not yet seen on the device: the check is a fresh
+  connect, then a bound name in a browser, once right away and once
+  20 s later.
 - **No debug logging in release builds**, so the early release and
   first-lookup timings cannot be observed on a device; 0.9.3's speed-up
   was measured on the desktop only. A log-level setting, or one info

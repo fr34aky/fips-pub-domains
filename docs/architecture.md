@@ -46,7 +46,7 @@ application (spec §7: a name is never made unreachable by this code).
 | `pins` | `FilePinStore`: the JSON pin file, written atomically |
 | `proof` | DNSSEC proofs in claims: `build_chain` (the server collects the TXT RRset and the DNSKEY/DS chain to the root with the DO bit), `verify_chain` (RFC 4035 validation offline against hickory's built-in root anchors), `DnssecProofs`, the resolver's `ProofVerifier` |
 | `config` | the YAML config shared by daemon and CLI; `build_resolver()` |
-| `resolver` | `Resolver::lookup(query) → Answer | Passthrough` |
+| `resolver` | `Resolver::lookup(query) → Answer | Passthrough | Unavailable { retry_in }` |
 
 The resolver is generic over the TXT and claim sources (`TxtSource`,
 `ClaimSource`) so its tests inject tables instead of networks, and takes the
@@ -81,7 +81,10 @@ lookup(query)
                            answered, an ICMPv6 echo must come back within
                            1.5 s (spec §7) — fips drops traffic for unknown
                            nodes silently, so nothing else distinguishes them
-      NXDOMAIN           → NotOverFips → Passthrough
+      NXDOMAIN           → NotOverFips → Passthrough (settled; the zone record saying so too)
+      no server answers, no zone record, or the target answers no echo
+                         → Unavailable { retry_in }: the host gives the legacy
+                           answer with TTLs capped at retry_in (≥ 5 s)
   answer: CNAME + AAAA fd… for AAAA/ANY; CNAME only for A; NODATA for HTTPS/SVCB
 ```
 
@@ -126,7 +129,8 @@ re-publish every 24 h while serving.
 
 A forwarding resolver on loopback (`[::1]:5356`, `127.0.0.1:5356`) in front
 of **all** names: everything goes through `Resolver::lookup`; `Passthrough`
-is forwarded byte for byte to the upstreams (UDP, TCP on truncation);
+is forwarded byte for byte to the upstreams (UDP, TCP on truncation),
+`Unavailable` the same with the reply's TTLs capped at its `retry_in`;
 `.fips` goes to fips's responder, because in full mode the daemon is the
 only server the OS knows. `setup` writes the OS integration
 ([daemon.md](daemon.md)); the upstreams are followed through

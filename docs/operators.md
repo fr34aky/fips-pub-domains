@@ -132,7 +132,9 @@ _fips-dns.example.org.  TXT  "v=fips1 npub=<node B> port=5355"
 Each node publishes its own claim and zone record (`serve --publish`).
 Clients pin every server the record names, ask them in order, fail over
 when one does not answer, and retry a failed server after a growing
-backoff (5 min → 15 → 45 → 3 h). Names that point at `self` differ per
+backoff (20 s → 1 min → 3 → 9 → 27 → 81 min → 3 h); until then a
+name the failed server alone could answer gets the legacy answer, with a
+TTL no longer than the wait. Names that point at `self` differ per
 server — `www: self` on node A resolves to node A when A answers and to
 node B when only B does — so either keep such names identical in meaning
 (the same site on both nodes) or name the node explicitly.

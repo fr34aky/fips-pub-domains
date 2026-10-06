@@ -164,7 +164,19 @@ async fn handle(state: &Arc<State>, query: Vec<u8>) -> Option<Vec<u8>> {
             }
             Some(a)
         }
-        LookupResult::Passthrough => {
+        LookupResult::Passthrough | LookupResult::Unavailable { .. } => {
+            // Bound, but no server reachable right now: the legacy answer
+            // stands in until a server or node is asked again — at least
+            // the overrun TTL, at most the upstream's own.
+            let cap = match result {
+                LookupResult::Unavailable { retry_in } => Some(
+                    u32::try_from(retry_in.as_secs())
+                        .unwrap_or(u32::MAX)
+                        .max(pubdom_core::OVERRUN_TTL_SECS),
+                ),
+                _ if overrun => Some(pubdom_core::OVERRUN_TTL_SECS),
+                _ => None,
+            };
             let reply = match (fetched, legacy) {
                 (Some(reply), _) => reply,
                 (None, Some(l)) => l.await.ok().flatten(),
@@ -174,10 +186,10 @@ async fn handle(state: &Arc<State>, query: Vec<u8>) -> Option<Vec<u8>> {
                 // The lookup is still deciding: the stub must not keep the
                 // legacy address for the upstream's TTL (a parked wildcard
                 // gives a real address for 300 s) while it does.
-                Some(r) if overrun => Some(
-                    pubdom_core::synth::clamp_ttls(&r, pubdom_core::OVERRUN_TTL_SECS).unwrap_or(r),
-                ),
-                Some(r) => Some(r),
+                Some(r) => Some(match cap {
+                    Some(cap) => pubdom_core::synth::clamp_ttls(&r, cap).unwrap_or(r),
+                    None => r,
+                }),
                 None => forward::servfail(&query),
             }
         }

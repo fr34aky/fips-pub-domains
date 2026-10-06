@@ -242,8 +242,11 @@ claim for a public suffix (`ch`, `co.uk`) — use a bundled Public Suffix List.
 - The client keeps all of them pinned, in the order they were first
   pinned; the first is the primary. Step 3 asks the servers in that order
   and fails over to the next when one does not answer (§6); a server that
-  failed is skipped for a backoff window (5 minutes, tripling per
+  failed is skipped for a backoff window (20 seconds, tripling per
   consecutive failure, at most 3 hours) and tried again when it expires.
+  The first window is short because a first failure is most often the
+  mesh path still settling — a node that just joined has no session to
+  the server yet.
   Zone records (§3.3) from any of the servers are accepted, newest first.
 - Claims whose author the record does *not* name are ignored (online).
   Offline: the pinned servers; otherwise the claim with a valid DNSSEC
@@ -376,7 +379,14 @@ so this is accepted; the online rule (TXT first, §8) is unchanged.
   pinned server (§5.3); none left → fall back to the newest zone record
   (§3.3) by any of the pinned servers. Nothing has then proved
   any node reachable, so every target — the server's own node included —
-  must answer an echo before its address is handed out (§7).
+  must answer an echo before its address is handed out (§7). A zone
+  record that does not bind the name settles it: legacy. No zone record,
+  or a target that answers no echo, settles nothing: the legacy answer
+  stands in, and the resolver MUST cap its TTL at the time to the next
+  attempt (and at least a few seconds), so that the application asks
+  again once a server or node is retried instead of keeping the legacy
+  address for its own TTL — and does not ask every few seconds about a
+  server that has been down for hours.
 
 ### 6.1 The server
 

@@ -382,9 +382,11 @@ so this is accepted; the online rule (TXT first, §8) is unchanged.
   must answer an echo before its address is handed out (§7). A zone
   record that does not bind the name settles it: legacy. No zone record,
   or a target that answers no echo, settles nothing: the legacy answer
-  stands in, and the resolver MUST hand it out short-lived (seconds) so
-  that the application asks again once the servers are retried, instead
-  of keeping the legacy address for its TTL.
+  stands in, and the resolver MUST cap its TTL at the time to the next
+  attempt (and at least a few seconds), so that the application asks
+  again once a server or node is retried instead of keeping the legacy
+  address for its own TTL — and does not ask every few seconds about a
+  server that has been down for hours.
 
 ### 6.1 The server
 

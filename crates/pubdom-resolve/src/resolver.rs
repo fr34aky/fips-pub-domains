@@ -201,13 +201,14 @@ pub enum LookupResult {
     Passthrough,
     /// Over fips, but not now: the domain is bound and no server answered
     /// and no zone record or target node was reachable. The legacy answer
-    /// stands in, and a host MUST hand it out short-lived
-    /// ([`pubdom_core::OVERRUN_TTL_SECS`]): the servers are retried after
-    /// a short backoff, and the application must ask again by then rather
-    /// than keep the legacy address for its TTL. A node that just joined
-    /// the mesh sees this on its first lookup, before its session to the
-    /// server is up.
-    Unavailable,
+    /// stands in, and a host MUST cap its TTLs at `retry_in` (and at least
+    /// [`pubdom_core::OVERRUN_TTL_SECS`]): that is when a server or node
+    /// is asked again, and the application must ask again by then rather
+    /// than keep the legacy address for its own TTL — while a server
+    /// backed off for hours does not make it ask every few seconds. A node
+    /// that just joined the mesh sees this on its first lookup, before its
+    /// session to the server is up.
+    Unavailable { retry_in: Duration },
 }
 
 /// What step 3 came to.
@@ -216,13 +217,25 @@ enum Step3 {
     Node(Npub),
     /// The server, or the zone record, says the name is not over fips.
     NotOverFips,
-    /// Nobody could be asked or reached.
-    Unavailable,
+    /// Nobody could be asked or reached; the next attempt is in `retry_in`.
+    Unavailable {
+        retry_in: Duration,
+    },
 }
 
+/// How long a failed registration or echo is remembered — the
+/// `retry_in` of an unreachable target node.
+const UNREACHABLE_TTL: Duration = Duration::from_secs(30);
+
 impl Step3 {
+    /// A target that could not be delivered is retried with the echo cache.
     fn delivered(target: Option<Npub>) -> Self {
-        target.map_or(Step3::Unavailable, Step3::Node)
+        target.map_or(
+            Step3::Unavailable {
+                retry_in: UNREACHABLE_TTL,
+            },
+            Step3::Node,
+        )
     }
 }
 
@@ -265,7 +278,11 @@ pub struct Resolver<T: TxtSource, C: ClaimSource> {
     online: AtomicBool,
     decisions: TtlCache<String, CachedDecision>,
     step3: TtlCache<String, CachedStep3>,
-    registered: TtlCache<Npub, ()>,
+    /// Whether the local node could register a target's identity; a
+    /// failure is remembered for `UNREACHABLE_TTL`, like a failed echo, so
+    /// an application asking again within seconds does not wait out the
+    /// register timeout every time.
+    registered: TtlCache<Npub, bool>,
     /// Nodes that answered an echo recently (positive, 2 min) or did not
     /// (negative, 30 s): a browser asks A, AAAA and HTTPS for one name, and
     /// each would otherwise wait out the full echo budget.
@@ -492,7 +509,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         match self.step3(&q, &servers).await {
             Step3::Node(npub) => self.answer(&q, npub),
             Step3::NotOverFips => LookupResult::Passthrough,
-            Step3::Unavailable => LookupResult::Unavailable,
+            Step3::Unavailable { retry_in } => LookupResult::Unavailable { retry_in },
         }
     }
 
@@ -681,8 +698,10 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         )
     }
 
-    /// Step 3 (spec §6) plus the reachability rule (spec §7). `None` means
-    /// "not over fips" or failure — the caller passes through either way.
+    /// Step 3 (spec §6) plus the reachability rule (spec §7). `NotOverFips`
+    /// is settled (the server or the zone record said so) and passes
+    /// through for good; `Unavailable` is nobody reachable right now, and
+    /// the caller hands out the legacy answer only until the next attempt.
     async fn step3(&self, q: &Query, servers: &[Binding]) -> Step3 {
         // Same single-flight as `decision`: one mesh query per name, however
         // many record types the application asks for at once.
@@ -878,9 +897,21 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
     /// Every target has to be proven reachable — by an echo, or by having
     /// answered step 3 for itself moments ago — since the zone record says
     /// nothing about which nodes are up.
+    /// When the first of `servers` leaves its backoff window.
+    fn retry_in(&self, servers: &[Binding], now: u64) -> Duration {
+        servers
+            .iter()
+            .filter_map(|s| self.down.get(&s.npub, now))
+            .map(|d| Duration::from_secs(d.retry_at.saturating_sub(now)))
+            .min()
+            .unwrap_or(self.cfg.server_backoff)
+    }
+
     async fn via_zone_record(&self, q: &Query, servers: &[Binding]) -> Step3 {
         let Some(first) = servers.first() else {
-            return Step3::Unavailable;
+            return Step3::Unavailable {
+                retry_in: self.cfg.server_backoff,
+            };
         };
         let dom = &first.domain;
         let now = crate::now();
@@ -914,9 +945,11 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             }
         };
         // No zone record: nothing says whether the name is over fips, and
-        // the servers may answer in a moment.
+        // the servers are asked again when their backoff ends.
         let Some(zone) = zone else {
-            return Step3::Unavailable;
+            return Step3::Unavailable {
+                retry_in: self.retry_in(servers, crate::now()),
+            };
         };
         // The zone record is authoritative about which names are over
         // fips; one it does not bind is legacy for good.
@@ -968,17 +1001,20 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
 
     async fn ensure_registered(&self, npub: Npub) -> bool {
         let now = crate::now();
-        if self.registered.get(&npub, now).is_some() {
-            return true;
+        if let Some(known) = self.registered.get(&npub, now) {
+            return known;
         }
         let mesh = self.mesh.clone();
         let t = self.cfg.register_timeout;
         let ok = tokio::task::spawn_blocking(move || mesh.register(npub, t))
             .await
             .unwrap_or(false);
-        if ok {
-            self.registered.put(npub, (), Duration::from_secs(240), now);
-        }
+        let ttl = if ok {
+            Duration::from_secs(240)
+        } else {
+            UNREACHABLE_TTL
+        };
+        self.registered.put(npub, ok, ttl, now);
         ok
     }
 }
@@ -1644,12 +1680,21 @@ mod tests {
             false,
         );
         let q = build_query(1, "git.example.org", QTYPE_AAAA).unwrap();
-        // The node may come up: the legacy answer stands in, short-lived.
-        assert_eq!(r.lookup(&q).await, LookupResult::Unavailable);
+        // The node may come up: the legacy answer stands in, for as long
+        // as the failed echo is remembered.
+        assert_eq!(
+            r.lookup(&q).await,
+            LookupResult::Unavailable {
+                retry_in: UNREACHABLE_TTL
+            }
+        );
         // The verdict is remembered: the A query that follows does not
         // wait out another echo budget.
         let q = build_query(2, "git.example.org", QTYPE_A).unwrap();
-        assert_eq!(r.lookup(&q).await, LookupResult::Unavailable);
+        assert!(matches!(
+            r.lookup(&q).await,
+            LookupResult::Unavailable { .. }
+        ));
         assert_eq!(
             mesh.echoes.lock().unwrap().len(),
             1,
@@ -1800,7 +1845,10 @@ mod tests {
         // www → the server itself, which is down: legacy, but only until
         // the server is back.
         let q = build_query(2, "www.example.org", QTYPE_AAAA).unwrap();
-        assert_eq!(r.lookup(&q).await, LookupResult::Unavailable);
+        assert!(matches!(
+            r.lookup(&q).await,
+            LookupResult::Unavailable { .. }
+        ));
         // mail → legacy by the zone; unknown → not in the zone. The zone
         // record is authoritative about those: legacy for good.
         assert_eq!(
@@ -1967,6 +2015,79 @@ mod tests {
             to_primary, 4,
             "the primary is tried again (udp + retry) on the second lookup"
         );
+    }
+
+    /// The case a node that just joined the mesh is in: the server does
+    /// not answer, no zone record was ever published. Legacy, but only
+    /// until the server is retried — and once the server has been down for
+    /// hours, for hours.
+    #[tokio::test]
+    async fn server_down_without_a_zone_record_is_unavailable_until_the_retry() {
+        let pins: Arc<MemoryPinStore> = Arc::new(MemoryPinStore::new());
+        pins.put(Binding {
+            domain: "example.org".into(),
+            npub: npub(1),
+            port: 5355,
+            method: Method::Dnssec,
+            verified_at: 1,
+        });
+        let mesh = Arc::new(FakeMesh {
+            queries: Mutex::new(vec![]),
+            registered: Mutex::new(vec![]),
+            echoes: Mutex::new(vec![]),
+            unreachable: vec![],
+            down: vec![npub(1)],
+        });
+        let r = Resolver::new(
+            ResolverConfig::default(),
+            pins,
+            FakeTxt(Mutex::new(HashMap::new())),
+            FakeClaims(vec![], Mutex::new(vec![])),
+            mesh.clone(),
+        );
+        r.set_online(false);
+        let q = build_query(1, "www.example.org", QTYPE_AAAA).unwrap();
+        let LookupResult::Unavailable { retry_in } = r.lookup(&q).await else {
+            panic!("no server, no zone record: unavailable, not settled");
+        };
+        assert_eq!(
+            retry_in,
+            Duration::from_secs(20),
+            "the first backoff window"
+        );
+        assert_eq!(mesh.queries.lock().unwrap().len(), 2, "udp and its retry");
+        // Within the window the server is not asked again, and the answer
+        // says how long is left.
+        let LookupResult::Unavailable { retry_in } = r.lookup(&q).await else {
+            panic!("still unavailable");
+        };
+        assert!(retry_in <= Duration::from_secs(20) && retry_in > Duration::ZERO);
+        assert_eq!(
+            mesh.queries.lock().unwrap().len(),
+            2,
+            "in its backoff window"
+        );
+        // Down for good: the window grows, and so does the legacy answer's
+        // life — nobody re-asks every five seconds for hours.
+        let now = crate::now();
+        for _ in 0..6 {
+            r.down.remove(&npub(1));
+            r.mark_down(npub(1), now);
+            let d = r.down.get(&npub(1), now).unwrap();
+            r.down.put(
+                npub(1),
+                Down {
+                    failures: d.failures,
+                    retry_at: now + 10800,
+                },
+                Duration::from_secs(20000),
+                now,
+            );
+        }
+        let LookupResult::Unavailable { retry_in } = r.lookup(&q).await else {
+            panic!("still unavailable");
+        };
+        assert!(retry_in > Duration::from_secs(10000), "{retry_in:?}");
     }
 
     #[test]

@@ -16,8 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retried after 20 s instead of 5 minutes (still tripling per failure up
   to 3 hours). A node that just joined the mesh has no session to the
   server yet, so its first lookup used to fail step 3 and the
-  application kept the legacy address for minutes. `fips-pubdom lookup`
-  prints the case. Library hosts match the new variant.
+  application kept the legacy address for minutes. The cap follows the
+  next retry (`retry_in`), so a server down for hours does not make the
+  application ask every five seconds. A target node the local node could
+  not register is remembered for 30 s, like a failed echo.
+  `fips-pubdom lookup` prints the case. Library hosts must match the new
+  variant (fips2go: map it to the short-lived legacy answer).
 
 ### Added
 

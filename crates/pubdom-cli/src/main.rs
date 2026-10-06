@@ -107,8 +107,9 @@ async fn main() -> Result<()> {
             let q = synth::build_query(1, &name, qtype(&qt)?).ok_or_else(|| anyhow!("bad name"))?;
             match r.lookup(&q).await {
                 LookupResult::Passthrough => println!("{name}: not over fips (legacy passthrough)"),
-                LookupResult::Unavailable => println!(
-                    "{name}: over fips, but no server or target node reachable now (legacy passthrough, short-lived)"
+                LookupResult::Unavailable { retry_in } => println!(
+                    "{name}: over fips, but no server or target node reachable now (legacy passthrough for {} s)",
+                    retry_in.as_secs()
                 ),
                 LookupResult::Answer(a) => {
                     let p = simple_dns::Packet::parse(&a)?;

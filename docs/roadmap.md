@@ -1,132 +1,168 @@
 # Roadmap
 
-## Done — phase 1
+What is done, what is next, what is known to be imperfect, and what is
+undecided. The source of truth for the state of the project: when
+something is finished or verified it is moved here and in
+[testing.md](testing.md), not noted elsewhere. Dates are absolute.
 
-- Claims (kind 37197), the `_fips-dns` TXT verifier with DNSSEC, pinning,
-  the mesh lookup with `CNAME <npub>.fips`, unverified bindings refused
-  (opt-in marker offline).
-- `fips-pubdom-server`, `fips-pubdomd` (Linux, systemd-resolved),
-  `fips-pubdom`; mesh relays for offline discovery.
-- fips2go: resolver in the VPN's DNS proxy, UDP over smoltcp, Settings
-  switch (#55; pins bumped in #56–#58); mesh relays reached through a
-  loopback proxy over the in-process TCP stack, configured in Settings
-  (#59). Device-verified:
-  pinned, first-visit discovery, offline, and — offline with no pins — a
-  domain verified from its claim's DNSSEC proof via a relay on the mesh.
-- Live tests through level 5 ([testing.md](testing.md)).
-- Linux `setup` backends beyond systemd-resolved: NetworkManager
-  (`dns=none`, the daemon on port 53, NM's server list followed; verified
-  live on Ubuntu 22.04, [testing.md](testing.md) level 6), standalone
-  dnsmasq (`no-resolv` + `server=`) and plain `resolv.conf` (tests in a
-  temporary root only so far); detected, recorded for `teardown`, which
-  restores resolv.conf and the config.
-- Zone records (kind 37199): published by the server with the claim, used
-  by the resolver when the server does not answer.
-- Redundant servers: every server the TXT record names is pinned; failover
-  with a growing backoff.
-- DNSSEC proofs in claims: the server attaches the signed TXT record and
-  its chain to the root, re-published before the signatures expire; an
-  offline client with no pin verifies a domain from the proof alone
-  (verified live, [testing.md](testing.md) level 4d). Signature lifetime,
-  unsigned zones and the built-in root anchors are the limits (spec §5.5).
+## Done
 
-- Attestations (kind 37198) and the trust setting *k*: witnesses listed
-  in the config, `fips-pubdom attest` to be one; used offline for a domain
-  with no pin and no proof, pinned as `attested`. On the phone: the
-  witness list and *k* in fips2go's Settings (#62), the DNSSEC switch
-  and "Forget verified domains" (#65). Verified live on the desktop
-  ([testing.md](testing.md) level 4e) and on the phone (level 5c): a
-  witness's attestation on the mesh relay, an offline client with no pin
-  and no usable proof binding the server as `attested`.
+Phase 1, through fips-pub-domains 0.2.4 (2026-10-04) and fips2go 0.9.3
+(2026-10-05):
+
+- **Protocol**: claims (kind 37197), attestations (37198), zone records
+  (37199); the `_fips-dns` TXT verifier with DNSSEC; pinning; the mesh
+  lookup answered `CNAME <npub>.fips`; unverified bindings refused
+  (opt-in marker offline). DNSSEC proofs in claims let an offline client
+  with no pin verify a domain from the claim alone; attestations by a
+  configured witness list (threshold *k*) cover domains with no proof. A
+  claimant is no witness for its own domain.
+- **Desktop**: `fips-pubdom-server` (one process per port, every zone
+  file, publishes claim, proof and zone record), `fips-pubdomd` with
+  `setup`/`teardown` for systemd-resolved, NetworkManager, standalone
+  dnsmasq and plain `resolv.conf`; `fips-pubdom` (`lookup`, `verify`,
+  `claims`, `pins`, `attest`, `attestations`). Redundant servers with
+  failover and backoff; zone records used when no server answers; the
+  upstreams file followed as the OS rewrites it; a plain probe before the
+  validated TXT lookup for unpinned domains, the legacy answer fetched
+  alongside and released on the first upstream's denial
+  (`plain_probe: false` restores the validated denial).
+- **Phone (fips2go)**: the resolver inside the VPN's DNS proxy; UDP over
+  smoltcp for step 3; mesh relays through a loopback proxy over the
+  in-process TCP stack; Settings for the feature, mesh relays, witnesses,
+  *k*, DNSSEC, "Forget verified domains", "Trust my Mesh names as
+  witnesses"; the Internet-validated flag shortens the TXT wait and
+  gates the plain probe; the legacy answer fetched alongside and
+  released early as on the desktop.
+- **Verified live** ([testing.md](testing.md)): levels 1–6 — server from
+  a peer, claim on a relay, daemon on a second and third node, a name
+  pointing at no node, a server down, redundant servers, offline from
+  the DNSSEC proof, attestations (desktop and phone), the phone online,
+  offline by witness and offline for a domain never seen, the
+  NetworkManager backend, first lookups and the boot window.
 
 ## Next
 
-1. **Registration and the NIP** — submitted 2026-09-28:
-   [registry-of-kinds #16](https://github.com/nostr-protocol/registry-of-kinds/pull/16)
-   and [nips #2487](https://github.com/nostr-protocol/nips/pull/2487)
-   (NIP-DB). Until merged, the kind numbers are provisional; if others are
-   assigned, `pubdom-core::KIND_*` and the docs follow.
-2. Done: **default witnesses on the phone** from the Mesh names (the
-   sync upstream and the hosts-file entries), opt-in (fips2go #66) — which
-   is what made the policy exclude a domain's own servers as witnesses
-   (#17).
-3. **Daemon backends**: macOS (launchd + `networksetup`) and Windows
-   (service + adapter DNS); restricted per-domain mode; OpenWrt and
-   pfSense packaging. Implemented and unit-tested; seen live only on a
-   scratch instance ([testing.md](testing.md) level 3d), not under
-   resolved or NetworkManager themselves: the upstreams file is followed
-   as they rewrite it, the 30 s poll kept as the fallback (the snapshot
-   backends are static by nature). Done on Linux: NetworkManager, standalone dnsmasq and plain
-   `resolv.conf` beside systemd-resolved, with detection and a recorded
-   teardown.
-4. **Phone gaps**: TCP fallback for step 3 over the smoltcp stack;
-   upstream ports kept for the TXT verifier. Done: the `dnssec` switch
-   (fips2go #65); the Internet flag from the VpnService (fips2go #67,
-   `MaybeTxt::set_timeout`): without a validated network the TXT wait is
-   500 ms, so a first offline lookup fits the budget — verified on the
-   phone ([testing.md](testing.md) level 5c).
+Grouped by component. Each item says what, why, and where it stands.
 
-## Known gaps and interactions
+### Protocol and registration
 
-- Browsers with their own encrypted DNS (Firefox TRR, Chrome "secure DNS
-  with a provider") bypass the system resolver. Answering the canary
-  `use-application-dns.net` with NXDOMAIN disables Firefox's automatic DoH;
-  enterprise policies can still override. Not implemented yet.
-- The reachability check is an ICMPv6 echo (1.5 s budget) because fips
-  drops traffic for unknown nodes silently. fips's own `probe` control
-  command gives a definitive verdict (`bloom_miss` in ~60 ms) and would be
-  the better source on the desktop, but it is a mutating command on the
-  control socket and not reachable from fips2go's shim; worth wiring in
-  where available.
+- **Kind registration and the NIP** — submitted 2026-09-28:
+  [registry-of-kinds #16](https://github.com/nostr-protocol/registry-of-kinds/pull/16)
+  and [nips #2487](https://github.com/nostr-protocol/nips/pull/2487)
+  (NIP-DB). Until merged the kind numbers are provisional; if others are
+  assigned, `pubdom-core::KIND_*` and the docs follow. #2487 does not yet
+  carry the rule from #17 that a claimant is no witness for its domain
+  (spec §3.2); adding it is the maintainer's call, the PR being outside
+  this repository.
+
+### Desktop resolver
+
+- **Release the legacy answer on the first *validated* denial** when
+  `plain_probe: false`. Today that setting also loses the early release,
+  so every first lookup waits for the slowest upstream; the validated
+  lookup would have to report its first secure denial through the same
+  hook the probe uses. Worth doing if anyone runs with the switch.
+- **Hedged forwarding.** The daemon forwards to the first upstream and
+  tries the next only after a 2 s timeout, as a stub resolver would. A
+  first upstream that is slow rather than dead — the reference machine's
+  router takes up to 400 ms on uncached names and drops some queries
+  under bursts — is now what a first lookup costs
+  ([testing.md](testing.md) level 3d). Asking the second after a short
+  delay would help, but changes which server's answer wins on a
+  split-horizon network. Undecided.
+- **A shorter retry when DNS fails while believed online.** Every
+  upstream timing out, or answers failing validation (a router stripping
+  DNSSEC does that for every zone under a signed TLD, unsigned domains
+  included), sends an unpinned domain to the mesh relays and caches the
+  decision for an hour. A shorter TTL recovers sooner from a hiccup but
+  asks the relays more often. Undecided.
+- **fips's `probe` command for reachability.** The echo through the
+  mesh (1.5 s budget) exists because fips drops traffic for unknown
+  nodes silently; `probe` on the control socket answers definitively
+  (`bloom_miss` in ~60 ms) and would be better where it is available —
+  the desktop, not the phone's shim. It is a mutating command.
+- **One wake-up per denial.** `Resolver::denied_by_an_upstream` uses one
+  `Notify` for all domains, so each first denial wakes every waiting
+  query, which rescans its candidates. Fine at a desktop's query rate; a
+  per-domain signal if it ever shows in a profile.
+- **Firefox DoH canary.** Browsers with their own encrypted DNS (Firefox
+  TRR, Chrome "secure DNS with a provider") bypass the system resolver.
+  Answering `use-application-dns.net` with NXDOMAIN disables Firefox's
+  automatic DoH; enterprise policies still override. Whether the daemon
+  should do that in full mode, or leave it to the user per browser, is
+  an open question below.
+
+### Phone (fips2go)
+
+- **First lookup right after connecting.** The mesh session to the
+  domain's server is not up yet when the first step 3 query goes out, so
+  it times out and the zone record answers instead (seen 2026-10-05 in
+  the log; the late reply then arrives as an "unsolicited mesh packet").
+  Without a zone record covering the name that lookup ends in the legacy
+  address, which the browser keeps for the record's TTL. A retry of step
+  3 after the session is established, or a short TTL on a legacy answer
+  given while the server is still unreachable, would close it.
+- **No debug logging in release builds**, so the early release and
+  first-lookup timings cannot be observed on a device; 0.9.3's speed-up
+  was measured on the desktop only. A log-level setting, or one info
+  line per first lookup with its timing, would fix that.
+- **A thread per unpinned query**, also when the decision is cached, and
+  a second copy of the release-and-race logic (the daemon has it as one
+  `select!`, the proxy as blocking threads). A shared helper in
+  `pubdom-resolve` would need an async DNS proxy on the phone; avoiding
+  the thread needs a "nothing to decide" query on the library.
+- **TCP fallback for step 3** over the smoltcp stack. Low value: a step 3
+  answer is one CNAME and never truncates.
+- **Upstream ports** kept for the TXT verifier (the shim hands the
+  library addresses only).
+- Process: GitHub's AI code scanning fails on every fips2go pull request
+  with a quota error since 2026-10-05; it is not a required check and
+  says nothing about the change.
+
+### Platforms and packaging
+
+- **macOS** (launchd + `networksetup` or `/etc/resolver/`) and
+  **Windows** (service + NRPT) `setup` backends; the binaries build there
+  and ship in the release archives, the wiring is by hand
+  ([platforms.md](platforms.md)).
+- **Restricted per-domain mode**, OpenWrt and pfSense packaging.
+- **Not yet run live**: the standalone dnsmasq and plain `resolv.conf`
+  backends (tests in a temporary root only), and the upstreams watcher
+  under systemd-resolved or NetworkManager themselves (seen on a scratch
+  instance only, [testing.md](testing.md) level 3d).
+
+## Behaviour worth knowing
+
+By design, not on the list to change:
+
+- A first visit to a bound domain does not survive a forged plain "no
+  record" by way of the mesh relays (spec §5.1) unless `plain_probe:
+  false` restores the validated denial at its cost
+  ([daemon.md](daemon.md)). On the phone the probe is already off
+  whenever the Internet is not validated, and there is no switch.
 - Once an `fd…` address has been handed to an application, DNS is out of
   the path: a later connection failure is only re-decided at the next
   lookup (30 s TTL).
-- On systemd-resolved, a link search domain equal to a bound domain shadows
-  the daemon ([daemon.md](daemon.md), Troubleshooting).
-- When DNS fails while the node believes it is online (every upstream
-  timing out, or answers failing DNSSEC validation — a router stripping
-  DNSSEC records does that for every zone under a signed TLD, unsigned
-  domains included, since the proof of an insecure delegation is stripped
-  too), an unpinned domain is
-  looked up on the mesh relays and the decision is cached for an hour.
-  A shorter retry would recover sooner from a hiccup but ask the relays
-  more often; the balance is open.
+- On systemd-resolved, a link search domain equal to a bound domain
+  shadows the daemon ([daemon.md](daemon.md), Troubleshooting).
 - Online verification is unaffected by DNSSEC key rollovers done properly
-  (every lookup validates the live chain; the pin stores no key). A broken
-  rollover makes validation *bogus*, which counts as an unreachable
-  upstream — pins keep working, nothing is downgraded to unsigned `dns`,
-  nothing is unpinned.
+  (every lookup validates the live chain; the pin stores no key). A
+  broken rollover makes validation *bogus*, which counts as an
+  unreachable upstream — pins keep working, nothing is downgraded to
+  unsigned `dns`, nothing is unpinned.
 - Two independent upstream resolvers are not always available (one
   DHCP-provided resolver is common on phones); the verification is then
-  `dns-single`, and a later two-resolver or DNSSEC verification upgrades the
-  pin.
-- The daemon forwards to the first upstream and tries the next only on
-  a 2 s timeout, as a stub resolver would; a first upstream that is slow
-  rather than dead is what a first lookup now costs. Asking the second
-  after a short delay would help, but changes which server's answer wins
-  on a split-horizon network; open.
-- A first visit no longer survives a forged "no record" by way of the
-  mesh relays (spec §5.1) unless `plain_probe: false` restores the
-  validated denial at its old cost ([daemon.md](daemon.md)). The phone
-  has no switch for it; there the probe is already off whenever the
-  Internet is not validated.
-- The phone has the plain probe (fips2go #70, pinned at 0.2.4), used
-  only while Android reports a validated Internet: without one, a router
-  with no uplink answering "no record" would end the lookup before the
-  mesh-only path. Fetching the legacy answer alongside the decision and
-  releasing it on the first denial is in fips2go 0.9.3 (#72); on the
-  phone it was checked to work, its speed-up not measured (the release
-  build does not log at debug).
-- Clippy is not available on the reference machine (no rustup toolchain);
-  CI runs it with `-D warnings`.
+  `dns-single`, and a later two-resolver or DNSSEC verification upgrades
+  the pin.
 
 ## Open questions
 
-- Should the daemon in full mode also answer the Firefox DoH canary, or is
+- Should the daemon in full mode answer the Firefox DoH canary, or is
   that the user's call per browser?
 - Relay selection for claims: the node's own relay list is used today. A
   curated set of "claim relays" might be worth publishing once there are
   more than a handful of domains.
 - Whether a domain's server should be *required* to run a mesh relay
-  carrying its own claim, making every bound domain discoverable offline by
-  anyone who knows the server.
+  carrying its own claim, making every bound domain discoverable offline
+  by anyone who knows the server.

@@ -125,7 +125,7 @@ offline discovery. [docs/android.md](docs/android.md).
 | [docs/android.md](docs/android.md) | the fips2go integration and its limits |
 | [docs/platforms.md](docs/platforms.md) | one resolver on every OS: what is platform-specific and where |
 | [docs/testing.md](docs/testing.md) | the test ladder, with commands and expected output |
-| [docs/roadmap.md](docs/roadmap.md) | phases 2+, open questions, known gaps |
+| [docs/roadmap.md](docs/roadmap.md) | done, next (per component), behaviour by design, open questions |
 | [docs/design-history.md](docs/design-history.md) | how the design got here and what was rejected |
 
 ## Building

@@ -36,7 +36,7 @@ the Android-specific parts that already live there (`shim/src/names.rs`,
   so. Done on the user's word: the demo domain's claim on public relays,
   registry-of-kinds #16, nips #2487 (NIP-DB), the v0.1.0, v0.2.0 and
   v0.2.1 tags (2026-09-28), v0.2.2 and v0.2.3 (2026-10-01), v0.2.4
-  (2026-10-04). Tagging a release still needs the user's explicit word each time.
+  (2026-10-04), v0.2.5 (2026-10-06). Tagging a release still needs the user's explicit word each time.
 - No `cfg(target_os)` in `pubdom-core` or `pubdom-resolve` (CI enforces).
 - `cargo test --workspace` must stay green; the policy tables in
   `pubdom-core` are the place to add a case before changing behaviour.

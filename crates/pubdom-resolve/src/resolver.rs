@@ -1978,7 +1978,7 @@ mod tests {
             vec![],
             false,
         );
-        // Defaults: 20 s — the first failure is usually a mesh path still
+        // Defaults: 20 s — a first failure is usually a mesh path still
         // settling — then three times as long, up to 3 h.
         let mut now = 1_000;
         let mut windows = Vec::new();
@@ -1990,6 +1990,13 @@ mod tests {
             now = d.retry_at;
         }
         assert_eq!(windows, vec![20, 60, 180, 540, 1620, 4860]);
+        r.mark_down(npub(1), now);
+        assert_eq!(
+            r.down.get(&npub(1), now).unwrap().retry_at - now,
+            10800,
+            "capped"
+        );
+        now += 10800;
         // Concurrent lookups of other names failing on the same outage
         // count once.
         r.mark_down(npub(1), now - 1);
@@ -2004,7 +2011,7 @@ mod tests {
         // An answer clears the streak.
         r.down.remove(&npub(1));
         r.mark_down(npub(1), now);
-        assert_eq!(r.down.get(&npub(1), now).unwrap().retry_at - now, 300);
+        assert_eq!(r.down.get(&npub(1), now).unwrap().retry_at - now, 20);
     }
 
     #[tokio::test]

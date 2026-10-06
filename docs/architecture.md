@@ -105,8 +105,10 @@ decision is in, instead of keeping the upstream's address for its TTL.
 
 An ordinary name — no pin, no record — costs one plain TXT query per
 candidate domain and upstream, all at once, and the daemon does not hold
-its answer back for the slowest of them: the legacy answer is fetched
-alongside the lookup (not for a name under a pinned domain, which the
+its answer back for the slowest of them: the lookup is polled once (a
+cached decision, a name that is no hostname or a record type never over
+fips settle there, with nothing else started), then the legacy answer is
+fetched alongside it (not for a name under a pinned domain, which the
 upstream need not hear of), and `Resolver::denied_by_an_upstream`
 releases it once one upstream has denied the record for every candidate.
 If the decision is not in by then the answer goes out with the overrun

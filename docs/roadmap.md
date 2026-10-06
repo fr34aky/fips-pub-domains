@@ -93,6 +93,16 @@ Grouped by component. Each item says what, why, and where it stands.
   should do that in full mode, or leave it to the user per browser, is
   an open question below.
 
+### Domain server
+
+- **A web UI to configure the server** — wanted by the maintainer
+  (2026-10-06): zone files, the TXT record to set, publishing the claim,
+  relays and witnesses, from a browser instead of hand-written YAML,
+  `server.env` and systemd. Scope to settle first: served on the node's
+  fips address only or on the LAN too, and how it authenticates. Until
+  then, keep the server's configuration in files it can read back and
+  rewrite (`/etc/fips-pubdom/`), not in unit files or flags.
+
 ### Phone (fips2go)
 
 - **First lookup right after connecting.** The mesh session to the

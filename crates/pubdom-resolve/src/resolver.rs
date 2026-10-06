@@ -405,22 +405,6 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         self.pins.as_ref()
     }
 
-    /// Whether every domain `query`'s name could belong to has a cached
-    /// decision, so [`Resolver::lookup`] settles the domain part without
-    /// asking anyone (step 3 may still run for a bound name). A host that
-    /// fetches the legacy answer alongside the lookup can skip that for
-    /// such a name: the lookup is back before the upstream would be.
-    pub fn decisions_cached(&self, query: &[u8]) -> bool {
-        let now = crate::now();
-        synth::parse_query(query).is_some_and(|q| {
-            let candidates = domain::candidates(&q.name);
-            !candidates.is_empty()
-                && candidates
-                    .iter()
-                    .all(|d| self.decisions.get(&d.to_string(), now).is_some())
-        })
-    }
-
     /// Whether any domain `query`'s name could belong to is pinned. A host
     /// uses this to fetch the legacy answer alongside the lookup for names
     /// that are almost certainly not over fips, without telling the
@@ -1169,14 +1153,12 @@ mod tests {
             vec![],
         );
         let q = build_query(1, "www.example.net", QTYPE_AAAA).unwrap();
-        assert!(!r.decisions_cached(&q), "nothing decided yet");
         assert_eq!(r.lookup(&q).await, LookupResult::Passthrough);
         let mut asked = r.txt.asked.lock().unwrap().clone();
         asked.sort();
         assert_eq!(asked, vec!["probe:example.net", "probe:www.example.net"]);
         assert!(r.claims.1.lock().unwrap().is_empty());
         assert!(!r.has_pin_for(&q));
-        assert!(r.decisions_cached(&q), "both candidates decided");
         // … and a host waiting to release the legacy answer is let go.
         tokio::time::timeout(Duration::from_secs(1), r.denied_by_an_upstream(&q))
             .await

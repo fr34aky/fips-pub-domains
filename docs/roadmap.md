@@ -131,8 +131,9 @@ Grouped by component. Each item says what, why, and where it stands.
 - **A second copy of the release-and-race logic** (the daemon has it as
   one `select!`, the proxy as blocking threads); a shared helper in
   `pubdom-resolve` would need an async DNS proxy on the phone. The
-  thread per unpinned query is skipped where every candidate's decision
-  is cached (`Resolver::decisions_cached`, with the next pin).
+  daemon starts the legacy fetch only after one poll of the lookup
+  found it pending; the phone's thread per query should follow the
+  same rule (the lookup tells the proxy when to start it).
 - **TCP fallback for step 3** over the smoltcp stack. Low value: a step 3
   answer is one CNAME and never truncates.
 - **Upstream ports** kept for the TXT verifier (the shim hands the

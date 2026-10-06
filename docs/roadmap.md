@@ -58,10 +58,12 @@ Grouped by component. Each item says what, why, and where it stands.
 
 ### Desktop resolver
 
-- Done: **the legacy answer is released on the first *validated*
-  denial** when `plain_probe: false` (`TxtSource::lookup_with`), so the
-  setting costs the validated denial, not the wait for the slowest
-  upstream.
+- Done: **the validated lookup releases the legacy answer on its first
+  denial** too (`TxtSource::lookup_with`), so `plain_probe: false` costs
+  the validated decision, not the wait for the slowest upstream. A
+  `TxtSource` wrapper must forward `lookup_with` and `probe`, or it
+  silently loses both (fips2go's `PhoneTxt` forwards `probe` only; its
+  lookups run with the probe, so nothing is lost there today).
 - **Hedged forwarding.** The daemon forwards to the first upstream and
   tries the next only after a 2 s timeout, as a stub resolver would. A
   first upstream that is slow rather than dead — the reference machine's

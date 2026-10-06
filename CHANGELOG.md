@@ -9,10 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- With `plain_probe: false` the legacy answer is released on the first
-  *validated* denial, as the probe releases it on a plain one
-  (`TxtSource::lookup_with`); the decision still waits for every
-  upstream. Before, the setting also gave up the early release.
+- With `plain_probe: false` (and for a `TxtSource` with no probe) the
+  validated lookup releases the legacy answer on the first upstream's
+  "no record", as the probe does (`TxtSource::lookup_with`); the decision
+  still waits for every upstream, validated answers outranking the rest.
+  Before, the setting also gave up the early release.
 
 ### Added
 

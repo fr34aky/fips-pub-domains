@@ -30,10 +30,13 @@ pub trait TxtSource: Send + Sync {
     fn lookup(&self, domain: &str) -> impl Future<Output = (TxtLookup, Option<u32>)> + Send;
 
     /// [`TxtSource::lookup`], calling `first_denial` when the first
-    /// upstream to answer returns a *validated* "no record" — the same
-    /// release a probe gives ([`Resolver::denied_by_an_upstream`]), for
-    /// hosts that run with `plain_probe: false`. The default never calls
-    /// it; a source that cannot tell says nothing early.
+    /// upstream to answer says "no record" before any has produced a
+    /// record — the same release a probe gives
+    /// ([`Resolver::denied_by_an_upstream`]), for lookups that run without
+    /// a probe. The decision still waits for every upstream, validated
+    /// answers outranking the rest; only the legacy answer stops waiting.
+    /// The default never calls it; a source that cannot tell says nothing
+    /// early. A wrapper must forward this, or it loses the release.
     fn lookup_with(
         &self,
         domain: &str,
@@ -107,9 +110,21 @@ pub trait ClaimSource: Send + Sync {
     ) -> impl Future<Output = Vec<Event>> + Send;
 }
 
+// Every method forwarded: a wrapper that forwards `lookup` alone silently
+// loses the probe and the early release (the trait's defaults say nothing).
 impl TxtSource for TxtVerifier {
     async fn lookup(&self, domain: &str) -> (TxtLookup, Option<u32>) {
         TxtVerifier::lookup(self, domain).await
+    }
+    async fn lookup_with(
+        &self,
+        domain: &str,
+        first_denial: &(dyn Fn() + Sync),
+    ) -> (TxtLookup, Option<u32>) {
+        TxtVerifier::lookup_with(self, domain, first_denial).await
+    }
+    async fn probe(&self, domain: &str, first_denial: &(dyn Fn() + Sync)) -> Probe {
+        TxtVerifier::probe(self, domain, first_denial).await
     }
 }
 
@@ -576,21 +591,28 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             match self.txt.probe(d, &first_denial).await {
                 Probe::Absent { method } => (TxtLookup::Miss { method }, None),
                 Probe::Unreachable => (TxtLookup::Unreachable, None),
-                Probe::Present | Probe::Unknown => {
+                Probe::Present => {
                     // A record after all (a slower upstream had it): the
                     // first one's denial must not keep releasing legacy
                     // answers while the record is verified.
                     self.denied.remove(&d.to_string());
                     self.txt.lookup(d).await
                 }
+                // Nothing cheap was learned: the validated lookup releases
+                // on its own first denial.
+                Probe::Unknown => self.txt.lookup_with(d, &first_denial).await,
             }
         } else if pins.is_empty() {
-            // No probe (`plain_probe: false`): the first validated denial
-            // releases the legacy answer the way a probe's would.
+            // No probe (`plain_probe: false`): the first denial releases the
+            // legacy answer the way a probe's would.
             self.txt.lookup_with(d, &first_denial).await
         } else {
             self.txt.lookup(d).await
         };
+        if matches!(txt, TxtLookup::Hit { .. }) {
+            // A record outranks whatever denial was released on.
+            self.denied.remove(&d.to_string());
+        }
         let (events, att_events) = match &txt {
             // The privacy gate (spec §8): relays only after a TXT hit …
             TxtLookup::Hit { .. } => (
@@ -1240,7 +1262,7 @@ mod tests {
     }
 
     /// `plain_probe: false`: nothing is probed, every candidate gets the
-    /// validated lookup, and no early denial releases the legacy answer.
+    /// validated lookup, whose first denial releases the legacy answer.
     #[tokio::test]
     async fn without_the_plain_probe_every_lookup_is_validated() {
         let mesh = Arc::new(FakeMesh {
@@ -1269,10 +1291,13 @@ mod tests {
         let mut asked = r.txt.asked.lock().unwrap().clone();
         asked.sort();
         assert_eq!(asked, vec!["lookup:example.net", "lookup:www.example.net"]);
-        // The validated denials release the legacy answer as a probe's would.
-        tokio::time::timeout(Duration::from_secs(1), r.denied_by_an_upstream(&q))
-            .await
-            .expect("every candidate was denied, validated");
+        // The lookups' denials release the legacy answer as a probe's would
+        // (the marks themselves: the cached decisions would satisfy a
+        // waiter regardless).
+        let now = crate::now();
+        for d in ["example.net", "www.example.net"] {
+            assert!(r.denied.get(&d.to_string(), now).is_some(), "{d} released");
+        }
     }
 
     /// What the switch is for: the network answers a plain "no record",

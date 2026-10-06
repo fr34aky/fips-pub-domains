@@ -195,10 +195,11 @@ impl TxtVerifier {
     }
 
     /// The validated lookup, calling `first_denial` when the first upstream
-    /// to answer returns a validated "no record" (`TxtSource::lookup_with`):
-    /// validated answers outrank the rest, so that denial already says
-    /// where the lookup is heading, though the decision waits for every
-    /// upstream (a record anywhere outranks a denial).
+    /// to answer says "no record" before any has produced a record
+    /// (`TxtSource::lookup_with`). Validated or not: for an unsigned zone —
+    /// most names — there is no validated denial to wait for, and the
+    /// release only moves the legacy answer; the decision waits for every
+    /// upstream, validated answers outranking the rest.
     pub async fn lookup_with(
         &self,
         domain: &str,
@@ -221,12 +222,13 @@ impl TxtVerifier {
         use futures::StreamExt;
         let mut pending: futures::stream::FuturesUnordered<_> = futs.collect();
         let mut answers = Vec::new();
+        let mut released = false;
         while let Some(one) = pending.next().await {
-            if matches!(one, One::Miss { secure: true })
-                && !answers
-                    .iter()
-                    .any(|a| matches!(a, One::Miss { secure: true }))
+            if !released
+                && matches!(one, One::Miss { .. })
+                && !answers.iter().any(|a| matches!(a, One::Hit { .. }))
             {
+                released = true;
                 first_denial();
             }
             answers.push(one);

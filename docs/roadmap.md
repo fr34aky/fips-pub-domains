@@ -114,7 +114,7 @@ Grouped by component. Each item says what, why, and where it stands.
   minutes. Done on both sides (`LookupResult::Unavailable { retry_in }`,
   the legacy answer's TTL capped at the next retry, first backoff 20 s —
   released in 0.2.5; fips2go #74 forwards such a name as `Capped`, #76
-  pins the tag). Checked on the phone 2026-10-06 with a fresh connect and
+  pins the tag, shipped in fips2go 0.9.4 on 2026-10-06). Checked on the phone 2026-10-06 with a fresh connect and
   a bound name right away and 35 s later: both answered over fips, so
   the unreachable-server path itself was not exercised and stays
   verified by tests only.

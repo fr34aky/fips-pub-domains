@@ -108,8 +108,9 @@ budget_ms: 4500                                  # whole lookup; on expiry the l
 ```
 
 Not in the file (built-in, see the resolver's `ResolverConfig`): a server
-that does not answer step 3 is skipped for 5 minutes, tripling per
-consecutive failure up to 3 hours, then tried again.
+that does not answer step 3 is skipped for 20 seconds, tripling per
+consecutive failure up to 3 hours, then tried again; while it is, a name
+it serves gets the legacy answer with a 5 s TTL.
 
 ```yaml
 ```
@@ -175,8 +176,8 @@ existed.
 | TXT removed | the legacy answer; the pin is forgotten |
 | name bound but not in the zone, or `legacy` | the legacy answer |
 | the primary server does not answer | the next pinned server (the TXT record names several); the failed one is retried after its backoff |
-| no server answers | a published zone record, if any: names pointing at nodes that answer an echo resolve over the mesh, the rest get the legacy answer |
-| target node unreachable through the local fips node | the legacy answer |
+| no server answers | a published zone record, if any: names pointing at nodes that answer an echo resolve over the mesh, names it does not bind get the legacy answer; no zone record: the legacy answer, TTL 5 s, until a server is retried |
+| target node unreachable through the local fips node | the legacy answer, TTL 5 s |
 | offline, domain pinned | the mesh answer, no DNS, no relays |
 | offline, unpinned, claim on a mesh relay | refused (legacy fails too) — unless `allow_unverified_offline` |
 | any error or the budget exceeded | the legacy answer |

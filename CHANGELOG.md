@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- A bound name whose servers do not answer, with no zone record (or a
+  target node that answers no echo), now ends in
+  `LookupResult::Unavailable`: the daemon hands out the legacy answer
+  with a 5 s TTL instead of the upstream's, and a failed server is
+  retried after 20 s instead of 5 minutes (still tripling per failure up
+  to 3 hours). A node that just joined the mesh has no session to the
+  server yet, so its first lookup used to fail step 3 and the
+  application kept the legacy address for minutes. `fips-pubdom lookup`
+  prints the case. Library hosts match the new variant.
+
 ### Added
 
 - `plain_probe: false` (daemon config, `ResolverConfig::plain_probe`)

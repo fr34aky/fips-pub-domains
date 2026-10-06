@@ -4,8 +4,10 @@
 //! Invariant (spec §7): the only way an application receives a mesh address
 //! is a verified (or pinned, or explicitly opted-in unverified) binding
 //! **and** a positive step 3 answer **and** a registered, reachable node.
-//! Every other outcome is [`LookupResult::Passthrough`] — the legacy path —
-//! and never an error of our making.
+//! Every other outcome is the legacy path — [`LookupResult::Passthrough`],
+//! or [`LookupResult::Unavailable`] when the name is bound but no server
+//! or target node can be reached right now — and never an error of our
+//! making.
 
 use crate::mesh::MeshDns;
 use crate::relay::{RelayClient, RelayScope};
@@ -153,7 +155,11 @@ pub struct ResolverConfig {
     pub reach_timeout: Duration,
     /// A server that did not answer step 3 is skipped for this long after
     /// the first failure, three times as long after each further failure in
-    /// a row, up to `server_backoff_max`; then it is tried again.
+    /// a row, up to `server_backoff_max`; then it is tried again. The first
+    /// window is short because the first failure is most often the mesh
+    /// path still settling — a node that just connected has no session to
+    /// the server yet — and the legacy answer given meanwhile is
+    /// short-lived ([`LookupResult::Unavailable`]).
     pub server_backoff: Duration,
     pub server_backoff_max: Duration,
 }
@@ -181,7 +187,7 @@ impl Default for ResolverConfig {
             tcp_timeout: Duration::from_secs(3),
             register_timeout: Duration::from_secs(1),
             reach_timeout: Duration::from_millis(1500),
-            server_backoff: Duration::from_secs(300),
+            server_backoff: Duration::from_secs(20),
             server_backoff_max: Duration::from_secs(3 * 3600),
         }
     }
@@ -193,6 +199,31 @@ pub enum LookupResult {
     Answer(Vec<u8>),
     /// Not over fips: forward to the legacy upstream exactly as before.
     Passthrough,
+    /// Over fips, but not now: the domain is bound and no server answered
+    /// and no zone record or target node was reachable. The legacy answer
+    /// stands in, and a host MUST hand it out short-lived
+    /// ([`pubdom_core::OVERRUN_TTL_SECS`]): the servers are retried after
+    /// a short backoff, and the application must ask again by then rather
+    /// than keep the legacy address for its TTL. A node that just joined
+    /// the mesh sees this on its first lookup, before its session to the
+    /// server is up.
+    Unavailable,
+}
+
+/// What step 3 came to.
+#[derive(Debug, PartialEq, Eq)]
+enum Step3 {
+    Node(Npub),
+    /// The server, or the zone record, says the name is not over fips.
+    NotOverFips,
+    /// Nobody could be asked or reached.
+    Unavailable,
+}
+
+impl Step3 {
+    fn delivered(target: Option<Npub>) -> Self {
+        target.map_or(Step3::Unavailable, Step3::Node)
+    }
 }
 
 #[derive(Clone)]
@@ -459,8 +490,9 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             tracing::warn!(name = %q.name, domain = %bound_domain, npub = %servers[0].npub, "resolving through an UNVERIFIED binding (opt-in)");
         }
         match self.step3(&q, &servers).await {
-            Some(npub) => self.answer(&q, npub),
-            None => LookupResult::Passthrough,
+            Step3::Node(npub) => self.answer(&q, npub),
+            Step3::NotOverFips => LookupResult::Passthrough,
+            Step3::Unavailable => LookupResult::Unavailable,
         }
     }
 
@@ -651,7 +683,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
 
     /// Step 3 (spec §6) plus the reachability rule (spec §7). `None` means
     /// "not over fips" or failure — the caller passes through either way.
-    async fn step3(&self, q: &Query, servers: &[Binding]) -> Option<Npub> {
+    async fn step3(&self, q: &Query, servers: &[Binding]) -> Step3 {
         // Same single-flight as `decision`: one mesh query per name, however
         // many record types the application asks for at once.
         let lock = self.flight(&format!("step3:{}", q.name));
@@ -676,22 +708,24 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             .clone()
     }
 
-    async fn step3_uncached(&self, q: &Query, servers: &[Binding]) -> Option<Npub> {
+    async fn step3_uncached(&self, q: &Query, servers: &[Binding]) -> Step3 {
         let now = crate::now();
         // A cached self-answer whose proof lapsed: kept for when asking
         // again does not work out.
         let mut lapsed = None;
         match self.step3.get(&q.name, now) {
             // Another node: the echo rule applies.
-            Some(CachedStep3::Node(n, false)) => return self.deliverable(q, n, false).await,
+            Some(CachedStep3::Node(n, false)) => {
+                return Step3::delivered(self.deliverable(q, n, false).await);
+            }
             // The server answered for itself, which proved it reachable for
             // REACHABLE_TTL. Past that, ask it again rather than ping it —
             // the answer is the proof, and servers may filter echo.
             Some(CachedStep3::Node(n, true)) if self.answered.get(&n, now).is_some() => {
-                return self.deliverable(q, n, true).await;
+                return Step3::delivered(self.deliverable(q, n, true).await);
             }
             Some(CachedStep3::Node(n, true)) => lapsed = Some(n),
-            Some(CachedStep3::NotOverFips) => return None,
+            Some(CachedStep3::NotOverFips) => return Step3::NotOverFips,
             None => {}
         }
         // Ask the servers in pin order, skipping those in their backoff
@@ -733,7 +767,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
                     }
                     self.step3
                         .put(q.name.clone(), CachedStep3::Node(npub, proven), ttl, now);
-                    return self.deliverable(q, npub, proven).await;
+                    return Step3::delivered(self.deliverable(q, npub, proven).await);
                 }
                 Ok(Step3Outcome::NotOverFips) => {
                     self.down.remove(&server.npub);
@@ -744,7 +778,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
                         Duration::from_secs(300),
                         now,
                     );
-                    return None;
+                    return Step3::NotOverFips;
                 }
                 Ok(other) => {
                     tracing::info!(name = %q.name, npub = %server.npub, ?other, "domain server failed; {then}");
@@ -769,7 +803,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             && !unregistered.contains(&n)
             && let Some(n) = self.deliverable(q, n, false).await
         {
-            return Some(n);
+            return Step3::Node(n);
         }
         self.via_zone_record(q, servers).await
     }
@@ -844,8 +878,10 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
     /// Every target has to be proven reachable — by an echo, or by having
     /// answered step 3 for itself moments ago — since the zone record says
     /// nothing about which nodes are up.
-    async fn via_zone_record(&self, q: &Query, servers: &[Binding]) -> Option<Npub> {
-        let first = servers.first()?;
+    async fn via_zone_record(&self, q: &Query, servers: &[Binding]) -> Step3 {
+        let Some(first) = servers.first() else {
+            return Step3::Unavailable;
+        };
         let dom = &first.domain;
         let now = crate::now();
         let zone = match self.zones.get(dom, now) {
@@ -877,11 +913,21 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
                 best
             }
         };
-        let zone = zone?;
-        let label = domain::relative_label(&q.name, dom)?;
-        let target = zone.lookup(label)?;
+        // No zone record: nothing says whether the name is over fips, and
+        // the servers may answer in a moment.
+        let Some(zone) = zone else {
+            return Step3::Unavailable;
+        };
+        // The zone record is authoritative about which names are over
+        // fips; one it does not bind is legacy for good.
+        let Some(label) = domain::relative_label(&q.name, dom) else {
+            return Step3::NotOverFips;
+        };
+        let Some(target) = zone.lookup(label) else {
+            return Step3::NotOverFips;
+        };
         tracing::info!(name = %q.name, npub = %target, "domain server unreachable; answering from its zone record");
-        self.deliverable(q, target, false).await
+        Step3::delivered(self.deliverable(q, target, false).await)
     }
 
     /// Register `target` with the local node and, unless `proven` (the
@@ -1588,7 +1634,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unreachable_target_node_is_passthrough() {
+    async fn unreachable_target_node_is_unavailable() {
         // git → npub 2, which the local node cannot reach.
         let (r, mesh) = resolver(
             HashMap::from([("example.org".to_string(), hit(npub(1)))]),
@@ -1598,11 +1644,12 @@ mod tests {
             false,
         );
         let q = build_query(1, "git.example.org", QTYPE_AAAA).unwrap();
-        assert_eq!(r.lookup(&q).await, LookupResult::Passthrough);
+        // The node may come up: the legacy answer stands in, short-lived.
+        assert_eq!(r.lookup(&q).await, LookupResult::Unavailable);
         // The verdict is remembered: the A query that follows does not
         // wait out another echo budget.
         let q = build_query(2, "git.example.org", QTYPE_A).unwrap();
-        assert_eq!(r.lookup(&q).await, LookupResult::Passthrough);
+        assert_eq!(r.lookup(&q).await, LookupResult::Unavailable);
         assert_eq!(
             mesh.echoes.lock().unwrap().len(),
             1,
@@ -1750,10 +1797,12 @@ mod tests {
             mesh.echoes.lock().unwrap().contains(&npub(2)),
             "zone targets must answer an echo"
         );
-        // www → the server itself, which is down: legacy.
+        // www → the server itself, which is down: legacy, but only until
+        // the server is back.
         let q = build_query(2, "www.example.org", QTYPE_AAAA).unwrap();
-        assert_eq!(r.lookup(&q).await, LookupResult::Passthrough);
-        // mail → legacy by the zone; unknown → not in the zone.
+        assert_eq!(r.lookup(&q).await, LookupResult::Unavailable);
+        // mail → legacy by the zone; unknown → not in the zone. The zone
+        // record is authoritative about those: legacy for good.
         assert_eq!(
             r.lookup(&build_query(3, "mail.example.org", QTYPE_AAAA).unwrap())
                 .await,
@@ -1929,7 +1978,8 @@ mod tests {
             vec![],
             false,
         );
-        // Defaults: 5 min, then three times as long, up to 3 h.
+        // Defaults: 20 s — the first failure is usually a mesh path still
+        // settling — then three times as long, up to 3 h.
         let mut now = 1_000;
         let mut windows = Vec::new();
         for _ in 0..6 {
@@ -1939,7 +1989,7 @@ mod tests {
             // The failed retry happens once the window has passed.
             now = d.retry_at;
         }
-        assert_eq!(windows, vec![300, 900, 2700, 8100, 10800, 10800]);
+        assert_eq!(windows, vec![20, 60, 180, 540, 1620, 4860]);
         // Concurrent lookups of other names failing on the same outage
         // count once.
         r.mark_down(npub(1), now - 1);

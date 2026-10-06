@@ -164,7 +164,12 @@ async fn handle(state: &Arc<State>, query: Vec<u8>) -> Option<Vec<u8>> {
             }
             Some(a)
         }
-        LookupResult::Passthrough => {
+        LookupResult::Passthrough | LookupResult::Unavailable => {
+            // Bound, but no server reachable right now: the legacy answer
+            // stands in, short-lived, until the servers are retried.
+            if result == LookupResult::Unavailable {
+                overrun = true;
+            }
             let reply = match (fetched, legacy) {
                 (Some(reply), _) => reply,
                 (None, Some(l)) => l.await.ok().flatten(),

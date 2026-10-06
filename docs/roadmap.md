@@ -99,10 +99,12 @@ Grouped by component. Each item says what, why, and where it stands.
   domain's server is not up yet when the first step 3 query goes out, so
   it times out and the zone record answers instead (seen 2026-10-05 in
   the log; the late reply then arrives as an "unsolicited mesh packet").
-  Without a zone record covering the name that lookup ends in the legacy
-  address, which the browser keeps for the record's TTL. A retry of step
-  3 after the session is established, or a short TTL on a legacy answer
-  given while the server is still unreachable, would close it.
+  Without a zone record covering the name that lookup ended in the
+  legacy address for the record's TTL, with the server backed off for 5
+  minutes. Library side done (`LookupResult::Unavailable`, 5 s TTL on
+  that legacy answer, first backoff 20 s), on the desktop daemon; the
+  phone needs the new variant mapped to `Pending` with the next pin, and
+  a check on the device.
 - **No debug logging in release builds**, so the early release and
   first-lookup timings cannot be observed on a device; 0.9.3's speed-up
   was measured on the desktop only. A log-level setting, or one info

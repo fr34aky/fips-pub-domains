@@ -122,15 +122,17 @@ Grouped by component. Each item says what, why, and where it stands.
   a bound name right away and 35 s later: both answered over fips, so
   the unreachable-server path itself was not exercised and stays
   verified by tests only.
-- **No debug logging in release builds**, so the early release and
-  first-lookup timings cannot be observed on a device; 0.9.3's speed-up
-  was measured on the desktop only. A log-level setting, or one info
-  line per first lookup with its timing, would fix that.
-- **A thread per unpinned query**, also when the decision is cached, and
-  a second copy of the release-and-race logic (the daemon has it as one
-  `select!`, the proxy as blocking threads). A shared helper in
-  `pubdom-resolve` would need an async DNS proxy on the phone; avoiding
-  the thread needs a "nothing to decide" query on the library.
+- Done, by reading the code rather than changing it: the shim's debug
+  lines *are* available on a release build — Settings → Advanced → Log
+  level `debug` sets the whole tracing filter (`init_logging`), the
+  public-names lines included. The early release and first-lookup
+  behaviour can be observed on a device that way; 0.9.3's speed-up has
+  still only been measured on the desktop.
+- **A second copy of the release-and-race logic** (the daemon has it as
+  one `select!`, the proxy as blocking threads); a shared helper in
+  `pubdom-resolve` would need an async DNS proxy on the phone. The
+  thread per unpinned query is skipped where every candidate's decision
+  is cached (`Resolver::decisions_cached`, with the next pin).
 - **TCP fallback for step 3** over the smoltcp stack. Low value: a step 3
   answer is one CNAME and never truncates.
 - **Upstream ports** kept for the TXT verifier (the shim hands the

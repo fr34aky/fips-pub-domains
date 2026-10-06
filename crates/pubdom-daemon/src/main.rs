@@ -105,8 +105,12 @@ async fn handle(state: &Arc<State>, query: Vec<u8>) -> Option<Vec<u8>> {
     // Almost every name is not over fips, and its answer should not wait
     // for us to find that out: fetch it alongside the decision. Not for a
     // name under a pinned domain, which is answered from the pin without
-    // the upstream hearing of it.
-    let mut legacy = (!upstreams.is_empty() && !state.resolver.has_pin_for(&query)).then(|| {
+    // the upstream hearing of it, and not when the decision is cached —
+    // the lookup is back before the upstream would be.
+    let mut legacy = (!upstreams.is_empty()
+        && !state.resolver.has_pin_for(&query)
+        && !state.resolver.decisions_cached(&query))
+    .then(|| {
         let (query, upstreams) = (query.clone(), upstreams.clone());
         tokio::spawn(async move { forward::forward(&query, &upstreams).await })
     });

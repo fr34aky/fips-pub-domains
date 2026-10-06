@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `pubdom_core::unavailable_ttl(retry_in)`: the TTL cap for the legacy
   answer of an unavailable name, for every host to share.
+- `Resolver::decisions_cached(query)`: whether every candidate domain's
+  decision is cached, so a host need not fetch the legacy answer ahead
+  of a lookup that returns at once.
 
 ## [0.2.5] - 2026-10-06
 

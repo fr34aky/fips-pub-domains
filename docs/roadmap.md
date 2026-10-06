@@ -62,8 +62,7 @@ Grouped by component. Each item says what, why, and where it stands.
   denial** too (`TxtSource::lookup_with`), so `plain_probe: false` costs
   the validated decision, not the wait for the slowest upstream. A
   `TxtSource` wrapper must forward `lookup_with` and `probe`, or it
-  silently loses both (fips2go's `PhoneTxt` forwards `probe` only; its
-  lookups run with the probe, so nothing is lost there today).
+  silently loses both (fips2go's `PhoneTxt` forwards both since #79).
 - **Hedged forwarding.** The daemon forwards to the first upstream and
   tries the next only after a 2 s timeout, as a stub resolver would. A
   first upstream that is slow rather than dead — the reference machine's

@@ -58,9 +58,10 @@ Grouped by component. Each item says what, why, and where it stands.
 
 ### Desktop resolver
 
-- Done: **the validated lookup releases the legacy answer on its first
-  denial** too (`TxtSource::lookup_with`), so `plain_probe: false` costs
-  the validated decision, not the wait for the slowest upstream. A
+- Done (0.2.6; on the phone in fips2go 0.9.5, 2026-10-07): **the
+  validated lookup releases the legacy answer on its first denial** too
+  (`TxtSource::lookup_with`), so `plain_probe: false` costs the
+  validated decision, not the wait for the slowest upstream. A
   `TxtSource` wrapper must forward `lookup_with` and `probe`, or it
   silently loses both (fips2go's `PhoneTxt` forwards both since #79).
 - **Hedged forwarding.** The daemon forwards to the first upstream and
@@ -131,9 +132,9 @@ Grouped by component. Each item says what, why, and where it stands.
   one `select!`, the proxy as blocking threads); a shared helper in
   `pubdom-resolve` would need an async DNS proxy on the phone. The
   daemon starts the legacy fetch only after one poll of the lookup
-  found it pending (#23); the phone follows the same rule — the lookup
-  tells the proxy when to start the thread (fips2go #79, merged, not
-  yet released).
+  found it pending (#23, 0.2.6); the phone follows the same rule — the
+  lookup tells the proxy when to start the thread (fips2go #79, in
+  0.9.5).
 - **TCP fallback for step 3** over the smoltcp stack. Low value: a step 3
   answer is one CNAME and never truncates.
 - **Upstream ports** kept for the TXT verifier (the shim hands the

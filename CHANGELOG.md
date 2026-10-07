@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-10-07
+
 ### Changed
 
 - With `plain_probe: false` (and for a `TxtSource` with no probe) the
@@ -311,7 +313,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   daemon guides, Android, platforms, the live test ladder with its
   results, roadmap, design history.
 
-[Unreleased]: https://github.com/fr34aky/fips-pub-domains/compare/v0.2.5...HEAD
+[Unreleased]: https://github.com/fr34aky/fips-pub-domains/compare/v0.2.6...HEAD
+[0.2.6]: https://github.com/fr34aky/fips-pub-domains/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/fr34aky/fips-pub-domains/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/fr34aky/fips-pub-domains/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/fr34aky/fips-pub-domains/compare/v0.2.2...v0.2.3

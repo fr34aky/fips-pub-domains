@@ -19,10 +19,12 @@ either way, get the binaries.
 
 ## Getting the binaries
 
-The binaries come from one of two places, and every `install` line
-below names both: the top of an unpacked release archive
-(`fips-pub-domains-<version>-<target>/fips-pubdomd`), or the repository's
-`target/release/` after a build. Where they go is the same either way:
+The binaries come from one of two places, and every block below
+shows the `install` lines for both: the top of an unpacked release
+archive (`fips-pub-domains-<version>-<target>/fips-pubdomd`, run from
+the directory you unpacked it in), or `target/release/` in the
+repository after a build (run from the repository root). Use one set
+of lines, not both. Where they go is the same either way:
 binaries in `/usr/bin/` (the CLI alone may go to `~/.local/bin/`), units
 in `/etc/systemd/system/`, the firewall drop-in in
 `/etc/fips/fips.d/`, configuration under `/etc/fips-pubdom/`, the
@@ -37,11 +39,11 @@ archive per platform with all three binaries, the systemd units and the
 firewall drop-in (`packaging/`), and a `SHA256SUMS` file:
 
 ```sh
-V=0.2.4; T=x86_64-unknown-linux-gnu        # or aarch64-unknown-linux-gnu, …-apple-darwin
+V=0.2.7; T=x86_64-unknown-linux-gnu        # or aarch64-unknown-linux-gnu, …-apple-darwin
 curl -LO https://github.com/fr34aky/fips-pub-domains/releases/download/v$V/fips-pub-domains-$V-$T.tar.gz
 curl -LO https://github.com/fr34aky/fips-pub-domains/releases/download/v$V/SHA256SUMS
 sha256sum --ignore-missing -c SHA256SUMS
-tar xzf fips-pub-domains-$V-$T.tar.gz && cd fips-pub-domains-$V-$T
+tar xzf fips-pub-domains-$V-$T.tar.gz       # stay here: the lines below name the directory
 ```
 
 ### From source
@@ -80,15 +82,21 @@ restores the packaged layout the unit relies on.
 ### Install
 
 ```sh
-cd fips-pub-domains-<version>-<target>        # the unpacked archive — or, from source, cd fips-pub-domains
-sudo install -m755 fips-pubdom-server /usr/bin/           # from source: target/release/fips-pubdom-server
-sudo install -m755 fips-pubdom /usr/bin/                  # optional, for checks; from source: target/release/fips-pubdom
+# from the unpacked release archive:
+sudo install -m755 fips-pub-domains-<version>-<target>/fips-pubdom-server /usr/bin/
+sudo install -m755 fips-pub-domains-<version>-<target>/fips-pubdom /usr/bin/            # optional, for checks
+sudo install -m644 fips-pub-domains-<version>-<target>/packaging/systemd/fips-pubdom-server.service /etc/systemd/system/
+# from a source build, in the repository:
+sudo install -m755 target/release/fips-pubdom-server /usr/bin/
+sudo install -m755 target/release/fips-pubdom /usr/bin/   # optional, for checks
 sudo install -m644 packaging/systemd/fips-pubdom-server.service /etc/systemd/system/
+
 sudo mkdir -p /etc/fips-pubdom/zones
 
 # firewall: if you run fips's baseline firewall (fips-firewall.service, off
 # by default in fips's packages), it drops everything inbound on fips0
-# unless a drop-in allows it
+# unless a drop-in allows it (the archive carries the file under
+# fips-pub-domains-<version>-<target>/packaging/common/ as well)
 sudo cp packaging/common/fips-pubdom.nft /etc/fips/fips.d/fips-pubdom.nft
 sudo systemctl try-reload-or-restart fips-firewall
 ```
@@ -124,10 +132,14 @@ installed — `/usr/bin/fips-pubdom-server` (and `/usr/bin/fips-pubdom`,
 if installed) and the unit:
 
 ```sh
-cd fips-pub-domains-<version>-<target>        # the new archive — or, from source, cd fips-pub-domains
-sudo install -m755 fips-pubdom-server /usr/bin/           # from source: target/release/fips-pubdom-server
-sudo install -m644 packaging/systemd/fips-pubdom-server.service /etc/systemd/system/   # a fixed unit only takes effect once copied
-sudo systemctl daemon-reload
+# from the new release archive:
+sudo install -m755 fips-pub-domains-<version>-<target>/fips-pubdom-server /usr/bin/
+sudo install -m644 fips-pub-domains-<version>-<target>/packaging/systemd/fips-pubdom-server.service /etc/systemd/system/
+# from a source build, in the repository:
+sudo install -m755 target/release/fips-pubdom-server /usr/bin/
+sudo install -m644 packaging/systemd/fips-pubdom-server.service /etc/systemd/system/
+
+sudo systemctl daemon-reload                # a fixed unit only takes effect once copied
 sudo systemctl restart fips-pubdom-server
 ```
 
@@ -169,9 +181,13 @@ wiring by hand ([platforms.md](platforms.md)).
 ### Install
 
 ```sh
-cd fips-pub-domains-<version>-<target>        # the unpacked archive — or, from source, cd fips-pub-domains
-sudo install -m755 fips-pubdomd fips-pubdom /usr/bin/     # from source: target/release/fips-pubdomd target/release/fips-pubdom
+# from the unpacked release archive:
+sudo install -m755 fips-pub-domains-<version>-<target>/fips-pubdomd fips-pub-domains-<version>-<target>/fips-pubdom /usr/bin/
+sudo install -m644 fips-pub-domains-<version>-<target>/packaging/systemd/fips-pubdom.service /etc/systemd/system/
+# from a source build, in the repository:
+sudo install -m755 target/release/fips-pubdomd target/release/fips-pubdom /usr/bin/
 sudo install -m644 packaging/systemd/fips-pubdom.service /etc/systemd/system/
+
 sudo fips-pubdomd setup                 # detects resolved / NetworkManager / dnsmasq / plain resolv.conf, writes the config
 sudo systemctl daemon-reload
 sudo systemctl enable --now fips-pubdom
@@ -199,10 +215,14 @@ installed — `/usr/bin/fips-pubdomd`, `/usr/bin/fips-pubdom` and the
 unit:
 
 ```sh
-cd fips-pub-domains-<version>-<target>        # the new archive — or, from source, cd fips-pub-domains
-sudo install -m755 fips-pubdomd fips-pubdom /usr/bin/     # from source: target/release/fips-pubdomd target/release/fips-pubdom
-sudo install -m644 packaging/systemd/fips-pubdom.service /etc/systemd/system/   # a fixed unit only takes effect once copied
-sudo systemctl daemon-reload
+# from the new release archive:
+sudo install -m755 fips-pub-domains-<version>-<target>/fips-pubdomd fips-pub-domains-<version>-<target>/fips-pubdom /usr/bin/
+sudo install -m644 fips-pub-domains-<version>-<target>/packaging/systemd/fips-pubdom.service /etc/systemd/system/
+# from a source build, in the repository:
+sudo install -m755 target/release/fips-pubdomd target/release/fips-pubdom /usr/bin/
+sudo install -m644 packaging/systemd/fips-pubdom.service /etc/systemd/system/
+
+sudo systemctl daemon-reload                # a fixed unit only takes effect once copied
 sudo systemctl restart fips-pubdom
 ```
 
@@ -248,8 +268,8 @@ config with just a `pins:` path in a writable place is enough.
 ### Install
 
 ```sh
-cd fips-pub-domains-<version>-<target>        # the unpacked archive — or, from source, cd fips-pub-domains
-install -m755 fips-pubdom ~/.local/bin/                   # from source: target/release/fips-pubdom
+install -m755 fips-pub-domains-<version>-<target>/fips-pubdom ~/.local/bin/   # from the unpacked release archive
+install -m755 target/release/fips-pubdom ~/.local/bin/         # from a source build, in the repository
 printf 'pins: %s/.local/share/fips-pubdom/pins.json\n' "$HOME" > ~/.config/fips-pubdom.yaml
 fips-pubdom --config ~/.config/fips-pubdom.yaml verify example.org
 fips-pubdom --config ~/.config/fips-pubdom.yaml lookup www.example.org
@@ -260,9 +280,14 @@ fips-pubdom --config ~/.config/fips-pubdom.yaml --offline lookup www.example.org
 
 Get the new binary ([above](#getting-the-binaries)) — the new archive,
 or `git pull && cargo build --release` — and copy it over
-`~/.local/bin/fips-pubdom`: `install -m755 fips-pubdom ~/.local/bin/`
-from the archive, `install -m755 target/release/fips-pubdom
-~/.local/bin/` from source. The config and the pin file stay.
+`~/.local/bin/fips-pubdom`:
+
+```sh
+install -m755 fips-pub-domains-<version>-<target>/fips-pubdom ~/.local/bin/   # from the new release archive
+install -m755 target/release/fips-pubdom ~/.local/bin/         # from a source build, in the repository
+```
+
+The config and the pin file stay.
 
 ### Uninstall
 

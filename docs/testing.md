@@ -187,8 +187,13 @@ $ fips-pubdom ctl --socket /tmp/pdd/control.sock log '{"n":3}'  # "pins forgotte
 
 Unit-tested beside it: a request, a missing parameter, an unknown
 command, a stale socket file replaced at the next bind; the log ring.
-Not yet run: the units' `RuntimeDirectory` and the group handover on
-an installed node.
+Installed nodes (2026-10-08, 0.2.8 on both): the daemon unit's
+`RuntimeDirectory` and the group handover hold — `/run/fips-pubdom/
+control.sock` is `srw-rw---- root fips` on the client node, and
+fips-ui 0.10.0's Public domains page reads both sides on the serving
+node and the resolver on the client node (a 0.2.4 binary under the new
+unit shows the page's "control socket does not answer" note, which is
+what happened on the client node before its binaries were upgraded).
 
 ## Level 4 — offline
 

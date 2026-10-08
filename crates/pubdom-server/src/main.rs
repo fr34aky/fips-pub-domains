@@ -1240,7 +1240,11 @@ mod tests {
             "domain: example.org\nnames:\n  www: legacy\n",
         )
         .unwrap();
-        let f = std::fs::File::open(dir.join("example.org.yaml")).unwrap();
+        // Windows needs the handle writable to set the time.
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(dir.join("example.org.yaml"))
+            .unwrap();
         f.set_modified(SystemTime::now() + Duration::from_secs(2))
             .unwrap();
         zones.rescan();

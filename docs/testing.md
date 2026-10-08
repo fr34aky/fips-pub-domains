@@ -159,7 +159,11 @@ fips-pubdom-server init` wrote `server.yaml` with both relays taken
 from `server.env`, and after a restart the unit used it — the control
 socket owned by the server's user with group `fips`, `zones_dir`
 reported, claim and zone record accepted by both relays on the first
-publication.
+publication. A zone saved from fips-ui 0.10.1's editor in a browser
+went through the installed helper's `pubdom-zone-apply` (validated
+with `validate zone`, written into the followed directory) and was
+picked up by the server — the whole web UI design (webui.md) is now
+exercised end to end on an installed node.
 
 ## Level 3f — the control sockets (2026-10-08)
 

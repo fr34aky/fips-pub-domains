@@ -297,8 +297,8 @@ fn convert(ev: Event) -> CoreEvent {
 }
 
 /// Publish a claim for `domain` signed with `keys` to `relays`. Addressable:
-/// a later claim replaces the earlier one on conforming relays. Returns the
-/// relays that accepted it.
+/// a later claim replaces the earlier one on conforming relays. Returns
+/// which relays accepted it and which refused, with their reasons.
 pub async fn publish_claim(
     keys: Keys,
     relays: &[String],
@@ -306,7 +306,7 @@ pub async fn publish_claim(
     port: u16,
     dnssec: Option<&str>,
     timeout: Duration,
-) -> Result<Vec<String>, String> {
+) -> Result<Outcome, String> {
     publish(
         keys,
         relays,
@@ -325,7 +325,7 @@ pub async fn publish_zone(
     domain: &str,
     names: &[(String, Target)],
     timeout: Duration,
-) -> Result<Vec<String>, String> {
+) -> Result<Outcome, String> {
     publish(
         keys,
         relays,
@@ -349,7 +349,7 @@ pub async fn publish_attestation(
     method: Method,
     verified_at: u64,
     timeout: Duration,
-) -> Result<Vec<String>, String> {
+) -> Result<Outcome, String> {
     attestable(method)?;
     publish(
         keys,
@@ -387,17 +387,46 @@ pub fn load_keys(spec: &str) -> Result<Keys, String> {
     })
 }
 
+/// What a publication came to, per relay, keyed by the URL as configured
+/// (nostr-sdk normalises URLs — `ws://host:80` prints as `ws://host` — so
+/// the caller's strings are mapped back). `Err` from the publish functions
+/// is a setup or timeout failure; a relay refusing is a `rejected` entry.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Outcome {
+    pub accepted: Vec<String>,
+    /// (relay, reason)
+    pub rejected: Vec<(String, String)>,
+}
+
+impl Outcome {
+    pub fn none_accepted(&self) -> bool {
+        self.accepted.is_empty()
+    }
+}
+
 async fn publish(
     keys: Keys,
     relays: &[String],
     kind: u16,
     tags: Vec<Vec<String>>,
     timeout: Duration,
-) -> Result<Vec<String>, String> {
+) -> Result<Outcome, String> {
     let client = Client::builder().signer(keys).build();
     for u in relays {
         client.add_relay(u).await.map_err(|e| format!("{u}: {e}"))?;
     }
+    // The configured string for each URL as nostr-sdk prints it.
+    let configured = |printed: &str| -> String {
+        relays
+            .iter()
+            .find(|u| {
+                nostr_sdk::RelayUrl::parse(u)
+                    .map(|r| r.to_string() == printed)
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .unwrap_or_else(|| printed.to_string())
+    };
     // Wait for the connections: `connect()` returns at once and a send
     // before the handshake is "relay not connected".
     client.connect().await;
@@ -407,15 +436,23 @@ async fn publish(
         .await
         .map_err(|_| "timed out publishing".to_string())?
         .map_err(|e| e.to_string())?;
-    let ok: Vec<String> = out.success.iter().map(|u| u.to_string()).collect();
-    for (u, why) in &out.failed {
+    let outcome = Outcome {
+        accepted: out
+            .success
+            .iter()
+            .map(|u| configured(&u.to_string()))
+            .collect(),
+        rejected: out
+            .failed
+            .iter()
+            .map(|(u, why)| (configured(&u.to_string()), why.to_string()))
+            .collect(),
+    };
+    for (u, why) in &outcome.rejected {
         tracing::warn!(relay = %u, kind, reason = %why, "relay rejected the event");
     }
     client.disconnect().await;
-    if ok.is_empty() {
-        return Err(format!("no relay accepted the kind {kind} event"));
-    }
-    Ok(ok)
+    Ok(outcome)
 }
 
 fn parse_tags(tags: Vec<Vec<String>>) -> Result<Vec<Tag>, String> {

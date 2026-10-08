@@ -28,7 +28,9 @@ use pubdom_core::domain::{normalize, relative_label};
 use pubdom_core::txt::TxtRecord;
 use pubdom_core::{DEFAULT_SERVER_PORT, Npub, synth};
 use pubdom_resolve::proof;
-use pubdom_resolve::relay::{claim_event_json, publish_claim, publish_zone, zone_event_json};
+use pubdom_resolve::relay::{
+    Outcome, claim_event_json, publish_claim, publish_zone, zone_event_json,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -1047,20 +1049,30 @@ async fn publish_one(
         retry,
     } = prover.proof(&z.record.domain).await;
     let d = z.record.domain.clone();
-    let now = unix_now();
-    let note_relays = |published: &RwLock<Published>, accepted: &[String], err: Option<&str>| {
+    // Per relay, as it went: accepted now, or its own reason; a setup
+    // failure is every relay's.
+    let note = |published: &RwLock<Published>, outcome: &Result<Outcome, String>| {
+        let now = unix_now();
         let mut p = published.write().unwrap();
-        for r in relays {
-            let st = p.relays.entry(r.clone()).or_default();
-            if accepted.contains(r) {
-                st.accepted_at = Some(now);
-                st.last_error = None;
-            } else if let Some(e) = err {
-                st.last_error = Some(e.to_string());
+        match outcome {
+            Ok(o) => {
+                for r in &o.accepted {
+                    let st = p.relays.entry(r.clone()).or_default();
+                    st.accepted_at = Some(now);
+                    st.last_error = None;
+                }
+                for (r, why) in &o.rejected {
+                    p.relays.entry(r.clone()).or_default().last_error = Some(why.clone());
+                }
+            }
+            Err(e) => {
+                for r in relays {
+                    p.relays.entry(r.clone()).or_default().last_error = Some(e.clone());
+                }
             }
         }
     };
-    match publish_claim(
+    let claim = publish_claim(
         keys.clone(),
         relays,
         &z.record.domain,
@@ -1068,59 +1080,77 @@ async fn publish_one(
         chain.as_deref(),
         Duration::from_secs(10),
     )
-    .await
-    {
-        Ok(ok) => {
-            tracing::info!(domain = %d, relays = ?ok, dnssec_proof_until = ?expires, "claim published");
-            note_relays(published, &ok, None);
+    .await;
+    note(published, &claim);
+    match &claim {
+        Ok(o) if !o.none_accepted() => {
+            tracing::info!(domain = %d, relays = ?o.accepted, dnssec_proof_until = ?expires, "claim published");
             let mut p = published.write().unwrap();
             let st = p.domains.entry(d.clone()).or_default();
-            st.claim_published_at = Some(now);
+            st.claim_published_at = Some(unix_now());
             st.dnssec_proof_until = expires;
             st.last_error = None;
         }
-        Err(e) => {
-            tracing::error!(domain = %d, error = %e, "claim not published");
-            note_relays(published, &[], Some(&e));
+        Ok(_) => {
+            tracing::error!(domain = %d, "claim not published: no relay accepted it");
             published
                 .write()
                 .unwrap()
                 .domains
                 .entry(d.clone())
                 .or_default()
-                .last_error = Some(e);
+                .last_error = Some("no relay accepted the claim".into());
+        }
+        Err(e) => {
+            tracing::error!(domain = %d, error = %e, "claim not published");
+            published
+                .write()
+                .unwrap()
+                .domains
+                .entry(d.clone())
+                .or_default()
+                .last_error = Some(e.clone());
         }
     }
-    match publish_zone(
+    let zone = publish_zone(
         keys.clone(),
         relays,
         &z.record.domain,
         &z.record.names,
         Duration::from_secs(10),
     )
-    .await
-    {
-        Ok(ok) => {
-            tracing::info!(domain = %d, names = z.record.names.len(), relays = ?ok, "zone record published");
-            note_relays(published, &ok, None);
+    .await;
+    note(published, &zone);
+    match &zone {
+        Ok(o) if !o.none_accepted() => {
+            tracing::info!(domain = %d, names = z.record.names.len(), relays = ?o.accepted, "zone record published");
             published
                 .write()
                 .unwrap()
                 .domains
                 .entry(d.clone())
                 .or_default()
-                .zone_published_at = Some(now);
+                .zone_published_at = Some(unix_now());
+        }
+        Ok(_) => {
+            tracing::error!(domain = %d, "zone record not published: no relay accepted it");
+            published
+                .write()
+                .unwrap()
+                .domains
+                .entry(d.clone())
+                .or_default()
+                .last_error = Some("no relay accepted the zone record".into());
         }
         Err(e) => {
             tracing::error!(domain = %d, error = %e, "zone record not published");
-            note_relays(published, &[], Some(&e));
             published
                 .write()
                 .unwrap()
                 .domains
                 .entry(d.clone())
                 .or_default()
-                .last_error = Some(e);
+                .last_error = Some(e.clone());
         }
     }
     published
@@ -1129,7 +1159,7 @@ async fn publish_one(
         .domains
         .entry(d)
         .or_default()
-        .next_publish_at = Some(now + retry.as_secs());
+        .next_publish_at = Some(unix_now() + retry.as_secs());
     retry
 }
 
@@ -1261,15 +1291,7 @@ async fn main() -> Result<()> {
         Cmd::Validate { .. } | Cmd::Init { .. } => unreachable!("handled above"),
         Cmd::Txt { zone, .. } => {
             for z in &zones_of(&zone)? {
-                let rec = TxtRecord {
-                    npub: author,
-                    port: Some(z.port),
-                };
-                println!(
-                    "_fips-dns.{}.  3600  IN  TXT  \"{}\"",
-                    z.record.domain,
-                    rec.render()
-                );
+                println!("{}", txt_line(&z.record.domain, author, z.port));
             }
         }
         Cmd::Publish {
@@ -1379,13 +1401,8 @@ async fn main() -> Result<()> {
             zones.rescan();
             for z in snapshot(&zones) {
                 tracing::info!(
-                    "legacy DNS record: _fips-dns.{}. TXT \"{}\"",
-                    z.record.domain,
-                    TxtRecord {
-                        npub: author,
-                        port: Some(z.port)
-                    }
-                    .render()
+                    "legacy DNS record: {}",
+                    txt_line(&z.record.domain, author, z.port)
                 );
             }
             if let Some(d) = &zones.dir
@@ -1438,6 +1455,7 @@ async fn main() -> Result<()> {
                     type Seen = (Vec<(String, Target)>, u16, std::time::Instant);
                     let mut seen: std::collections::HashMap<String, Seen> = Default::default();
                     let mut asked: Option<Option<String>> = None;
+                    let mut closed = false;
                     loop {
                         // The watcher task keeps the list current; edits
                         // to loaded files are picked up here as per query.
@@ -1466,14 +1484,19 @@ async fn main() -> Result<()> {
                                 );
                             }
                         }
+                        // A closed channel (no control socket) must not
+                        // turn the wait into a spin: then only the timer.
                         asked = tokio::select! {
                             _ = tokio::time::sleep(Duration::from_secs(30)) => None,
-                            r = rx.recv() => match r {
+                            r = rx.recv(), if !closed => match r {
                                 Some(which) => {
                                     tracing::info!(domain = ?which, "publishing now, as asked over the control socket");
                                     Some(which)
                                 }
-                                None => None,
+                                None => {
+                                    closed = true;
+                                    None
+                                }
                             },
                         };
                     }

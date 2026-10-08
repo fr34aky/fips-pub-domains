@@ -403,11 +403,24 @@ async fn main() -> Result<()> {
             )
             .await
             .map_err(anyhow::Error::msg)?;
+            if ok.none_accepted() {
+                anyhow::bail!(
+                    "no relay accepted the attestation: {}",
+                    ok.rejected
+                        .iter()
+                        .map(|(r, why)| format!("{r}: {why}"))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                );
+            }
             println!(
                 "{domain}: attested {} server(s) by {method:?}, accepted by {}",
                 servers.len(),
-                ok.join(", ")
+                ok.accepted.join(", ")
             );
+            for (r, why) in &ok.rejected {
+                println!("  rejected by {r}: {why}");
+            }
             for s in &servers {
                 println!("  {s}");
             }

@@ -219,7 +219,7 @@ fn control_handler(state: Arc<State>, log: pubdom_control::LogRing) -> pubdom_co
                     "upstreams": *state.upstreams.read().unwrap(),
                     "listen": state.cfg.listen,
                     "upstreams_from": state.cfg.upstreams_from,
-                    "backend": std::fs::read_to_string("/etc/fips-pubdom/backend").ok().map(|s| s.trim().to_string()),
+                    "backend": backend::recorded(),
                     "pins": state.cfg.pins,
                     "dnssec": state.cfg.dnssec,
                     "plain_probe": state.cfg.plain_probe,
@@ -287,12 +287,15 @@ async fn run(cfg: Config, log: pubdom_control::LogRing) -> Result<()> {
     let mut tasks = Vec::new();
     // The control socket, where its directory exists (the unit's
     // RuntimeDirectory; by hand, wherever the config points).
+    // Held until `run` returns: dropping it closes the socket.
+    let mut _control = None;
     if let Some(sock) = &state.cfg.control {
         if sock.parent().is_some_and(|d| d.is_dir()) {
-            let h = pubdom_control::serve(sock, Some("fips"), control_handler(state.clone(), log))
-                .await
-                .with_context(|| format!("control socket {}", sock.display()))?;
-            tasks.push(h);
+            _control = Some(
+                pubdom_control::serve(sock, Some("fips"), control_handler(state.clone(), log))
+                    .await
+                    .with_context(|| format!("control socket {}", sock.display()))?,
+            );
         } else {
             tracing::warn!(socket = %sock.display(), "control socket directory missing; no control socket");
         }

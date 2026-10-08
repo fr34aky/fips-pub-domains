@@ -71,29 +71,44 @@ pub const MAX_REQUEST: usize = 4096;
 pub type Handler =
     Arc<dyn Fn(Request) -> Pin<Box<dyn Future<Output = Response> + Send>> + Send + Sync>;
 
-/// Serve `handler` on the Unix socket at `path` until the task is dropped.
-/// A stale socket file is removed first; the file is made group-readable
-/// and -writable, and handed to `group` if that group exists and the
-/// process is in it (no privilege needed for that). Returns once the
-/// socket is bound; the accept loop runs in a spawned task.
+/// A running control socket: the accept loop stops, and the socket file
+/// goes, when this is dropped.
+pub struct ControlSocket {
+    task: tokio::task::JoinHandle<()>,
+    path: std::path::PathBuf,
+}
+
+impl Drop for ControlSocket {
+    fn drop(&mut self) {
+        self.task.abort();
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Serve `handler` on the Unix socket at `path` until the returned guard
+/// is dropped. The socket is bound under a temporary name, made
+/// group-readable and -writable and handed to `group` if that group exists
+/// and the process is in it (no privilege needed for that), and only then
+/// renamed into place — over a stale file, if one was left — so nobody
+/// connects through the umask's permissions in between. Returns once the
+/// socket is in place; the accept loop runs in a spawned task.
 #[cfg(unix)]
 pub async fn serve(
     path: &Path,
     group: Option<&str>,
     handler: Handler,
-) -> std::io::Result<tokio::task::JoinHandle<()>> {
+) -> std::io::Result<ControlSocket> {
     use std::os::unix::fs::PermissionsExt;
     use tokio::net::UnixListener;
 
-    if path.exists() {
-        std::fs::remove_file(path)?;
-    }
-    let listener = UnixListener::bind(path)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
+    let tmp = path.with_extension(format!("sock.{}.tmp", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    let listener = UnixListener::bind(&tmp)?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o660))?;
     if let Some(g) = group {
         match group_id(g) {
             Some(gid) => {
-                if let Err(e) = std::os::unix::fs::chown(path, None, Some(gid)) {
+                if let Err(e) = std::os::unix::fs::chown(&tmp, None, Some(gid)) {
                     tracing::warn!(socket = %path.display(), group = g, error = %e, "control socket keeps the process's group");
                 }
             }
@@ -103,8 +118,13 @@ pub async fn serve(
             ),
         }
     }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
     tracing::info!(socket = %path.display(), "control socket listening");
-    Ok(tokio::spawn(async move {
+    let path = path.to_path_buf();
+    let task = tokio::spawn(async move {
         loop {
             let (stream, _) = match listener.accept().await {
                 Ok(v) => v,
@@ -123,7 +143,8 @@ pub async fn serve(
                 .await;
             });
         }
-    }))
+    });
+    Ok(ControlSocket { task, path })
 }
 
 #[cfg(unix)]
@@ -199,7 +220,7 @@ pub async fn serve(
     path: &Path,
     _group: Option<&str>,
     _handler: Handler,
-) -> std::io::Result<tokio::task::JoinHandle<()>> {
+) -> std::io::Result<ControlSocket> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         format!("{}: control sockets need a Unix platform", path.display()),
@@ -343,8 +364,11 @@ mod tests {
         assert_eq!(out.1, Ok(Value::String("EXAMPLE.ORG".into())));
         assert_eq!(out.2, Err("missing parameter: domain".into()));
         assert_eq!(out.3, Err("unknown command: nope".into()));
-        // A stale socket file is replaced at the next bind.
+        // Dropping the guard stops the listener and removes the file; a
+        // stale file left by a crash is replaced at the next bind.
         drop(_task);
+        assert!(!sock.exists());
+        std::fs::write(&sock, b"stale").unwrap();
         let again = serve(
             &sock,
             None,
@@ -352,6 +376,11 @@ mod tests {
         )
         .await;
         assert!(again.is_ok());
+        let s = sock.clone();
+        let r = tokio::task::spawn_blocking(move || query(&s, "x", Value::Null))
+            .await
+            .unwrap();
+        assert_eq!(r, Ok(Value::from(1)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

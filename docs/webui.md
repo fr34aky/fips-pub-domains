@@ -1,7 +1,8 @@
 # Public domains in fips-ui — design
 
 Status: design, 2026-10-08, revised the same day after the maintainer's
-proposal. Nothing of it is built. The decisions are proposals until the
+proposal. Phases 1 and 2 — this repository's share — are built (#24,
+#25); phases 3–5 are fips-ui's. The decisions are proposals until the
 open questions at the end are answered; the phases are ordered so that
 each ships on its own.
 

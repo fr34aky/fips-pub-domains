@@ -190,6 +190,30 @@ pub fn query(path: &Path, command: &str, params: Value) -> Result<Value, String>
     }
 }
 
+/// Not on this platform: Windows has no Unix sockets (a TCP port on
+/// loopback, as fips uses there, is a later milestone with the daemon's
+/// Windows backend). The daemon and the server log the error and run
+/// without a control socket.
+#[cfg(not(unix))]
+pub async fn serve(
+    path: &Path,
+    _group: Option<&str>,
+    _handler: Handler,
+) -> std::io::Result<tokio::task::JoinHandle<()>> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        format!("{}: control sockets need a Unix platform", path.display()),
+    ))
+}
+
+#[cfg(not(unix))]
+pub fn query(path: &Path, _command: &str, _params: Value) -> Result<Value, String> {
+    Err(format!(
+        "{}: control sockets need a Unix platform",
+        path.display()
+    ))
+}
+
 /// The last lines of the process's log, for the `log` command. A tracing
 /// layer feeds it; `lines(n)` reads the newest `n`, oldest first.
 #[derive(Clone)]

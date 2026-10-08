@@ -152,8 +152,14 @@ Unit-tested beside it: the file's defaults and checks, `init` from an
 environment file, a zone's text parsed and printed back, and a rescan
 with a broken file, a file naming another port, a duplicate domain and a
 `.txt` file in the directory (all skipped with a log line), an edit, a
-removal. Not yet run: the unit's fallback to the flags when the file is
-absent, on an installed server.
+removal. On the installed serving node (2026-10-08): the unit ran from
+the flag fallback through the 0.2.8 upgrade (the zone editor in fips-ui
+then says the server follows no zones directory), `sudo
+fips-pubdom-server init` wrote `server.yaml` with both relays taken
+from `server.env`, and after a restart the unit used it — the control
+socket owned by the server's user with group `fips`, `zones_dir`
+reported, claim and zone record accepted by both relays on the first
+publication.
 
 ## Level 3f — the control sockets (2026-10-08)
 

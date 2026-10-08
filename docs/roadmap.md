@@ -54,6 +54,13 @@ Phase 1, through fips-pub-domains 0.2.4 (2026-10-04) and fips2go 0.9.3
 ## Next
 
 Grouped by component. Each item says what, why, and where it stands.
+The order chosen on 2026-10-08, after the web UI shipped (fips-ui
+0.11.0): first the daemon clearing a link search domain that shadows
+it on systemd-resolved (bit the serving node twice, fix known); then
+the dnsmasq and plain `resolv.conf` backends and the upstreams watcher
+run live; then fips's `probe` command for reachability; the two
+undecided resolver trade-offs (hedged forwarding, the shorter retry)
+and the other platforms after that, each once decided.
 
 ### Protocol and registration
 

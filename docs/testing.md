@@ -226,6 +226,19 @@ decision: Bound([Binding { domain: "example.org", npub: npub1…, port: 5355, me
 Before proofs, the same situation was `NotOverFips(Unverified)`. The strfry
 relay accepted the 5 KB event without configuration changes.
 
+## Level 3g — the serving node's search domain, twice (2026-10-08)
+
+The serving node (Ubuntu 22.04, systemd-resolved, resolver 0.2.4) once
+more answered its own bound names with the LAN's parking address.
+`dig -p 5356 @127.0.0.1` gave the `fd…` address — the daemon was fine —
+while `resolvectl query` ended in `-- link: enp109s0`: the LAN's lease
+had put `unkn0wn.ch` back as the link's search domain. The profile had
+`ipv4.ignore-auto-dns yes` since 2026-10-01 but `ipv6.ignore-auto-dns
+no`, and the router's RA/DHCPv6 carries the domain too. After
+`ipv6.ignore-auto-dns yes`, explicit `upstreams` in config.yaml, a
+`con up` and a daemon restart: `relay.unkn0wn.ch` →
+`fd6b:…` `(npub1lx2m….fips)` in 83 ms, no `-- link:` line.
+
 ## Level 3b — a third node, from the install guide
 
 A fresh Arch/Omarchy desktop following [install.md](install.md) verbatim:

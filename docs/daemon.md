@@ -201,12 +201,24 @@ DHCP hands out `example.org` as the search domain is the common case. On
 systemd-resolved a search domain is also a routing domain, and the longest
 match beats the global `~.`, so those names never reach the daemon. The
 daemon warns about this at start (`link search domains route past this
-daemon …`). Fix it on the link:
-`nmcli con mod "<connection>" ipv4.dns-search "" ipv6.dns-search ""`
-(networkd: `UseDomains=no`), or stop the router from pushing it.
-`sudo resolvectl domain <iface> ''` works until the next DHCP renewal —
-or the next `setup`, which restarts resolved and so reloads the link's
-search domain.
+daemon …`). `sudo resolvectl domain <iface> ''` clears it until the next
+lease renewal — or the next `setup`, which restarts resolved and so
+reloads the link's search domain. The permanent fix is to stop
+NetworkManager taking DNS from the lease on **both** address families
+(`ipv4.dns-search ""` alone is not it: that is the extra list, and the
+lease's domain comes back at every renewal — over IPv6's RA/DHCPv6 too,
+once IPv4 ignores it), and then to name the daemon's upstreams
+yourself, since the file it reads them from only lists the daemon once
+the link accepts no servers:
+
+```sh
+sudo nmcli con mod "<connection>" ipv4.ignore-auto-dns yes ipv6.ignore-auto-dns yes
+echo 'upstreams: ["<router>", "<router v6>"]' | sudo tee -a /etc/fips-pubdom/config.yaml
+sudo nmcli con up "<connection>" && sudo systemctl restart fips-pubdom
+```
+
+(networkd: `UseDomains=no`; or stop the router from pushing the
+domain.) The roadmap has the daemon clearing such a domain itself.
 
 **Cold lookups take ~2 s.** For a domain that *is* over fips that is the
 full chain — TXT, relay, step 3 — and it happens once per domain per

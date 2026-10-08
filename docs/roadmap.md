@@ -34,6 +34,16 @@ Phase 1, through fips-pub-domains 0.2.4 (2026-10-04) and fips2go 0.9.3
   witnesses"; the Internet-validated flag shortens the TXT wait and
   gates the plain probe; the legacy answer fetched alongside and
   released early as on the desktop.
+- **Web UI** (2026-10-08): a "Public domains" section of fips-ui
+  ([webui.md](webui.md)) — this repository's `server.yaml`, watched
+  zones directory, `validate` commands and a control socket per binary
+  (0.2.7), the server's attestations listing and the daemon's
+  `validate config` (0.2.8); fips-ui's read-only pages (#43), editing
+  of zones and both configurations through its helper, the actions
+  and the attestations table (#44, 0.10.0), and installing, updating,
+  starting and stopping either side from the page (#47, 0.11.0). A
+  zone saved from a browser on the serving node went through the
+  installed helper ([testing.md](testing.md)).
 - **Verified live** ([testing.md](testing.md)): levels 1–6 — server from
   a peer, claim on a relay, daemon on a second and third node, a name
   pointing at no node, a server down, redundant servers, offline from
@@ -109,21 +119,8 @@ Grouped by component. Each item says what, why, and where it stands.
 
 ### Domain server
 
-- **Public domains in fips-ui** — wanted by the maintainer (2026-10-06,
-  shaped 2026-10-08): the server and the resolver configured and
-  watched from fips-ui, which shows a "Public domains" section when it
-  finds either on the node, and manages them from another node through
-  its mesh access. Designed in [webui.md](webui.md): this repository
-  provides `server.yaml`, a watched zones directory, `validate`
-  commands and a control socket per binary; fips-ui provides the
-  pages. Phases 1–2 here, 3–5 in fips-ui. Phase 1 (the configuration
-  file, the watched zones directory, `init`, `validate`; #24) and
-  phase 2 (the control sockets, `fips-pubdom ctl`; #25) are released
-  in 0.2.7; phase 3 (the read-only pages, fips-ui #43), phase 4
-  (editing through fips-ui's helper, the actions; fips-ui #44) and
-  phase 5 (attestations; #26 here, fips-ui #44) are done; the
-  attestations listing and `fips-pubdomd validate config` are released
-  in 0.2.8, which fips-ui 0.10.0's editors need on the node.
+- Nothing open beyond the web UI items above. `verify` as a daemon
+  socket command waits for a page that needs it (none planned).
 
 ### Phone (fips2go)
 

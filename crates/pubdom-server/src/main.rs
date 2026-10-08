@@ -230,8 +230,7 @@ impl ServerConfig {
             .flat_map(|w| match w.split_once('=') {
                 Some((f, v)) if f.starts_with("--") => vec![f.to_string(), v.to_string()],
                 _ => vec![w],
-            })
-            .into_iter();
+            });
         while let Some(a) = args.next() {
             match a.as_str() {
                 "--publish" => {}

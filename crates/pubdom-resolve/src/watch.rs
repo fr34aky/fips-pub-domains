@@ -30,27 +30,13 @@ pub fn watch<F: Fn() + Send + 'static>(
     let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let dir = target.parent()?.to_path_buf();
     let name = target.file_name()?.to_owned();
-    let mut debouncer = match new_debouncer(SETTLE, move |res: Result<Vec<DebouncedEvent>, _>| {
-        if let Ok(events) = res
-            && events
-                .iter()
-                .any(|e| e.path.file_name() == Some(name.as_os_str()))
-        {
-            on_change();
-        }
-    }) {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!(error = %e, "cannot watch for file changes; polling only");
-            return None;
-        }
-    };
-    if let Err(e) = debouncer.watcher().watch(&dir, RecursiveMode::NonRecursive) {
-        tracing::warn!(dir = %dir.display(), error = %e, "cannot watch the file's directory; polling only");
-        return None;
-    }
+    let w = watch_in(
+        &dir,
+        move |p| p.file_name() == Some(name.as_os_str()),
+        on_change,
+    )?;
     tracing::info!(file = %target.display(), "following the file for changes");
-    Some(debouncer)
+    Some(w)
 }
 
 /// Call `on_change` whenever anything in `dir` (not below it) is created,
@@ -60,22 +46,38 @@ pub fn watch_dir<F: Fn() + Send + 'static>(
     on_change: F,
 ) -> Option<Debouncer<notify::RecommendedWatcher>> {
     let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let w = watch_in(&dir, |_| true, on_change)?;
+    tracing::info!(dir = %dir.display(), "following the directory for changes");
+    Some(w)
+}
+
+/// The watch on `dir`, reporting the events `wanted` picks.
+fn watch_in<P, F>(
+    dir: &Path,
+    wanted: P,
+    on_change: F,
+) -> Option<Debouncer<notify::RecommendedWatcher>>
+where
+    P: Fn(&Path) -> bool + Send + 'static,
+    F: Fn() + Send + 'static,
+{
     let mut debouncer = match new_debouncer(SETTLE, move |res: Result<Vec<DebouncedEvent>, _>| {
-        if res.is_ok_and(|events| !events.is_empty()) {
+        if let Ok(events) = res
+            && events.iter().any(|e| wanted(&e.path))
+        {
             on_change();
         }
     }) {
         Ok(d) => d,
         Err(e) => {
-            tracing::warn!(error = %e, "cannot watch for directory changes; polling only");
+            tracing::warn!(error = %e, "cannot watch for changes; polling only");
             return None;
         }
     };
-    if let Err(e) = debouncer.watcher().watch(&dir, RecursiveMode::NonRecursive) {
+    if let Err(e) = debouncer.watcher().watch(dir, RecursiveMode::NonRecursive) {
         tracing::warn!(dir = %dir.display(), error = %e, "cannot watch the directory; polling only");
         return None;
     }
-    tracing::info!(dir = %dir.display(), "following the directory for changes");
     Some(debouncer)
 }
 

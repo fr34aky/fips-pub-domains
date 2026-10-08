@@ -41,9 +41,10 @@ use tokio::net::{TcpListener, UdpSocket};
 #[derive(Parser)]
 #[command(name = "fips-pubdom-server", version, about)]
 struct Cli {
-    /// Node key: fips's key file (hex), or an nsec/hex string.
-    #[arg(long, global = true, default_value = "/etc/fips/fips.key")]
-    key: String,
+    /// Node key: fips's key file (hex), or an nsec/hex string. Default:
+    /// the configuration file's `key`, else /etc/fips/fips.key.
+    #[arg(long, global = true)]
+    key: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -99,9 +100,13 @@ enum Cmd {
     },
     /// Sign and publish the claim(s) to relays.
     Publish {
-        #[arg(long, required = true)]
+        /// Configuration file: its zones, relays and proof settings, as
+        /// `serve` would use them; flags given alongside override it.
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long, required_unless_present = "config")]
         zone: Vec<PathBuf>,
-        #[arg(long, required = true)]
+        #[arg(long, required_unless_present = "config")]
         relay: Vec<String>,
         /// Print the signed event instead of sending it.
         #[arg(long)]
@@ -111,7 +116,11 @@ enum Cmd {
     },
     /// Print the legacy DNS TXT record the operator must add (spec §4).
     Txt {
-        #[arg(long, required = true)]
+        /// Configuration file: its zones, and its port for zones that name
+        /// none.
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long, required_unless_present = "config")]
         zone: Vec<PathBuf>,
     },
 }
@@ -215,7 +224,14 @@ impl ServerConfig {
         else {
             return Ok(cfg);
         };
-        let mut args = shell_words(line).into_iter();
+        // `--flag value` and `--flag=value` alike, as clap takes them.
+        let mut args = shell_words(line)
+            .into_iter()
+            .flat_map(|w| match w.split_once('=') {
+                Some((f, v)) if f.starts_with("--") => vec![f.to_string(), v.to_string()],
+                _ => vec![w],
+            })
+            .into_iter();
         while let Some(a) = args.next() {
             match a.as_str() {
                 "--publish" => {}
@@ -245,13 +261,12 @@ impl ServerConfig {
                             .context("--bind")?,
                     )
                 }
-                other => {
-                    if let Some(v) = other.strip_prefix("--relay=") {
-                        cfg.publish.relays.push(v.to_string());
-                    } else {
-                        bail!("PUBDOM_SERVER_ARGS: {other:?} is not a serve flag init knows");
-                    }
+                "--key" => {
+                    cfg.key = args
+                        .next()
+                        .ok_or_else(|| anyhow!("--key without a value"))?
                 }
+                other => bail!("PUBDOM_SERVER_ARGS: {other:?} is not a serve flag init knows"),
             }
         }
         Ok(cfg)
@@ -559,9 +574,37 @@ struct Zones {
     dir: Option<PathBuf>,
     /// The port this process serves: a zone naming another is refused.
     port: u16,
+    /// One scan at a time: the watcher's thread, the timers and a query's
+    /// reload check all walk and change the same list.
+    scan: std::sync::Mutex<()>,
+    /// Files reported and skipped, with the mtime they had: reported once,
+    /// again only when they change.
+    skipped: std::sync::Mutex<std::collections::HashMap<PathBuf, Option<SystemTime>>>,
 }
 
 impl Zones {
+    fn new(author: Npub, zones: Vec<Zone>, dir: Option<PathBuf>, port: u16) -> Self {
+        Self {
+            author,
+            zones: RwLock::new(zones),
+            dir,
+            port,
+            scan: std::sync::Mutex::new(()),
+            skipped: std::sync::Mutex::new(Default::default()),
+        }
+    }
+
+    /// Whether `path` was already reported at this mtime; records it if not.
+    fn already_skipped(&self, path: &Path) -> bool {
+        let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        let mut g = self.skipped.lock().unwrap();
+        if g.get(path) == Some(&mtime) {
+            return true;
+        }
+        g.insert(path.to_path_buf(), mtime);
+        false
+    }
+
     /// The directory's `*.yaml` files against what is loaded: new files
     /// are loaded, files gone are dropped, files changed are reloaded (as
     /// `check_reload` does between scans). A file that does not load is
@@ -570,6 +613,7 @@ impl Zones {
         let Some(dir) = &self.dir else {
             return;
         };
+        let _one_at_a_time = self.scan.lock().unwrap();
         let mut present: Vec<PathBuf> = match std::fs::read_dir(dir) {
             Ok(rd) => rd
                 .filter_map(|e| e.ok().map(|e| e.path()))
@@ -593,11 +637,18 @@ impl Zones {
         };
         for i in gone.into_iter().rev() {
             let z = self.zones.write().unwrap().remove(i);
+            // A file skipped as a duplicate may be that domain's only file
+            // now: everything skipped is looked at again.
+            self.skipped.lock().unwrap().clear();
             tracing::info!(domain = %z.record.domain, zone = %z.path.display(), "zone file removed; no longer served");
         }
         for path in present {
             let known = self.zones.read().unwrap().iter().any(|z| z.path == path);
             if known {
+                self.skipped.lock().unwrap().remove(&path);
+                continue;
+            }
+            if self.already_skipped(&path) {
                 continue;
             }
             match load_zone(&path, self.author, self.port) {
@@ -616,6 +667,7 @@ impl Zones {
                         continue;
                     }
                     tracing::info!(domain = %z.record.domain, names = z.record.names.len(), zone = %path.display(), "zone loaded");
+                    self.skipped.lock().unwrap().remove(&path);
                     self.zones.write().unwrap().push(z);
                 }
                 Err(e) => {
@@ -623,27 +675,31 @@ impl Zones {
                 }
             }
         }
+        drop(_one_at_a_time);
         self.check_reload();
     }
 
     /// Reload any zone whose file changed (one stat per query, like fips's
     /// hosts file); a broken edit keeps the last good zone.
     fn check_reload(&self) {
-        let stale: Vec<(usize, PathBuf)> = {
+        let _one_at_a_time = self.scan.lock().unwrap();
+        let stale: Vec<PathBuf> = {
             let g = self.zones.read().unwrap();
             g.iter()
-                .enumerate()
-                .filter(|(_, z)| {
-                    std::fs::metadata(&z.path).and_then(|m| m.modified()).ok() != z.mtime
-                })
-                .map(|(i, z)| (i, z.path.clone()))
+                .filter(|z| std::fs::metadata(&z.path).and_then(|m| m.modified()).ok() != z.mtime)
+                .map(|z| z.path.clone())
                 .collect()
         };
-        for (i, path) in stale {
+        for path in stale {
             match load_zone(&path, self.author, self.port) {
                 Ok(z) => {
                     tracing::info!(zone = %path.display(), "zone reloaded");
-                    self.zones.write().unwrap()[i] = z;
+                    // By path, under the write lock: a rescan may have moved
+                    // the entry since the list was read.
+                    let mut g = self.zones.write().unwrap();
+                    if let Some(slot) = g.iter_mut().find(|o| o.path == path) {
+                        *slot = z;
+                    }
                 }
                 Err(e) => {
                     tracing::error!(zone = %path.display(), error = %e, "zone reload failed; keeping the old one")
@@ -850,7 +906,9 @@ async fn main() -> Result<()> {
                 Err(e) => return Err(e).with_context(|| env.display().to_string()),
             };
             let mut cfg = ServerConfig::from_env(zones, env_text.as_deref())?;
-            cfg.key = cli.key.clone();
+            if let Some(k) = &cli.key {
+                cfg.key = k.clone();
+            }
             let text = format!(
                 "# fips-pubdom-server configuration (docs/operators.md), written by `init`\n{}",
                 serde_yaml::to_string(&cfg)?
@@ -867,14 +925,45 @@ async fn main() -> Result<()> {
         }
         _ => {}
     }
-    let keys = load_keys(&cli.key)?;
+    // The key: the flag, else the configuration file's, else fips's.
+    let config_path = match &cli.cmd {
+        Cmd::Serve { config, .. } | Cmd::Publish { config, .. } | Cmd::Txt { config, .. } => {
+            config.clone()
+        }
+        _ => None,
+    };
+    let cfg = match &config_path {
+        Some(p) => ServerConfig::load(p)?,
+        None => ServerConfig::default(),
+    };
+    let keys = load_keys(cli.key.as_deref().unwrap_or(&cfg.key))?;
     let author = author_of(&keys);
+    // Zone files: the named ones, plus the configuration file's directory.
+    let zones_of = |named: &[PathBuf]| -> Result<Vec<Zone>> {
+        let mut zones: Vec<Zone> = named
+            .iter()
+            .map(|p| load_zone(p, author, cfg.port))
+            .collect::<Result<_>>()?;
+        if config_path.is_some() {
+            let store = Zones::new(author, Vec::new(), Some(cfg.zones.clone()), cfg.port);
+            store.rescan();
+            let named: Vec<String> = zones.iter().map(|z| z.record.domain.clone()).collect();
+            zones.extend(
+                store
+                    .zones
+                    .into_inner()
+                    .unwrap()
+                    .into_iter()
+                    .filter(|z| !named.contains(&z.record.domain)),
+            );
+        }
+        Ok(zones)
+    };
 
     match cli.cmd {
         Cmd::Validate { .. } | Cmd::Init { .. } => unreachable!("handled above"),
-        Cmd::Txt { zone } => {
-            for p in &zone {
-                let z = load_zone(p, author, DEFAULT_SERVER_PORT)?;
+        Cmd::Txt { zone, .. } => {
+            for z in &zones_of(&zone)? {
                 let rec = TxtRecord {
                     npub: author,
                     port: Some(z.port),
@@ -891,11 +980,25 @@ async fn main() -> Result<()> {
             relay,
             dry_run,
             proof,
+            ..
         } => {
-            let zones: Vec<Zone> = zone
-                .iter()
-                .map(|p| load_zone(p, author, DEFAULT_SERVER_PORT))
-                .collect::<Result<_>>()?;
+            let zones = zones_of(&zone)?;
+            let relay = if relay.is_empty() {
+                cfg.publish.relays.clone()
+            } else {
+                relay
+            };
+            if relay.is_empty() {
+                bail!("no relays: --relay, or publish.relays in the configuration file");
+            }
+            let proof = ProofArgs {
+                no_dnssec_proof: proof.no_dnssec_proof || !cfg.publish.dnssec_proof,
+                dns: if proof.dns.is_empty() {
+                    cfg.publish.dns.clone()
+                } else {
+                    proof.dns
+                },
+            };
             // A dry run prints what would be sent; it does not ask relays.
             let seed = if dry_run { Vec::new() } else { relay.clone() };
             let prover = Prover::new(proof, author, seed);
@@ -931,10 +1034,6 @@ async fn main() -> Result<()> {
             proof,
         } => {
             // The file sets the defaults, a flag given alongside wins.
-            let cfg = match &config {
-                Some(p) => ServerConfig::load(p)?,
-                None => ServerConfig::default(),
-            };
             let ttl = ttl.unwrap_or(cfg.ttl);
             let bind_addr = bind.or(cfg.bind);
             let relays = if relay.is_empty() {
@@ -951,7 +1050,7 @@ async fn main() -> Result<()> {
                     proof.dns
                 },
             };
-            let mut zones: Vec<Zone> = zone
+            let zones: Vec<Zone> = zone
                 .iter()
                 .map(|p| load_zone(p, author, cfg.port))
                 .collect::<Result<_>>()?;
@@ -966,28 +1065,6 @@ async fn main() -> Result<()> {
                 bail!("all zones served by one process must use the same port");
             }
             let dir = config.as_ref().map(|_| cfg.zones.clone());
-            if let Some(d) = &dir {
-                // Named files win over the directory's copy of the same domain.
-                let named: Vec<String> = zones.iter().map(|z| z.record.domain.clone()).collect();
-                let store = Zones {
-                    author,
-                    zones: RwLock::new(Vec::new()),
-                    dir: Some(d.clone()),
-                    port,
-                };
-                store.rescan();
-                zones.extend(
-                    store
-                        .zones
-                        .into_inner()
-                        .unwrap()
-                        .into_iter()
-                        .filter(|z| !named.contains(&z.record.domain)),
-                );
-                if zones.is_empty() {
-                    tracing::warn!(dir = %d.display(), "no zone files yet; serving nothing until one appears");
-                }
-            }
             let bind = SocketAddrV6::new(
                 bind_addr.unwrap_or_else(|| author.fips_address()),
                 port,
@@ -995,7 +1072,14 @@ async fn main() -> Result<()> {
                 0,
             );
             for z in &zones {
-                tracing::info!(domain = %z.record.domain, names = z.record.names.len(), "zone loaded");
+                tracing::info!(domain = %z.record.domain, names = z.record.names.len(), zone = %z.path.display(), "zone loaded");
+            }
+            // The directory's zones join the named ones here (a named file
+            // wins over the directory's copy of its domain) and are followed
+            // from here on.
+            let zones = Arc::new(Zones::new(author, zones, dir, port));
+            zones.rescan();
+            for z in snapshot(&zones) {
                 tracing::info!(
                     "legacy DNS record: _fips-dns.{}. TXT \"{}\"",
                     z.record.domain,
@@ -1006,12 +1090,11 @@ async fn main() -> Result<()> {
                     .render()
                 );
             }
-            let zones = Arc::new(Zones {
-                author,
-                zones: RwLock::new(zones),
-                dir,
-                port,
-            });
+            if let Some(d) = &zones.dir
+                && zones.zones.read().unwrap().is_empty()
+            {
+                tracing::warn!(dir = %d.display(), "no zone files yet; serving nothing until one appears");
+            }
             if zones.dir.is_some() {
                 // Zones come and go with their files: follow the directory,
                 // and rescan every 30 s for whatever the watcher misses (or
@@ -1048,7 +1131,8 @@ async fn main() -> Result<()> {
                     type Seen = (Vec<(String, Target)>, u16, std::time::Instant);
                     let mut seen: std::collections::HashMap<String, Seen> = Default::default();
                     loop {
-                        zs.rescan();
+                        // The watcher task keeps the list current; edits
+                        // to loaded files are picked up here as per query.
                         zs.check_reload();
                         for z in snapshot(&zs) {
                             let d = z.record.domain.clone();
@@ -1119,7 +1203,7 @@ mod tests {
         assert!(ServerConfig::parse("publish:\n  relays: [\"http://x\"]\n").is_err());
         assert!(ServerConfig::parse("zones: \"\"\n").is_err());
 
-        let env = "# the unit's file\nPUBDOM_SERVER_ARGS=\"--publish --relay wss://a.example --relay 'ws://npub1y.fips:80' --no-dnssec-proof --dns 1.1.1.1\"\n";
+        let env = "# the unit's file\nPUBDOM_SERVER_ARGS=\"--publish --relay wss://a.example --relay='ws://npub1y.fips:80' --no-dnssec-proof --dns=1.1.1.1 --key /etc/fips/other.key\"\n";
         let c = ServerConfig::from_env(Path::new("/etc/fips-pubdom/zones"), Some(env)).unwrap();
         assert_eq!(
             c.publish.relays,
@@ -1130,6 +1214,7 @@ mod tests {
         );
         assert!(!c.publish.dnssec_proof);
         assert_eq!(c.publish.dns, vec!["1.1.1.1".parse::<IpAddr>().unwrap()]);
+        assert_eq!(c.key, "/etc/fips/other.key");
         let c = ServerConfig::from_env(Path::new("/z"), None).unwrap();
         assert!(c.publish.relays.is_empty());
         assert!(
@@ -1201,12 +1286,7 @@ mod tests {
     fn the_zones_directory_is_rescanned() {
         let dir = temp_dir("zones");
         let me = Npub::from_bytes([1; 32]);
-        let zones = Zones {
-            author: me,
-            zones: RwLock::new(Vec::new()),
-            dir: Some(dir.clone()),
-            port: 5355,
-        };
+        let zones = Zones::new(me, Vec::new(), Some(dir.clone()), 5355);
         zones.rescan();
         assert!(zones.zones.read().unwrap().is_empty());
         std::fs::write(
@@ -1233,6 +1313,23 @@ mod tests {
             "the good one, not the broken, the other-port, the duplicate or the .txt"
         );
         assert_eq!(zones.lookup("www.example.org"), Some(me));
+        // The skipped ones are remembered, so a second scan does not report
+        // them again; a changed one is looked at anew.
+        assert_eq!(zones.skipped.lock().unwrap().len(), 3);
+        zones.rescan();
+        assert_eq!(zones.skipped.lock().unwrap().len(), 3);
+        std::fs::write(dir.join("broken.yaml"), "domain: example.com\n").unwrap();
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(dir.join("broken.yaml"))
+            .unwrap();
+        f.set_modified(SystemTime::now() + Duration::from_secs(2))
+            .unwrap();
+        zones.rescan();
+        assert_eq!(zones.zones.read().unwrap().len(), 2, "fixed and loaded");
+        assert_eq!(zones.skipped.lock().unwrap().len(), 2);
+        std::fs::remove_file(dir.join("broken.yaml")).unwrap();
+        zones.rescan();
         // Edited in place: picked up by the mtime check.
         std::thread::sleep(Duration::from_millis(20));
         std::fs::write(
@@ -1373,12 +1470,7 @@ mod tests {
         let other = Npub::from_bytes([2; 32]);
         std::fs::write(&p, format!("domain: example.org\nnames:\n  www: self\n  git: {other}\n  mail: legacy\n  \"*\": self\n")).unwrap();
         let me = Npub::from_bytes([1; 32]);
-        let zones = Zones {
-            author: me,
-            zones: RwLock::new(vec![load_zone(&p, me, 5355).unwrap()]),
-            dir: None,
-            port: 5355,
-        };
+        let zones = Zones::new(me, vec![load_zone(&p, me, 5355).unwrap()], None, 5355);
         assert_eq!(zones.lookup("www.example.org"), Some(me));
         assert_eq!(zones.lookup("git.example.org"), Some(other));
         assert_eq!(zones.lookup("mail.example.org"), None);

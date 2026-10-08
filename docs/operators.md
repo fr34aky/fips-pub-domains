@@ -42,10 +42,12 @@ putting `git` on the mesh: the server answers NXDOMAIN, and the client
 turns that into an ordinary legacy lookup. With a configuration file
 (step 4) the zones directory is followed: a file added is served within
 a second, one removed is dropped, one edited is re-read; a broken edit
-keeps the last good zone, a broken new file is reported and skipped.
-Two files for one domain: the first in name order wins, the other is
-reported. (Without a configuration file, zones are named one by one on
-the command line and a new file needs a restart.)
+keeps the last good zone, a broken new file is reported and skipped
+(once, until it changes). Two files for one domain: the first in name
+order wins at start, and a file for a domain already served is skipped
+until the serving file goes away. (Without a configuration file, zones
+are named one by one on the command line and a new file needs a
+restart.)
 
 ## 2. The DNS record
 
@@ -139,7 +141,10 @@ publish:
 `fips-pubdom-server serve --config /etc/fips-pubdom/server.yaml` is what
 `packaging/systemd/fips-pubdom-server.service` runs when the file
 exists; a flag given alongside overrides the file. Publishing is on
-when `relays` is not empty. `fips-pubdom-server validate config <
+when `relays` is not empty. `txt --config` and `publish --config` take
+the zones, the port, the relays and the proof settings from the same
+file, so the record printed is the one the server serves; `--key` on
+the command line wins over the file's. `fips-pubdom-server validate config <
 server.yaml` checks a file. A server set up before there was a
 configuration file keeps working as it is — the unit falls back to one
 `--zone` per file and `PUBDOM_SERVER_ARGS` from

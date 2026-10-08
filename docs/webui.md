@@ -1,7 +1,8 @@
 # Public domains in fips-ui — design
 
 Status: design, 2026-10-08, revised the same day after the maintainer's
-proposal. Nothing of it is built. The decisions are proposals until the
+proposal. Phases 1 and 2 — this repository's share — are built (#24,
+#25); phases 3–5 are fips-ui's. The decisions are proposals until the
 open questions at the end are answered; the phases are ordered so that
 each ships on its own.
 
@@ -100,41 +101,51 @@ load.
 
 ### 3. A control socket per binary
 
-Unix sockets, JSON per line, request and reply, modelled on fips's
-control socket so fips-ui's `control.ts` can talk to them with the
-same code: `/run/fips-pubdom/server.sock` and
-`/run/fips-pubdom/daemon.sock`, group `fips` (fips-ui's user is in it
-for fips's socket already), `RuntimeDirectory=fips-pubdom` in both
-units. Read commands for the viewer, write commands for the admin —
-the roles are fips-ui's; the sockets trust whoever can open them, as
-fips's does.
+Unix sockets, fips's own protocol — one request per connection, the
+request one JSON line `{"command": "…", "params": {…}}` of at most
+4096 bytes, the reply one line `{"status": "ok", "data": …}` or
+`{"status": "error", "message": "…"}` — so fips-ui's `control.ts` and
+`fipsctl`'s client code apply unchanged. The daemon's is
+`/run/fips-pubdom/control.sock`, the server's
+`/run/fips-pubdom-server/control.sock` (one `RuntimeDirectory` each:
+systemd removes a unit's runtime directory when it stops, so two units
+cannot share one); both are mode 0660 and handed to group `fips`
+(fips-ui's user is in it for fips's socket already; the server's unit
+is in it as a supplementary group, which is enough to chgrp). By hand,
+`control:` in either configuration file points anywhere (a socket path
+is at most 107 bytes), or `null` for none. Read commands for the
+viewer, write commands for the admin — the roles are fips-ui's; the
+sockets trust whoever can open them, as fips's does.
 
 Server (`fips-pubdom-server`):
 
 | command | reply |
 |---|---|
-| `status` | npub, fips address, listening (udp, tcp), relays with the outcome of the last publish each, next publish and why |
-| `zones` | per domain: file, loaded or the error, port, names, claim published at, zone record published at, DNSSEC proof valid until or none and why |
-| `check-dns <domain>` | the resolver's own TXT verification (`pubdom-resolve::TxtVerifier`, DNSSEC, two resolvers): `verified dnssec` / `verified dns` / `names another key` / `no record` / `unreachable`, plus the record text to add |
-| `txt <domain>` | the TXT record line, as the `txt` subcommand prints it |
-| `publish [domain]` | publish now; per-relay outcome |
-| `attestations <domain>` | what witnesses have published about the domain, from the configured mesh relays |
-| `log [n]` | the last n lines from the process's ring buffer |
+| `status` | version, npub, fips address, bind, port, zones directory, whether publishing, relays each with when it last accepted and its last error |
+| `zones` | per domain: file, port, names, the TXT record line, claim and zone record published at, DNSSEC proof valid until, next publish at, last error; plus the files skipped |
+| `txt {domain}` | the TXT record line, as the `txt` subcommand prints it |
+| `check-dns {domain}` | the resolver's own TXT verification with the proof's resolvers (`publish.dns`, else the system's and two public validating ones): `verified (Dnssec)` / `verified (Dns)` / `names another key` / `names this server with another port` / `no record` / `resolvers disagree` / `unreachable`, plus the record text to add |
+| `publish {domain?}` | publish now, one domain or all; the outcome lands in `status` and `zones` |
+| `log {n?}` | the last n lines (default 200) from the process's ring buffer of 500 |
+
+`attestations` waits for phase 5.
 
 Daemon (`fips-pubdomd`):
 
 | command | reply |
 |---|---|
-| `status` | online, upstreams, backend, listen addresses, relays connected |
+| `status` | version, online, upstreams and where they come from, listen addresses, the backend `setup` recorded, pin file, dnssec, plain_probe, witnesses, threshold, relays configured |
 | `pins` | the pin file as `fips-pubdom pins list` shows it |
-| `verify <domain>` | what `fips-pubdom verify` prints, as JSON |
-| `forget <domain>` | drop the domain's pins (admin) |
+| `forget {domain}` | drop the domain's pins and flush the caches (admin) |
 | `flush` | flush caches (admin) |
-| `log [n]` | ring buffer |
+| `log {n?}` | ring buffer |
 
-The CLI grows `--socket` to use them where a daemon or server runs, so
-`fips-pubdom verify` on a daemon host stops needing `sudo` for the pin
-file.
+`verify` as a socket command waits for the pages that need it (phase
+3): the CLI's verify is inline there and becomes a library report
+first.
+
+`fips-pubdom ctl [--socket PATH] COMMAND [PARAMS-JSON]` sends one
+command and prints the reply — the test tool, and a script's way in.
 
 ## What fips-ui shows
 
@@ -172,9 +183,11 @@ fips-ui's existing access list.
    needs a restart. One difference from the draft: `server.yaml` is read
    at start, a change to it takes a restart (the helper restarts the
    unit after writing it anyway).
-2. **This repository: the two control sockets** and `--socket` in the
-   CLI; `RuntimeDirectory` in the units; a testing.md level that drives
-   both from `socat`.
+2. Done (fips-pub-domains #25): **the two control sockets**, the
+   `pubdom-control` crate (protocol, log ring, client), `fips-pubdom
+   ctl`; `RuntimeDirectory` in the units; testing.md level 3f drives
+   both. `verify` and `attestations` as socket commands are left for
+   the phases that need them.
 3. **fips-ui: detection and the read-only pages** (Server, Resolver,
    Log), with mesh viewers.
 4. **fips-ui: editing** through the helper (new verbs `pubdom-zone-apply
@@ -189,9 +202,8 @@ without 3: the sockets serve the CLI too.
 
 ## Open questions for the maintainer
 
-- **Socket protocol**: fips's own line-JSON shape, so fips-ui's client
-  code is reused? Proposed: yes; the exact framing is read from fips's
-  `control.rs` before phase 2.
+- Settled: the socket protocol is fips's own line-JSON shape, read
+  from `fipsctl` and fips-ui's `control.ts`.
 - **Who runs `init`**: the install guide (once, by hand) or the unit at
   start when `server.yaml` is missing and `zones/` is not? Proposed:
   the guide; the unit falls back to the old flags while there is no

@@ -105,7 +105,16 @@ allow_unverified_offline: false                  # resolve unverifiable claims o
 witnesses: []                                    # npubs whose attestations count offline (spec §3.2); nobody else's are fetched
 attestation_threshold: 2                         # k: witnesses that must attest a server; 0 = off
 budget_ms: 4500                                  # whole lookup; on expiry the legacy answer is used
+control: /run/fips-pubdom/control.sock           # the control socket for fips-ui and `fips-pubdom ctl`; null: none
 ```
+
+**The control socket** answers `status`, `pins`, `forget`, `flush` and
+`log` in fips's line-JSON protocol ([webui.md](webui.md)), for fips-ui
+and for `fips-pubdom ctl COMMAND [PARAMS]` (`fips-pubdom ctl pins`,
+`fips-pubdom ctl forget '{"domain":"example.org"}'`). The unit creates
+its directory; by hand, point `control:` somewhere that exists, or
+`null`. Whoever can open the socket (group `fips`) may use every
+command.
 
 Not in the file (built-in, see the resolver's `ResolverConfig`): a server
 that does not answer step 3 is skipped for 20 seconds, tripling per

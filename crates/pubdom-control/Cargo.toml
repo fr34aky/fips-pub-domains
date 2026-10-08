@@ -1,0 +1,19 @@
+[package]
+name = "pubdom-control"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The control socket of fips-pubdomd and fips-pubdom-server: fips's line-JSON protocol, a log ring, a client"
+
+# A host crate, like the daemon and the server: Unix sockets are Unix
+# (docs/platforms.md keeps the library crates free of that).
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tokio = { version = "1", features = ["rt", "net", "io-util", "macros", "time"] }
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread"] }

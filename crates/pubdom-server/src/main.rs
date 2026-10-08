@@ -28,8 +28,11 @@ use pubdom_core::domain::{normalize, relative_label};
 use pubdom_core::txt::TxtRecord;
 use pubdom_core::{DEFAULT_SERVER_PORT, Npub, synth};
 use pubdom_resolve::proof;
-use pubdom_resolve::relay::{claim_event_json, publish_claim, publish_zone, zone_event_json};
+use pubdom_resolve::relay::{
+    Outcome, claim_event_json, publish_claim, publish_zone, zone_event_json,
+};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::path::{Path, PathBuf};
@@ -150,6 +153,10 @@ struct ServerConfig {
     /// Answer TTL in seconds.
     ttl: u32,
     publish: PublishConfig,
+    /// The control socket (docs/webui.md): status, zones, txt, check-dns,
+    /// publish, log, for fips-ui and `fips-pubdom ctl`. `null` for none.
+    /// Created only if its directory exists.
+    control: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -174,8 +181,235 @@ impl Default for ServerConfig {
             port: DEFAULT_SERVER_PORT,
             ttl: 300,
             publish: PublishConfig::default(),
+            control: Some(PathBuf::from("/run/fips-pubdom-server/control.sock")),
         }
     }
+}
+
+/// What the control socket reports about publishing: filled by the publish
+/// loop, read by `status` and `zones`. Times are unix seconds.
+#[derive(Debug, Default, Clone, Serialize)]
+struct Published {
+    /// Per domain.
+    domains: BTreeMap<String, DomainStatus>,
+    /// Per relay: the outcome of the last publication that tried it.
+    relays: BTreeMap<String, RelayStatus>,
+}
+
+#[derive(Debug, Default, Clone, Serialize)]
+struct DomainStatus {
+    claim_published_at: Option<u64>,
+    zone_published_at: Option<u64>,
+    dnssec_proof_until: Option<u64>,
+    next_publish_at: Option<u64>,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Serialize)]
+struct RelayStatus {
+    accepted_at: Option<u64>,
+    last_error: Option<String>,
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// What the control socket needs from the serving process.
+struct ServerControl {
+    author: Npub,
+    bind: SocketAddrV6,
+    zones: Arc<Zones>,
+    relays: Vec<String>,
+    /// Resolvers for `check-dns`: the proof's (`publish.dns`, else the
+    /// system's and two public validating ones — a local stub strips
+    /// DNSSEC records, and the check must see what a client sees).
+    dns: Vec<IpAddr>,
+    published: Arc<RwLock<Published>>,
+    /// Asks the publish loop to publish now: a domain, or every one.
+    publish_now: Option<tokio::sync::mpsc::Sender<Option<String>>>,
+    log: pubdom_control::LogRing,
+}
+
+/// The control socket's commands (docs/webui.md): what fips-ui's Server
+/// page and `fips-pubdom ctl` ask.
+fn control_handler(c: Arc<ServerControl>) -> pubdom_control::Handler {
+    use pubdom_control::{Request, Response};
+    Arc::new(move |req: Request| {
+        let c = c.clone();
+        Box::pin(async move {
+            match req.command.as_str() {
+                "status" => {
+                    let p = c.published.read().unwrap().clone();
+                    Response::ok(serde_json::json!({
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "npub": c.author.to_string(),
+                        "address": c.author.fips_address().to_string(),
+                        "bind": c.bind.to_string(),
+                        "port": c.bind.port(),
+                        "zones_dir": c.zones.dir,
+                        "publishing": c.publish_now.is_some(),
+                        "relays": c.relays.iter().map(|r| serde_json::json!({
+                            "url": r,
+                            "accepted_at": p.relays.get(r).and_then(|s| s.accepted_at),
+                            "last_error": p.relays.get(r).and_then(|s| s.last_error.clone()),
+                        })).collect::<Vec<_>>(),
+                    }))
+                }
+                "zones" => {
+                    c.zones.check_reload();
+                    let p = c.published.read().unwrap().clone();
+                    let zones: Vec<Value> = snapshot(&c.zones)
+                        .iter()
+                        .map(|z| {
+                            let d = &z.record.domain;
+                            let st = p.domains.get(d).cloned().unwrap_or_default();
+                            serde_json::json!({
+                                "domain": d,
+                                "file": z.path,
+                                "port": z.port,
+                                "names": z.record.names.iter().map(|(l, t)| serde_json::json!({
+                                    "label": l,
+                                    "target": match t {
+                                        Target::Author => "self".to_string(),
+                                        Target::Legacy => "legacy".to_string(),
+                                        Target::Node(n) => n.to_string(),
+                                    },
+                                })).collect::<Vec<_>>(),
+                                "txt_record": txt_line(d, c.author, z.port),
+                                "claim_published_at": st.claim_published_at,
+                                "zone_published_at": st.zone_published_at,
+                                "dnssec_proof_until": st.dnssec_proof_until,
+                                "next_publish_at": st.next_publish_at,
+                                "last_error": st.last_error,
+                            })
+                        })
+                        .collect();
+                    let skipped: Vec<Value> = c
+                        .zones
+                        .skipped
+                        .lock()
+                        .unwrap()
+                        .keys()
+                        .map(|p| serde_json::json!({ "file": p }))
+                        .collect();
+                    Response::ok(serde_json::json!({ "zones": zones, "skipped": skipped }))
+                }
+                "txt" => match req.str_param("domain") {
+                    Ok(d) => match zone_named(&c.zones, d) {
+                        Some(z) => Response::ok(txt_line(&z.record.domain, c.author, z.port)),
+                        None => Response::error("no such zone"),
+                    },
+                    Err(e) => e,
+                },
+                "check-dns" => match req.str_param("domain") {
+                    Ok(d) => match zone_named(&c.zones, d) {
+                        Some(z) => check_dns(&z.record.domain, c.author, z.port, &c.dns).await,
+                        None => Response::error("no such zone"),
+                    },
+                    Err(e) => e,
+                },
+                "publish" => {
+                    let Some(tx) = &c.publish_now else {
+                        return Response::error("publishing is off: no relays configured");
+                    };
+                    let which = match req.params.get("domain").and_then(Value::as_str) {
+                        Some(d) => match zone_named(&c.zones, d) {
+                            Some(z) => Some(z.record.domain),
+                            None => return Response::error("no such zone"),
+                        },
+                        None => None,
+                    };
+                    match tx.send(which.clone()).await {
+                        Ok(()) => Response::ok(
+                            serde_json::json!({ "requested": which.unwrap_or_else(|| "all".into()) }),
+                        ),
+                        Err(_) => Response::error("the publisher is gone"),
+                    }
+                }
+                "log" => Response::ok(c.log.lines(req.u64_param("n").unwrap_or(200) as usize)),
+                other => Response::error(format!("unknown command: {other}")),
+            }
+        })
+    })
+}
+
+fn txt_line(domain: &str, author: Npub, port: u16) -> String {
+    format!(
+        "_fips-dns.{domain}.  3600  IN  TXT  \"{}\"",
+        TxtRecord {
+            npub: author,
+            port: Some(port)
+        }
+        .render()
+    )
+}
+
+fn zone_named(zones: &Zones, domain: &str) -> Option<Zone> {
+    let d = normalize(domain)?;
+    snapshot(zones).into_iter().find(|z| z.record.domain == d)
+}
+
+/// The resolver's own TXT verification of a domain, as a client would do
+/// it: DNSSEC where the zone is signed, two agreeing resolvers otherwise.
+async fn check_dns(
+    domain: &str,
+    author: Npub,
+    port: u16,
+    upstreams: &[IpAddr],
+) -> pubdom_control::Response {
+    use pubdom_control::Response;
+    use pubdom_core::policy::TxtLookup;
+    if upstreams.is_empty() {
+        return Response::error("no resolvers");
+    }
+    let v = match pubdom_resolve::TxtVerifier::new(upstreams, true, Duration::from_millis(1500)) {
+        Ok(v) => v,
+        Err(e) => return Response::error(e),
+    };
+    let (txt, ttl) = v.lookup(domain).await;
+    let (verdict, detail) = match &txt {
+        TxtLookup::Hit { records, method } => {
+            if records.iter().any(|r| r.npub == author) {
+                let ok_port = records
+                    .iter()
+                    .any(|r| r.npub == author && r.port.unwrap_or(DEFAULT_SERVER_PORT) == port);
+                if ok_port {
+                    (format!("verified ({method:?})"), None)
+                } else {
+                    (
+                        "names this server with another port".to_string(),
+                        Some(format!("serving {port}")),
+                    )
+                }
+            } else {
+                (
+                    "names another key".to_string(),
+                    Some(
+                        records
+                            .iter()
+                            .map(|r| r.npub.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    ),
+                )
+            }
+        }
+        TxtLookup::Miss { method } => ("no record".to_string(), Some(format!("{method:?}"))),
+        TxtLookup::Disputed => ("resolvers disagree".to_string(), None),
+        TxtLookup::Unreachable => ("unreachable".to_string(), None),
+    };
+    Response::ok(serde_json::json!({
+        "domain": domain,
+        "verdict": verdict,
+        "detail": detail,
+        "ttl": ttl,
+        "upstreams": v.upstreams(),
+        "txt_record": txt_line(domain, author, port),
+    }))
 }
 
 impl Default for PublishConfig {
@@ -793,21 +1027,52 @@ async fn serve(zones: Arc<Zones>, bind: SocketAddrV6, ttl: u32) -> Result<()> {
 /// its signatures, so halfway through the remaining validity of the
 /// shortest-lived one, at least an hour and at most 24 h from now.
 async fn publish_all(keys: &Keys, zones: &[Zone], relays: &[String], prover: &Prover) -> Duration {
+    let published = RwLock::new(Published::default());
     let mut next = Duration::from_secs(24 * 3600);
     for z in zones {
-        next = next.min(publish_one(keys, z, relays, prover).await);
+        next = next.min(publish_one(keys, z, relays, prover, &published).await);
     }
     next
 }
 
 /// One zone's claim and zone record; returns when to publish it again.
-async fn publish_one(keys: &Keys, z: &Zone, relays: &[String], prover: &Prover) -> Duration {
+async fn publish_one(
+    keys: &Keys,
+    z: &Zone,
+    relays: &[String],
+    prover: &Prover,
+    published: &RwLock<Published>,
+) -> Duration {
     let Proof {
         chain,
         expires,
         retry,
     } = prover.proof(&z.record.domain).await;
-    match publish_claim(
+    let d = z.record.domain.clone();
+    // Per relay, as it went: accepted now, or its own reason; a setup
+    // failure is every relay's.
+    let note = |published: &RwLock<Published>, outcome: &Result<Outcome, String>| {
+        let now = unix_now();
+        let mut p = published.write().unwrap();
+        match outcome {
+            Ok(o) => {
+                for r in &o.accepted {
+                    let st = p.relays.entry(r.clone()).or_default();
+                    st.accepted_at = Some(now);
+                    st.last_error = None;
+                }
+                for (r, why) in &o.rejected {
+                    p.relays.entry(r.clone()).or_default().last_error = Some(why.clone());
+                }
+            }
+            Err(e) => {
+                for r in relays {
+                    p.relays.entry(r.clone()).or_default().last_error = Some(e.clone());
+                }
+            }
+        }
+    };
+    let claim = publish_claim(
         keys.clone(),
         relays,
         &z.record.domain,
@@ -815,29 +1080,86 @@ async fn publish_one(keys: &Keys, z: &Zone, relays: &[String], prover: &Prover) 
         chain.as_deref(),
         Duration::from_secs(10),
     )
-    .await
-    {
-        Ok(ok) => {
-            tracing::info!(domain = %z.record.domain, relays = ?ok, dnssec_proof_until = ?expires, "claim published")
+    .await;
+    note(published, &claim);
+    match &claim {
+        Ok(o) if !o.none_accepted() => {
+            tracing::info!(domain = %d, relays = ?o.accepted, dnssec_proof_until = ?expires, "claim published");
+            let mut p = published.write().unwrap();
+            let st = p.domains.entry(d.clone()).or_default();
+            st.claim_published_at = Some(unix_now());
+            st.dnssec_proof_until = expires;
+            st.last_error = None;
         }
-        Err(e) => tracing::error!(domain = %z.record.domain, error = %e, "claim not published"),
+        Ok(_) => {
+            tracing::error!(domain = %d, "claim not published: no relay accepted it");
+            published
+                .write()
+                .unwrap()
+                .domains
+                .entry(d.clone())
+                .or_default()
+                .last_error = Some("no relay accepted the claim".into());
+        }
+        Err(e) => {
+            tracing::error!(domain = %d, error = %e, "claim not published");
+            published
+                .write()
+                .unwrap()
+                .domains
+                .entry(d.clone())
+                .or_default()
+                .last_error = Some(e.clone());
+        }
     }
-    match publish_zone(
+    let zone = publish_zone(
         keys.clone(),
         relays,
         &z.record.domain,
         &z.record.names,
         Duration::from_secs(10),
     )
-    .await
-    {
-        Ok(ok) => {
-            tracing::info!(domain = %z.record.domain, names = z.record.names.len(), relays = ?ok, "zone record published")
+    .await;
+    note(published, &zone);
+    match &zone {
+        Ok(o) if !o.none_accepted() => {
+            tracing::info!(domain = %d, names = z.record.names.len(), relays = ?o.accepted, "zone record published");
+            published
+                .write()
+                .unwrap()
+                .domains
+                .entry(d.clone())
+                .or_default()
+                .zone_published_at = Some(unix_now());
+        }
+        Ok(_) => {
+            tracing::error!(domain = %d, "zone record not published: no relay accepted it");
+            published
+                .write()
+                .unwrap()
+                .domains
+                .entry(d.clone())
+                .or_default()
+                .last_error = Some("no relay accepted the zone record".into());
         }
         Err(e) => {
-            tracing::error!(domain = %z.record.domain, error = %e, "zone record not published")
+            tracing::error!(domain = %d, error = %e, "zone record not published");
+            published
+                .write()
+                .unwrap()
+                .domains
+                .entry(d.clone())
+                .or_default()
+                .last_error = Some(e.clone());
         }
     }
+    published
+        .write()
+        .unwrap()
+        .domains
+        .entry(d)
+        .or_default()
+        .next_publish_at = Some(unix_now() + retry.as_secs());
     retry
 }
 
@@ -856,10 +1178,16 @@ fn snapshot(zones: &Zones) -> Vec<Zone> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    // The last lines stay readable over the control socket (`log`).
+    let log = pubdom_control::LogRing::new(500);
+    tracing_subscriber::registry()
+        .with(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
+        .with(tracing_subscriber::fmt::layer())
+        .with(log.layer())
         .init();
     let cli = Cli::parse();
     // Commands that touch no key must not need one: `validate` runs from
@@ -963,15 +1291,7 @@ async fn main() -> Result<()> {
         Cmd::Validate { .. } | Cmd::Init { .. } => unreachable!("handled above"),
         Cmd::Txt { zone, .. } => {
             for z in &zones_of(&zone)? {
-                let rec = TxtRecord {
-                    npub: author,
-                    port: Some(z.port),
-                };
-                println!(
-                    "_fips-dns.{}.  3600  IN  TXT  \"{}\"",
-                    z.record.domain,
-                    rec.render()
-                );
+                println!("{}", txt_line(&z.record.domain, author, z.port));
             }
         }
         Cmd::Publish {
@@ -1049,6 +1369,7 @@ async fn main() -> Result<()> {
                     proof.dns
                 },
             };
+            let proof_dns = proof.dns.clone();
             let zones: Vec<Zone> = zone
                 .iter()
                 .map(|p| load_zone(p, author, cfg.port))
@@ -1080,13 +1401,8 @@ async fn main() -> Result<()> {
             zones.rescan();
             for z in snapshot(&zones) {
                 tracing::info!(
-                    "legacy DNS record: _fips-dns.{}. TXT \"{}\"",
-                    z.record.domain,
-                    TxtRecord {
-                        npub: author,
-                        port: Some(z.port)
-                    }
-                    .render()
+                    "legacy DNS record: {}",
+                    txt_line(&z.record.domain, author, z.port)
                 );
             }
             if let Some(d) = &zones.dir
@@ -1115,20 +1431,31 @@ async fn main() -> Result<()> {
                     }
                 });
             }
+            let published = Arc::new(RwLock::new(Published::default()));
+            let mut publish_now = None;
             if publish {
                 if relays.is_empty() {
                     bail!("--publish needs at least one --relay");
                 }
-                let (k, zs, rl) = (keys.clone(), zones.clone(), relays.clone());
+                let (k, zs, rl, pb) = (
+                    keys.clone(),
+                    zones.clone(),
+                    relays.clone(),
+                    published.clone(),
+                );
                 let prover = Prover::new(proof, author, relays.clone());
+                let (tx, mut rx) = tokio::sync::mpsc::channel::<Option<String>>(8);
+                publish_now = Some(tx);
                 tokio::spawn(async move {
                     // Per zone: at start, whenever its file changed (the zone
-                    // record must say what the server would answer), and
-                    // before its DNSSEC proof runs out — every 24 h at the
-                    // latest. One zone's hourly retry does not republish the
-                    // others.
+                    // record must say what the server would answer), before
+                    // its DNSSEC proof runs out — every 24 h at the latest —
+                    // and when the control socket asks. One zone's hourly
+                    // retry does not republish the others.
                     type Seen = (Vec<(String, Target)>, u16, std::time::Instant);
                     let mut seen: std::collections::HashMap<String, Seen> = Default::default();
+                    let mut asked: Option<Option<String>> = None;
+                    let mut closed = false;
                     loop {
                         // The watcher task keeps the list current; edits
                         // to loaded files are picked up here as per query.
@@ -1142,9 +1469,10 @@ async fn main() -> Result<()> {
                                         || std::time::Instant::now() >= *at
                                 }
                                 None => true,
-                            };
+                            } || matches!(&asked, Some(None))
+                                || matches!(&asked, Some(Some(x)) if *x == d);
                             if due {
-                                let next = publish_one(&k, &z, &rl, &prover).await;
+                                let next = publish_one(&k, &z, &rl, &prover, &pb).await;
                                 tracing::debug!(domain = %d, in_secs = next.as_secs(), "next publication");
                                 seen.insert(
                                     d,
@@ -1156,10 +1484,54 @@ async fn main() -> Result<()> {
                                 );
                             }
                         }
-                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        // A closed channel (no control socket) must not
+                        // turn the wait into a spin: then only the timer.
+                        asked = tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_secs(30)) => None,
+                            r = rx.recv(), if !closed => match r {
+                                Some(which) => {
+                                    tracing::info!(domain = ?which, "publishing now, as asked over the control socket");
+                                    Some(which)
+                                }
+                                None => {
+                                    closed = true;
+                                    None
+                                }
+                            },
+                        };
                     }
                 });
             }
+            // The control socket, where its directory exists (the unit's
+            // RuntimeDirectory; by hand, wherever the file points).
+            let _control = match &cfg.control {
+                Some(sock) if sock.parent().is_some_and(|d| d.is_dir()) => {
+                    let c = Arc::new(ServerControl {
+                        author,
+                        bind,
+                        zones: zones.clone(),
+                        relays: relays.clone(),
+                        dns: if proof_dns.is_empty() {
+                            pubdom_resolve::proof::default_upstreams()
+                        } else {
+                            proof_dns
+                        },
+                        published,
+                        publish_now,
+                        log,
+                    });
+                    Some(
+                        pubdom_control::serve(sock, Some("fips"), control_handler(c))
+                            .await
+                            .with_context(|| format!("control socket {}", sock.display()))?,
+                    )
+                }
+                Some(sock) => {
+                    tracing::warn!(socket = %sock.display(), "control socket directory missing; no control socket");
+                    None
+                }
+                None => None,
+            };
             let _ = SocketAddr::from(bind);
             serve(zones, bind, ttl).await?;
         }

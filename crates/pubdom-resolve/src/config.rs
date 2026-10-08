@@ -20,6 +20,7 @@
 //! witnesses: ["npub1…", "npub1…"]      # whose attestations count offline (spec §3.2)
 //! attestation_threshold: 2             # k: witnesses that must agree; 0 = off
 //! budget_ms: 4500
+//! control: /run/fips-pubdom/control.sock   # the control socket (fips-ui, `fips-pubdom ctl`); null: none
 //! ```
 
 use crate::mesh::KernelMeshDns;
@@ -57,6 +58,10 @@ pub struct Config {
     /// attestations off even with witnesses configured.
     pub attestation_threshold: usize,
     pub budget_ms: u64,
+    /// The control socket (docs/webui.md): status, pins, forget, flush,
+    /// log, for fips-ui and `fips-pubdom ctl`. `null` for none. Created
+    /// only if its directory exists.
+    pub control: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -80,6 +85,7 @@ impl Default for Config {
             witnesses: Vec::new(),
             attestation_threshold: d.attestation_threshold,
             budget_ms: 4500,
+            control: Some(PathBuf::from("/run/fips-pubdom/control.sock")),
         }
     }
 }

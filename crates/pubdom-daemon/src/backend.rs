@@ -31,6 +31,14 @@ const RESOLV_CONF: &str = "etc/resolv.conf";
 /// What `setup` keeps, under /etc/fips-pubdom next to the config: its
 /// backend, what it replaced, what it snapshotted.
 const STATE_BACKEND: &str = "etc/fips-pubdom/backend";
+
+/// The backend `setup` recorded on this system, for the control socket's
+/// `status`; `None` before any `setup`.
+pub fn recorded() -> Option<String> {
+    Host::system()
+        .read(STATE_BACKEND)
+        .map(|s| s.trim().to_string())
+}
 const RESOLV_BACKUP: &str = "etc/fips-pubdom/resolv.conf.bak";
 const UPSTREAMS_SNAPSHOT: &str = "etc/fips-pubdom/upstreams.conf";
 

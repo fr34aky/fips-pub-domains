@@ -60,7 +60,8 @@ registered and the [NIP](docs/nip.md) is a draft. See
 |---|---|---|
 | `fips-pubdom-server` (`pubdom-server`) | the node that serves a domain | answers the mesh lookups from a zone file; publishes the claim |
 | `fips-pubdomd` (`pubdom-daemon`) | desktops and servers | forwarding resolver in front of all DNS; `setup` wires the OS |
-| `fips-pubdom` (`pubdom-cli`) | anywhere | `lookup`, `verify`, `claims`, `pins` |
+| `fips-pubdom` (`pubdom-cli`) | anywhere | `lookup`, `verify`, `claims`, `pins`, `ctl` (the control sockets) |
+| `pubdom-control` | the daemon and the server | their control socket in fips's protocol, for fips-ui ([docs/webui.md](docs/webui.md)) |
 | `pubdom-core` | everywhere | the policy: parsing, verification precedence, pinning, DNS synthesis — no I/O |
 | `pubdom-resolve` | everywhere | relay client, TXT verifier, mesh transport trait, pin file, the resolver |
 | fips2go `shim/src/names.rs` | Android | the same two library crates inside the VPN's DNS proxy |

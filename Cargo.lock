@@ -1501,12 +1501,24 @@ dependencies = [
  "anyhow",
  "clap",
  "nostr-sdk",
+ "pubdom-control",
  "pubdom-core",
  "pubdom-resolve",
  "serde",
  "serde_json",
  "serde_yaml",
  "simple-dns",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "pubdom-control"
+version = "0.2.6"
+dependencies = [
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1533,6 +1545,7 @@ dependencies = [
  "anyhow",
  "clap",
  "nostr-sdk",
+ "pubdom-control",
  "pubdom-core",
  "pubdom-resolve",
  "serde",
@@ -1574,6 +1587,7 @@ dependencies = [
  "clap",
  "hex",
  "nostr-sdk",
+ "pubdom-control",
  "pubdom-core",
  "pubdom-resolve",
  "serde",

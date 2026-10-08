@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stdin as the server would load it, for tooling that writes them
   (fips-ui, docs/webui.md). First phase of the fips-ui integration.
 
+- A control socket on each binary, in fips's line-JSON protocol, for
+  fips-ui and `fips-pubdom ctl`: the daemon's
+  `/run/fips-pubdom/control.sock` answers `status`, `pins`, `forget`,
+  `flush`, `log`; the server's `/run/fips-pubdom-server/control.sock`
+  answers `status`, `zones`, `txt`, `check-dns`, `publish`, `log`.
+  `control:` in either configuration file moves or disables it. The
+  units create the directories (`RuntimeDirectory`); the sockets are
+  mode 0660, group `fips`. New crate `pubdom-control`. Second phase of
+  the fips-ui integration.
+
 ### Changed
 
 - The file watcher moved from the daemon into `pubdom-resolve` behind

@@ -27,6 +27,9 @@ Restart=on-failure
 RestartSec=5
 # 78 (EX_CONFIG): no zone to serve — retrying will not help.
 RestartPreventExitStatus=78
+# /run/fips-pubdom-server/control.sock, group fips (docs/webui.md).
+RuntimeDirectory=fips-pubdom-server
+RuntimeDirectoryMode=0755
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

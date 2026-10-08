@@ -12,6 +12,9 @@ RestartSec=2
 # Loopback listener, pin file under /var/lib, nothing else.
 StateDirectory=fips-pubdom
 ConfigurationDirectory=fips-pubdom
+# /run/fips-pubdom/control.sock, group fips (docs/webui.md).
+RuntimeDirectory=fips-pubdom
+RuntimeDirectoryMode=0755
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

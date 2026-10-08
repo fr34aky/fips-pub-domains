@@ -107,8 +107,9 @@ Grouped by component. Each item says what, why, and where it stands.
   provides `server.yaml`, a watched zones directory, `validate`
   commands and a control socket per binary; fips-ui provides the
   pages. Phases 1–2 here, 3–5 in fips-ui. Phase 1 (the configuration
-  file, the watched zones directory, `init`, `validate`) is done (#24,
-  unreleased); the control sockets are next.
+  file, the watched zones directory, `init`, `validate`; #24) and
+  phase 2 (the control sockets, `fips-pubdom ctl`; #25) are done,
+  unreleased; phase 3 is fips-ui's.
 
 ### Phone (fips2go)
 

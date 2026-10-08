@@ -58,6 +58,19 @@ enum Cmd {
         #[command(subcommand)]
         cmd: PinsCmd,
     },
+    /// Send one command to a running daemon's or server's control socket
+    /// (docs/webui.md) and print the reply as JSON.
+    Ctl {
+        /// The socket; default: the daemon's, /run/fips-pubdom/control.sock
+        /// (the server's is /run/fips-pubdom-server/control.sock).
+        #[arg(long, default_value = "/run/fips-pubdom/control.sock")]
+        socket: PathBuf,
+        /// `status`, `pins`, `forget`, `flush`, `log`; on the server also
+        /// `zones`, `txt`, `check-dns`, `publish`.
+        command: String,
+        /// Parameters as JSON, e.g. '{"domain":"example.org"}'.
+        params: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -88,6 +101,20 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
     let cli = Cli::parse();
+    if let Cmd::Ctl {
+        socket,
+        command,
+        params,
+    } = &cli.cmd
+    {
+        let params = match params {
+            Some(p) => serde_json::from_str(p.as_str()).map_err(|e| anyhow!("params: {e}"))?,
+            None => serde_json::Value::Null,
+        };
+        let data = pubdom_control::query(socket, command, params).map_err(anyhow::Error::msg)?;
+        println!("{}", serde_json::to_string_pretty(&data)?);
+        return Ok(());
+    }
     let cfg = Config::load_or_default(&cli.config).map_err(anyhow::Error::msg)?;
     let upstreams = if cli.offline {
         Vec::new()
@@ -96,6 +123,7 @@ async fn main() -> Result<()> {
     };
 
     match cli.cmd {
+        Cmd::Ctl { .. } => unreachable!("handled above"),
         Cmd::Lookup { name, qtype: qt } => {
             let r = cfg
                 .build_resolver(upstreams)

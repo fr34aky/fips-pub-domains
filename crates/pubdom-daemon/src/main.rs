@@ -205,7 +205,55 @@ async fn handle(state: &Arc<State>, query: Vec<u8>) -> Option<Vec<u8>> {
     }
 }
 
-async fn run(cfg: Config) -> Result<()> {
+/// The control socket's commands (docs/webui.md): what fips-ui's Resolver
+/// page and `fips-pubdom ctl` ask.
+fn control_handler(state: Arc<State>, log: pubdom_control::LogRing) -> pubdom_control::Handler {
+    use pubdom_control::{Request, Response};
+    Arc::new(move |req: Request| {
+        let (state, log) = (state.clone(), log.clone());
+        Box::pin(async move {
+            match req.command.as_str() {
+                "status" => Response::ok(serde_json::json!({
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "online": state.resolver.is_online(),
+                    "upstreams": *state.upstreams.read().unwrap(),
+                    "listen": state.cfg.listen,
+                    "upstreams_from": state.cfg.upstreams_from,
+                    "backend": std::fs::read_to_string("/etc/fips-pubdom/backend").ok().map(|s| s.trim().to_string()),
+                    "pins": state.cfg.pins,
+                    "dnssec": state.cfg.dnssec,
+                    "plain_probe": state.cfg.plain_probe,
+                    "witnesses": state.cfg.witnesses,
+                    "attestation_threshold": state.cfg.attestation_threshold,
+                    "mesh_relays": state.cfg.mesh_relays,
+                    "public_relays": state.cfg.public_relays,
+                })),
+                "pins" => Response::ok(state.resolver.pins().list()),
+                "forget" => match req.str_param("domain") {
+                    Ok(d) => match pubdom_core::domain::normalize(d) {
+                        Some(d) => {
+                            let forgotten = state.resolver.pins().forget(&d);
+                            state.resolver.flush_caches();
+                            tracing::info!(domain = %d, forgotten, "pins forgotten over the control socket");
+                            Response::ok(serde_json::json!({ "domain": d, "forgotten": forgotten }))
+                        }
+                        None => Response::error("not a domain"),
+                    },
+                    Err(e) => e,
+                },
+                "flush" => {
+                    state.resolver.flush_caches();
+                    tracing::info!("caches flushed over the control socket");
+                    Response::ok(true)
+                }
+                "log" => Response::ok(log.lines(req.u64_param("n").unwrap_or(200) as usize)),
+                other => Response::error(format!("unknown command: {other}")),
+            }
+        })
+    })
+}
+
+async fn run(cfg: Config, log: pubdom_control::LogRing) -> Result<()> {
     let upstreams = cfg.current_upstreams();
     tracing::info!(?upstreams, listen = ?cfg.listen, pins = %cfg.pins.display(), "starting");
     // Only resolved routes a link's search domain past a global server;
@@ -237,6 +285,18 @@ async fn run(cfg: Config) -> Result<()> {
     });
 
     let mut tasks = Vec::new();
+    // The control socket, where its directory exists (the unit's
+    // RuntimeDirectory; by hand, wherever the config points).
+    if let Some(sock) = &state.cfg.control {
+        if sock.parent().is_some_and(|d| d.is_dir()) {
+            let h = pubdom_control::serve(sock, Some("fips"), control_handler(state.clone(), log))
+                .await
+                .with_context(|| format!("control socket {}", sock.display()))?;
+            tasks.push(h);
+        } else {
+            tracing::warn!(socket = %sock.display(), "control socket directory missing; no control socket");
+        }
+    }
     for addr in state.cfg.listen.clone() {
         let udp = UdpSocket::bind(addr)
             .await
@@ -349,14 +409,26 @@ fn teardown(config_path: &Path, backend: Backend) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    // The last lines stay readable over the control socket (`log`).
+    let log = pubdom_control::LogRing::new(500);
+    tracing_subscriber::registry()
+        .with(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
+        .with(tracing_subscriber::fmt::layer())
+        .with(log.layer())
         .init();
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Run => run(Config::load_or_default(&cli.config).map_err(anyhow::Error::msg)?).await,
+        Cmd::Run => {
+            run(
+                Config::load_or_default(&cli.config).map_err(anyhow::Error::msg)?,
+                log,
+            )
+            .await
+        }
         Cmd::Setup { backend } => setup(&cli.config, backend),
         Cmd::Teardown { backend } => teardown(&cli.config, backend),
     }

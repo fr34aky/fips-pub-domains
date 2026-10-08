@@ -9,6 +9,7 @@ How the code is cut, what flows where, and why. The protocol itself is in
 crates/
   pubdom-core/      policy, no I/O
   pubdom-resolve/   client I/O adapters + the resolver
+  pubdom-control/   the control socket (fips's protocol), log ring, client — for the two binaries
   pubdom-server/    fips-pubdom-server  (the domain's mesh DNS server, claim publisher)
   pubdom-daemon/    fips-pubdomd        (desktop forwarding resolver)
   pubdom-cli/       fips-pubdom         (operator tool)
@@ -113,6 +114,14 @@ upstream need not hear of), and `Resolver::denied_by_an_upstream`
 releases it once one upstream has denied the record for every candidate.
 If the decision is not in by then the answer goes out with the overrun
 TTL; the lookup carries on and caches what all upstreams said.
+
+### pubdom-control
+
+The control socket both binaries serve (docs/webui.md): fips's
+line-JSON protocol on a Unix socket, so fips-ui's client speaks to it
+unchanged; a `LogRing` tracing layer the `log` command reads; a
+blocking `query` for `fips-pubdom ctl`. A host crate like the daemon
+and the server (Unix sockets are Unix), not a library one.
 
 ### pubdom-server
 

@@ -136,7 +136,17 @@ publish:
   relays: ["wss://relay.example", "ws://npub1….fips:80"]   # empty: nothing is published
   dnssec_proof: true
   dns: []                             # resolvers for the proof; empty: the system's, then 9.9.9.9 and 1.1.1.1
+control: /run/fips-pubdom-server/control.sock   # the control socket for fips-ui and `fips-pubdom ctl`; null: none
 ```
+
+**The control socket** answers `status`, `zones`, `txt`, `check-dns`,
+`publish` and `log` in fips's line-JSON protocol ([webui.md](webui.md))
+— for fips-ui, and for `fips-pubdom ctl --socket
+/run/fips-pubdom-server/control.sock COMMAND [PARAMS]`:
+`check-dns '{"domain":"example.org"}'` verifies the record as a client
+would and says `verified (Dnssec)`, `names another key`, `no record` …;
+`publish` sends the claim and the zone record now. Whoever can open the
+socket (group `fips`) may use every command.
 
 `fips-pubdom-server serve --config /etc/fips-pubdom/server.yaml` is what
 `packaging/systemd/fips-pubdom-server.service` runs when the file

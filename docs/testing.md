@@ -155,6 +155,36 @@ with a broken file, a file naming another port, a duplicate domain and a
 removal. Not yet run: the unit's fallback to the flags when the file is
 absent, on an installed server.
 
+## Level 3f — the control sockets (2026-10-08)
+
+Scratch instances of both binaries with `control:` under `/tmp` (a
+socket path is at most 107 bytes; the session's scratch directory was
+too long, which the bind reports), driven with `fips-pubdom ctl`:
+
+```
+$ ls -l /tmp/pds/control.sock                   # srw-rw---- andre fips
+$ fips-pubdom ctl --socket /tmp/pds/control.sock status      # npub, address, bind, port, publishing, relays
+$ fips-pubdom ctl --socket /tmp/pds/control.sock zones       # the demo domain: names, txt_record, nothing published yet
+$ fips-pubdom ctl --socket /tmp/pds/control.sock check-dns '{"domain":"<demo domain>"}'
+  "verdict": "names another key"                 # the throwaway key; the real record names the serving node
+$ fips-pubdom ctl --socket /tmp/pds/control.sock publish '{"domain":"<demo domain>"}'
+  {"requested": "<demo domain>"}                  # then status: last_error "no relay accepted …" — the mesh
+                                                 # relay's allowlist, right for a throwaway key
+$ fips-pubdom ctl --socket /tmp/pds/control.sock log '{"n":3}'   # the relay's rejection, verbatim
+$ fips-pubdom ctl --socket /tmp/pds/control.sock nope           # Error: unknown command: nope, exit 1
+
+$ dig -p 5399 @127.0.0.1 AAAA relay.<demo domain> +short        # the daemon pins the domain
+$ fips-pubdom ctl --socket /tmp/pdd/control.sock pins           # [ { domain, npub, port 5355, method dnssec, verified_at } ]
+$ fips-pubdom ctl --socket /tmp/pdd/control.sock forget '{"domain":"<demo domain>"}'   # forgotten: true; pins → []
+$ fips-pubdom ctl --socket /tmp/pdd/control.sock flush          # true
+$ fips-pubdom ctl --socket /tmp/pdd/control.sock log '{"n":3}'  # "pins forgotten over the control socket", "caches flushed …"
+```
+
+Unit-tested beside it: a request, a missing parameter, an unknown
+command, a stale socket file replaced at the next bind; the log ring.
+Not yet run: the units' `RuntimeDirectory` and the group handover on
+an installed node.
+
 ## Level 4 — offline
 
 On the client node, with legacy DNS blocked but the mesh intact

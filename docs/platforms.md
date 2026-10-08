@@ -90,7 +90,9 @@ Pins are one JSON file with the same schema everywhere.
 - Daemon: **5356** on loopback where the OS can route to a port; 53 on
   macOS and Windows, which cannot.
 - No port for a UI: public domains are managed from fips-ui, through
-  control sockets under `/run/fips-pubdom/` ([webui.md](webui.md)).
+  the control sockets `/run/fips-pubdom/control.sock` (daemon) and
+  `/run/fips-pubdom-server/control.sock` (server), group `fips`
+  ([webui.md](webui.md)).
 
 ## Build matrix
 

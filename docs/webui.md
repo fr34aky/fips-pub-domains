@@ -2,7 +2,8 @@
 
 Status: design, 2026-10-08, revised the same day after the maintainer's
 proposal. Phases 1 and 2 — this repository's share — are built (#24,
-#25); phases 3–5 are fips-ui's. The decisions are proposals until the
+#25); phase 3, the read-only pages, is built in fips-ui (#43); phases
+4–5 are fips-ui's. The decisions are proposals until the
 open questions at the end are answered; the phases are ordered so that
 each ships on its own.
 
@@ -93,7 +94,8 @@ The helper passes new content on stdin, so the check must be a command:
 - `fips-pubdom-server validate zone < file` — the server's own zone
   parser; prints the normalised zone or the error, exit 1 on error.
 - `fips-pubdom-server validate config < server.yaml`, `fips-pubdomd
-  validate config < config.yaml` — the same.
+  validate config < config.yaml` — the same, every key written out so
+  the tool sees the defaults it did not set.
 
 Validation is in `pubdom-core` (zone) and the two binaries' config
 types, so nothing the helper writes is a file the process will not
@@ -126,9 +128,8 @@ Server (`fips-pubdom-server`):
 | `txt {domain}` | the TXT record line, as the `txt` subcommand prints it |
 | `check-dns {domain}` | the resolver's own TXT verification with the proof's resolvers (`publish.dns`, else the system's and two public validating ones): `verified (Dnssec)` / `verified (Dns)` / `names another key` / `names this server with another port` / `no record` / `resolvers disagree` / `unreachable`, plus the record text to add |
 | `publish {domain?}` | publish now, one domain or all; the outcome lands in `status` and `zones` |
+| `attestations {domain}` | every attestation for the domain on the configured relays, whoever published it, the newest per witness: witness, servers, whether this server is among them, method, verified at, created at. The serving node's view; a resolver believes its configured witnesses only |
 | `log {n?}` | the last n lines (default 200) from the process's ring buffer of 500 |
-
-`attestations` waits for phase 5.
 
 Daemon (`fips-pubdomd`):
 
@@ -140,9 +141,9 @@ Daemon (`fips-pubdomd`):
 | `flush` | flush caches (admin) |
 | `log {n?}` | ring buffer |
 
-`verify` as a socket command waits for the pages that need it (phase
-3): the CLI's verify is inline there and becomes a library report
-first.
+`verify` as a socket command waits for a page that needs it (none of
+the planned ones does): the CLI's verify is inline there and becomes a
+library report first.
 
 `fips-pubdom ctl [--socket PATH] COMMAND [PARAMS-JSON]` sends one
 command and prints the reply — the test tool, and a script's way in.
@@ -186,15 +187,20 @@ fips-ui's existing access list.
 2. Done (fips-pub-domains #25): **the two control sockets**, the
    `pubdom-control` crate (protocol, log ring, client), `fips-pubdom
    ctl`; `RuntimeDirectory` in the units; testing.md level 3f drives
-   both. `verify` and `attestations` as socket commands are left for
-   the phases that need them.
-3. **fips-ui: detection and the read-only pages** (Server, Resolver,
-   Log), with mesh viewers.
+   both. `attestations` followed for phase 5 (fips-pub-domains #26);
+   `verify` as a socket command is left for a page that needs it.
+3. Done (fips-ui #43): **detection and the read-only pages** — a
+   "Public domains" entry in fips-ui's navigation where a server or
+   resolver is found (its control socket, or its files when it is not
+   running), a tab per side, each with its log; `/api/pubdom/<side>/
+   <command>` proxies only the read commands, for viewers over the mesh
+   too. Needs fips-pub-domains 0.2.7 (the sockets).
 4. **fips-ui: editing** through the helper (new verbs `pubdom-zone-apply
    <domain>`, `pubdom-zone-delete`, `pubdom-config-apply <server|
    daemon>`, `service` extended to the two units), **Publish now**,
    **Check DNS**, **Forget**, **Flush**.
-5. **Attestations** on the Server page.
+5. **Attestations** on the Server page, from the server's
+   `attestations` command (fips-pub-domains, after 0.2.7).
 
 Phases 1 and 2 are PRs here, each with its review; 3 to 5 are PRs in
 fips-ui, where that repository's rules apply. Phases 1 and 2 are useful

@@ -47,6 +47,19 @@ enum Cmd {
         #[arg(long, value_enum, default_value_t = Backend::Auto)]
         backend: Backend,
     },
+    /// Check a configuration file from stdin as `run` would load it:
+    /// prints it with every key written out, or the error (exit 1). For
+    /// tooling that writes the file, such as fips-ui's helper.
+    Validate {
+        #[command(subcommand)]
+        what: Validate,
+    },
+}
+
+#[derive(Subcommand)]
+enum Validate {
+    /// A daemon configuration file.
+    Config,
 }
 
 struct State {
@@ -434,5 +447,21 @@ async fn main() -> Result<()> {
         }
         Cmd::Setup { backend } => setup(&cli.config, backend),
         Cmd::Teardown { backend } => teardown(&cli.config, backend),
+        Cmd::Validate {
+            what: Validate::Config,
+        } => {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
+            match Config::parse(&text).and_then(|c| c.render()) {
+                Ok(out) => {
+                    print!("{out}");
+                    Ok(())
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 }

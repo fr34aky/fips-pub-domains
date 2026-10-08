@@ -116,6 +116,10 @@ its directory; by hand, point `control:` somewhere that exists, or
 `null`. Whoever can open the socket (group `fips`) may use every
 command.
 
+`fips-pubdomd validate config < config.yaml` checks a file as `run`
+would load it and prints it with every key written out, or the error
+(exit 1) — for tooling that writes the file, such as fips-ui's helper.
+
 Not in the file (built-in, see the resolver's `ResolverConfig`): a server
 that does not answer step 3 is skipped for 20 seconds, tripling per
 consecutive failure up to 3 hours, then tried again; while it is, a name

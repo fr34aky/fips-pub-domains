@@ -118,8 +118,10 @@ Grouped by component. Each item says what, why, and where it stands.
   commands and a control socket per binary; fips-ui provides the
   pages. Phases 1–2 here, 3–5 in fips-ui. Phase 1 (the configuration
   file, the watched zones directory, `init`, `validate`; #24) and
-  phase 2 (the control sockets, `fips-pubdom ctl`; #25) are done,
-  unreleased; phase 3 is fips-ui's.
+  phase 2 (the control sockets, `fips-pubdom ctl`; #25) are released
+  in 0.2.7; phase 3 (the read-only pages, fips-ui #43) is done. Next:
+  phase 4, editing and the actions through fips-ui's admin helper, then
+  phase 5, attestations.
 
 ### Phone (fips2go)
 

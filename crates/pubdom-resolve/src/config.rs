@@ -93,7 +93,18 @@ impl Default for Config {
 impl Config {
     pub fn load(path: &Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        serde_yaml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
+        Self::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// The file's text as the daemon loads it: unknown keys are errors.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        serde_yaml::from_str(text).map_err(|e| e.to_string())
+    }
+
+    /// The configuration as YAML, every key written out — what `validate
+    /// config` prints so a tool sees the defaults it did not set.
+    pub fn render(&self) -> String {
+        serde_yaml::to_string(self).unwrap_or_default()
     }
 
     /// Load if present, defaults otherwise.
@@ -431,6 +442,9 @@ mod tests {
         assert!(!c.dnssec);
         assert_eq!(c.listen.len(), 1);
         assert!(serde_yaml::from_str::<Config>("nonsense: 1\n").is_err());
+        assert!(Config::parse("nonsense: 1\n").is_err());
+        let round: Config = Config::parse(&Config::default().render()).unwrap();
+        assert_eq!(round.listen, Config::default().listen);
         let w = Npub::from_bytes([7; 32]);
         let y = format!("witnesses: [\"{w}\"]\nattestation_threshold: 1\n");
         let c: Config = serde_yaml::from_str(&y).unwrap();

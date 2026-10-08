@@ -81,6 +81,15 @@ impl RelayClient {
         .await
     }
 
+    /// Every attestation for `domain`, whoever published it, from every
+    /// relay heard out: the serving node's own view of who vouches for it
+    /// (the server's `attestations` command). A resolver never uses this —
+    /// it reads its configured witnesses and nobody else.
+    pub async fn fetch_attestations_by_anyone(&self, domain: &str) -> Vec<CoreEvent> {
+        self.fetch(KIND_ATTESTATION, domain, &[], RelayScope::Full)
+            .await
+    }
+
     fn filter(kind: u16, domain: &str, authors: &[Npub]) -> Filter {
         let mut filter = Filter::new()
             .kind(Kind::from(kind))

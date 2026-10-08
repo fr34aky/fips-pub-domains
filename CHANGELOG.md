@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `fips-pubdomd validate config`: checks a daemon configuration from
+  stdin as `run` would load it and prints it with every key written out,
+  or the error — for tooling that writes the file (fips-ui's helper).
+- The server's control socket answers `attestations {domain}`: every
+  attestation for the domain on the configured relays, the newest per
+  witness, with whether it names this server — for fips-ui's Server
+  page. The serving node's view only; a resolver still believes its
+  configured witnesses and nobody else.
+
 ## [0.2.7] - 2026-10-08
 
 ### Added

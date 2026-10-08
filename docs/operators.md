@@ -140,13 +140,17 @@ control: /run/fips-pubdom-server/control.sock   # the control socket for fips-ui
 ```
 
 **The control socket** answers `status`, `zones`, `txt`, `check-dns`,
-`publish` and `log` in fips's line-JSON protocol ([webui.md](webui.md))
+`publish`, `attestations` and `log` in fips's line-JSON protocol ([webui.md](webui.md))
 — for fips-ui, and for `fips-pubdom ctl --socket
 /run/fips-pubdom-server/control.sock COMMAND [PARAMS]`:
 `check-dns '{"domain":"example.org"}'` verifies the record as a client
 would and says `verified (Dnssec)`, `names another key`, `no record` …;
-`publish` sends the claim and the zone record now. Whoever can open the
-socket (group `fips`) may use every command.
+`publish` sends the claim and the zone record now; `attestations
+'{"domain":"example.org"}'` lists who vouches for the domain on the
+configured relays (the newest attestation per witness, whether it names
+this server) — the serving node's view, not a verification: a resolver
+believes its own witnesses only. Whoever can open the socket (group
+`fips`) may use every command.
 
 `fips-pubdom-server serve --config /etc/fips-pubdom/server.yaml` is what
 `packaging/systemd/fips-pubdom-server.service` runs when the file

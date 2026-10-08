@@ -23,13 +23,13 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use nostr_sdk::Keys;
-use pubdom_core::claim::{Target, ZoneRecord};
+use pubdom_core::claim::{Attestation, Target, ZoneRecord};
 use pubdom_core::domain::{normalize, relative_label};
 use pubdom_core::txt::TxtRecord;
 use pubdom_core::{DEFAULT_SERVER_PORT, Npub, synth};
 use pubdom_resolve::proof;
 use pubdom_resolve::relay::{
-    Outcome, claim_event_json, publish_claim, publish_zone, zone_event_json,
+    Outcome, RelayClient, claim_event_json, publish_claim, publish_zone, zone_event_json,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -330,6 +330,13 @@ fn control_handler(c: Arc<ServerControl>) -> pubdom_control::Handler {
                         Err(_) => Response::error("the publisher is gone"),
                     }
                 }
+                "attestations" => match req.str_param("domain") {
+                    Ok(d) => match zone_named(&c.zones, d) {
+                        Some(z) => attestations(&c.relays, &z.record.domain, c.author).await,
+                        None => Response::error("no such zone"),
+                    },
+                    Err(e) => e,
+                },
                 "log" => Response::ok(c.log.lines(req.u64_param("n").unwrap_or(200) as usize)),
                 other => Response::error(format!("unknown command: {other}")),
             }
@@ -351,6 +358,51 @@ fn txt_line(domain: &str, author: Npub, port: u16) -> String {
 fn zone_named(zones: &Zones, domain: &str) -> Option<Zone> {
     let d = normalize(domain)?;
     snapshot(zones).into_iter().find(|z| z.record.domain == d)
+}
+
+/// Who vouches for the domain: every attestation (kind 37198) on the
+/// configured relays, whoever published it, the newest per witness. The
+/// serving node's view only — a resolver believes its own witnesses and
+/// nobody else, so a name here is not a verification.
+async fn attestations(relays: &[String], domain: &str, author: Npub) -> pubdom_control::Response {
+    use pubdom_control::Response;
+    if relays.is_empty() {
+        return Response::error("no relays configured");
+    }
+    let client = RelayClient::new(relays, &[], Duration::from_secs(5)).await;
+    let events = client.fetch_attestations_by_anyone(domain).await;
+    client.shutdown().await;
+    let parsed = events
+        .iter()
+        .filter_map(|ev| Attestation::parse(ev).ok())
+        .filter(|a| a.domain == domain)
+        .collect();
+    let list: Vec<Value> = newest_per_witness(parsed)
+        .iter()
+        .map(|a| {
+            serde_json::json!({
+                "witness": a.witness.to_string(),
+                "servers": a.servers.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                "names_this_server": a.servers.contains(&author),
+                "method": a.method,
+                "verified_at": a.verified_at,
+                "created_at": a.created_at,
+            })
+        })
+        .collect();
+    Response::ok(list)
+}
+
+/// One attestation per witness, the newest by `created_at`, newest first.
+fn newest_per_witness(mut all: Vec<Attestation>) -> Vec<Attestation> {
+    all.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    let mut out: Vec<Attestation> = Vec::new();
+    for a in all {
+        if !out.iter().any(|o| o.witness == a.witness) {
+            out.push(a);
+        }
+    }
+    out
 }
 
 /// The resolver's own TXT verification of a domain, as a client would do
@@ -1860,5 +1912,24 @@ mod tests {
         std::fs::write(dir.join("bad.yaml"), "domain: ch\nnames: {}\n").unwrap();
         assert!(load_zone(&dir.join("bad.yaml"), me, 5355).is_err());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn attestations_newest_per_witness() {
+        use pubdom_core::Method;
+        let w1 = Npub::from_bytes([1; 32]);
+        let w2 = Npub::from_bytes([2; 32]);
+        let att = |w: Npub, created_at: u64| Attestation {
+            witness: w,
+            domain: "example.org".into(),
+            servers: vec![Npub::from_bytes([9; 32])],
+            method: Method::Dnssec,
+            verified_at: created_at,
+            created_at,
+        };
+        let out = newest_per_witness(vec![att(w1, 10), att(w2, 30), att(w1, 20)]);
+        assert_eq!(out.len(), 2);
+        assert_eq!((out[0].witness, out[0].created_at), (w2, 30));
+        assert_eq!((out[1].witness, out[1].created_at), (w1, 20));
     }
 }

@@ -172,6 +172,11 @@ $ fips-pubdom ctl --socket /tmp/pds/control.sock publish '{"domain":"<demo domai
                                                  # relay's allowlist, right for a throwaway key
 $ fips-pubdom ctl --socket /tmp/pds/control.sock log '{"n":3}'   # the relay's rejection, verbatim
 $ fips-pubdom ctl --socket /tmp/pds/control.sock nope           # Error: unknown command: nope, exit 1
+$ fips-pubdom ctl --socket /tmp/pds/control.sock attestations '{"domain":"<demo domain>"}'   # 0.26 s: one
+  [{ witness: <the client node>, servers: [<the serving node>], names_this_server: false,      # attestation, by the
+     method: "dns", verified_at …, created_at … }]                                              # client node's `attest`
+$ printf 'pins: ./p.json\n' | fips-pubdomd validate config       # every key written out, exit 0
+$ printf 'pinz: 1\n' | fips-pubdomd validate config              # unknown field `pinz`, expected one of …, exit 1
 
 $ dig -p 5399 @127.0.0.1 AAAA relay.<demo domain> +short        # the daemon pins the domain
 $ fips-pubdom ctl --socket /tmp/pdd/control.sock pins           # [ { domain, npub, port 5355, method dnssec, verified_at } ]

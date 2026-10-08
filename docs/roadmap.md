@@ -90,6 +90,16 @@ Grouped by component. Each item says what, why, and where it stands.
   `Notify` for all domains, so each first denial wakes every waiting
   query, which rescans its candidates. Fine at a desktop's query rate; a
   per-domain signal if it ever shows in a profile.
+- **Keep link search domains from shadowing the daemon on resolved.**
+  The serving node lost its public names twice (2026-10-01, 2026-10-08)
+  because its LAN pushes the bound domain as a search domain — by DHCP
+  and, once IPv4 was told to ignore it, by RA/DHCPv6 — and a resolved
+  link's search domain outranks the daemon's global `~.`. The daemon
+  only warns at start. It could clear the offending link domain itself
+  (`resolvectl domain <link> ''`), at start and whenever the upstreams
+  file changes (every lease renewal brings it back), and say so in the
+  log; the operator's permanent fix is `ignore-auto-dns` on both
+  address families plus explicit `upstreams` in config.yaml.
 - **Firefox DoH canary.** Browsers with their own encrypted DNS (Firefox
   TRR, Chrome "secure DNS with a provider") bypass the system resolver.
   Answering `use-application-dns.net` with NXDOMAIN disables Firefox's

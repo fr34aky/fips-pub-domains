@@ -1,201 +1,202 @@
-# The domain server's web UI — design
+# Public domains in fips-ui — design
 
-Status: design, 2026-10-08. Nothing of it is built. The decisions below
-are proposals until the maintainer has answered the open questions at
-the end; the phases are ordered so that each ships on its own.
+Status: design, 2026-10-08, revised the same day after the maintainer's
+proposal. Nothing of it is built. The decisions are proposals until the
+open questions at the end are answered; the phases are ordered so that
+each ships on its own.
 
 ## What it is for
 
 Today an operator configures `fips-pubdom-server` with a YAML zone file
-written by hand, flags in `/etc/fips-pubdom/server.env`, and the
-`txt` subcommand to learn which DNS record to add. Whether it all works
+written by hand, flags in `/etc/fips-pubdom/server.env`, and the `txt`
+subcommand to learn which DNS record to add; a resolver node has
+`config.yaml`, a pin file and `fips-pubdom verify`. Whether it all works
 — the record resolving, the claim on the relays, the DNSSEC proof still
-valid, the zone record current — is spread over `dig`, the journal and
-`fips-pubdom verify` on another node. The web UI puts the configuration
-and the state of each domain on one page, in a browser, on the node
-that serves it: add a domain, name what is on the mesh, see the record
-to set, see that the world can verify it.
+valid, a domain pinned — is spread over `dig`, the journal and the CLI.
+The goal: configuration and state of both halves on one page, in a
+browser, including from another node.
 
-It is the server's UI, not the resolver's: it configures what this node
-*serves*. It does not replace fips-ui, which manages the fips node
-itself; it sits beside it, reached the same way.
+## Where it lives: a section of fips-ui, not a UI of its own
 
-## Where it runs
+[fips-ui](https://github.com/fr34aky/fips-ui) already is the browser
+for a fips node: it has the privileged helper that edits root-owned
+files and restarts units, access over the mesh with admin and viewer
+roles granted per npub, hosts-file names next to every npub, SSE for
+live state, dark and light. A second web server on the same node would
+repeat all of that for one feature. So:
 
-Inside `fips-pubdom-server`, as part of `serve`: one process, one unit,
-no helper. The server already holds everything the UI shows — the
-zones, the key, the publisher's schedule, the proofs — and already
-re-reads zone files it did not write. A separate process would need an
-IPC surface for all of that, and a privileged helper to write files
-the server reads; fips-ui needs one because the fips daemon is not its
-code. Here both halves are ours.
+- **fips-ui gets a "Public domains" section** that appears when it
+  finds a domain server or a resolver on the node — the server's or
+  the daemon's control socket, or `/etc/fips-pubdom/` — and is absent
+  otherwise. Its pages are fips-ui's; the work on them happens in that
+  repository.
+- **fips-pub-domains provides what the pages need and nothing else**:
+  a control socket per binary with the state only the process has, a
+  configuration file layout the helper can edit, and validation
+  commands the helper runs before writing. This repository stays
+  independent of fips-ui, as of fips2go: fips-ui is a consumer.
+- **Remote management comes for free**: whoever has the admin role on
+  the fips-ui node over the mesh ([fips-ui's mesh
+  access](https://github.com/fr34aky/fips-ui/blob/main/docs/mesh-access.md))
+  manages its public domains too; a viewer sees the state and nothing
+  more. No new listener, no new port, no new authentication.
 
-The server grows a configuration file, which the UI edits and the
-server reloads:
+This is the same division as between fips and fips-ui: the daemon
+exposes a control socket, fips-ui reads it and edits the daemon's files
+through its helper.
+
+### Rejected: a web UI inside `fips-pubdom-server`
+
+The first draft put an axum server with its own page into
+`fips-pubdom-server` (loopback and the node's fips address, admins by
+npub). It would have duplicated fips-ui's mesh access, header checks,
+hosts names and theming, needed its own port and its own way for the
+server to write the files it reads under `DynamicUser`, and given the
+resolver nothing. Dropped the same day for the design above.
+
+## What fips-pub-domains provides
+
+### 1. Configuration the helper can edit
+
+The server moves from flags to a file, the daemon already has one:
 
 ```yaml
 # /etc/fips-pubdom/server.yaml
 key: /etc/fips/fips.key
 zones: /etc/fips-pubdom/zones          # every *.yaml in it, followed as it changes
-port: 5355                              # the default for zones that name none
+port: 5355
 ttl: 300
 publish:
   relays: ["wss://relay.example", "ws://npub1….fips:80"]
   dnssec_proof: true
   dns: []                               # resolvers for the proof; empty: system, 9.9.9.9, 1.1.1.1
-ui:
-  listen: ["[::1]:5357", "127.0.0.1:5357", "[<this node's fips address>]:5357"]
-  admins: ["npub1…"]                    # over the mesh; loopback is admin without being listed
-  viewers: []
 ```
 
 `serve --config /etc/fips-pubdom/server.yaml` replaces `--zone` ×N and
-`PUBDOM_SERVER_ARGS`; the flags keep working for scripts, and
-`fips-pubdom-server init` writes a `server.yaml` from the existing
-`zones/` and `server.env` so an upgrade is one command. The zones
-directory is watched (the daemon's `watch.rs` moved into
-`pubdom-resolve` or copied — the notify dependency is the same), so a
-zone the UI adds is served without a restart; today a new file needs
-one.
+`PUBDOM_SERVER_ARGS`; the flags keep working, and `fips-pubdom-server
+init` writes a `server.yaml` from an existing `zones/` and `server.env`.
+The zones directory is watched (the daemon's `watch.rs` shared through
+`pubdom-resolve`), so a zone the UI adds is served without a restart.
+`server.yaml` itself is re-read on change for the publishing section;
+`key`, `port` and `ttl` take a restart, which the helper does.
 
-The unit keeps `DynamicUser=yes`. Files the UI writes must survive the
-next start under a different UID, which `ReadWritePaths` would not
-give; `ConfigurationDirectory=fips-pubdom` does (systemd chowns the
-directory to the unit's user at every start, as the daemon's unit
-already relies on for `/var/lib/fips-pubdom`).
+The daemon's `/etc/fips-pubdom/config.yaml` is what it is today
+(`witnesses`, `attestation_threshold`, `mesh_relays`, `plain_probe`, …);
+it is re-read on change for everything that does not need a listener
+rebound.
 
-## Who may open it
+### 2. Validation the helper runs before writing
 
-The same rule as fips-ui, because it is the same network: **a connection
-from loopback is an admin; a connection over the mesh is whoever its
-source address says**, with no password. fips rebuilds the IPv6 header on
-the receiving side, so the source address of a connection arriving
-through `fips0` is the `fd…` address derived from the sender's key and
-cannot be spoofed by another node. The server computes the address of
-every npub in `admins` and `viewers` (`Npub::fips_address`) and grants
-that role; any other mesh address gets 403 and a log line. Nobody else
-can reach the socket: the UI binds loopback and the node's fips address
-only, never a LAN interface — a LAN binding would need TLS and real
-authentication, and the operator has `ssh -L` for the one-off case.
+The helper passes new content on stdin, so the check must be a command:
 
-Writes additionally require the `X-Requested-With: fips-pubdom` header
-and an `Origin` that matches one of the UI's own addresses, which keeps
-a page in another tab from posting on the operator's behalf; the `Host`
-header must be one of the listen addresses or `<npub>.fips`, as fips-ui
-checks it. The key is never shown or sent; the UI shows the npub and the
-address.
+- `fips-pubdom-server validate zone < file` — the server's own zone
+  parser; prints the normalised zone or the error, exit 1 on error.
+- `fips-pubdom-server validate config < server.yaml`, `fips-pubdomd
+  validate config < config.yaml` — the same.
 
-## What it shows and does
+Validation is in `pubdom-core` (zone) and the two binaries' config
+types, so nothing the helper writes is a file the process will not
+load.
 
-One page per domain, and a few around it. Everything below the fold of
-a page is read from the server's own state; nothing polls the relays or
-DNS on every page load — the server keeps what it learned at its last
-publish and refreshes on a schedule or on request.
+### 3. A control socket per binary
 
-**Overview.** This node: npub, fips address, port, whether `serve` is
-listening (UDP and TCP), relays and whether each accepted the last
-publish. The domains, one card each: zone loaded or broken (with the
-error), TXT record state, claim published when and where, DNSSEC proof
-valid until, zone record current or stale. A broken state is red with
-the reason, as `fips-pubdom verify` would print it.
+Unix sockets, JSON per line, request and reply, modelled on fips's
+control socket so fips-ui's `control.ts` can talk to them with the
+same code: `/run/fips-pubdom/server.sock` and
+`/run/fips-pubdom/daemon.sock`, group `fips` (fips-ui's user is in it
+for fips's socket already), `RuntimeDirectory=fips-pubdom` in both
+units. Read commands for the viewer, write commands for the admin —
+the roles are fips-ui's; the sockets trust whoever can open them, as
+fips's does.
 
-**Domain.** The zone as a table — label, target (*this node* / another
-node's npub or a name fips-ui knows for it / *legacy*), the wildcard
-row — editable in place, with the same validation the server applies on
-load (hostname labels, no npub-shaped label, the wildcard warning from
-operators.md shown next to the row). *Save* writes the YAML atomically
-(temp file, rename) with a comment that the UI wrote it; the server
-picks it up through the watcher like any other edit and republishes.
-Below: **the DNS record to add**, verbatim, with a copy button, and
-**Check DNS**, which runs the resolver's own TXT verification
-(`TxtVerifier` from `pubdom-resolve`, two resolvers, DNSSEC) and reports
-*verified (dnssec)*, *verified (two resolvers)*, *record names another
-key*, *no record* — the four things an operator wants to know after
-editing their hoster's panel. **Publish now** sends the claim and the
-zone record ahead of schedule and shows each relay's answer.
+Server (`fips-pubdom-server`):
 
-**Publishing.** The relay list (add, remove; validated as the daemon
-validates `mesh_relays`), the DNSSEC proof switch and resolvers, the
-schedule (next publish, why: proof halfway through validity, 24 h, zone
-changed), and the last outcome per relay. Secrets: none here; the key
-path is shown, not the key.
+| command | reply |
+|---|---|
+| `status` | npub, fips address, listening (udp, tcp), relays with the outcome of the last publish each, next publish and why |
+| `zones` | per domain: file, loaded or the error, port, names, claim published at, zone record published at, DNSSEC proof valid until or none and why |
+| `check-dns <domain>` | the resolver's own TXT verification (`pubdom-resolve::TxtVerifier`, DNSSEC, two resolvers): `verified dnssec` / `verified dns` / `names another key` / `no record` / `unreachable`, plus the record text to add |
+| `txt <domain>` | the TXT record line, as the `txt` subcommand prints it |
+| `publish [domain]` | publish now; per-relay outcome |
+| `attestations <domain>` | what witnesses have published about the domain, from the configured mesh relays |
+| `log [n]` | the last n lines from the process's ring buffer |
 
-**Attestations.** Read-only: what the witnesses a client would trust
-have said about this domain — fetched from the configured mesh relays
-on request, so an operator can see that a friend's node vouched for
-them. Being a witness oneself (`fips-pubdom attest`) stays a client-side
-action on another node and is out of scope.
+Daemon (`fips-pubdomd`):
 
-**Log.** The server's last few hundred log lines, from a ring buffer
-the tracing subscriber feeds; filter by level. No journal access
-needed, so it works the same under every service manager.
+| command | reply |
+|---|---|
+| `status` | online, upstreams, backend, listen addresses, relays connected |
+| `pins` | the pin file as `fips-pubdom pins list` shows it |
+| `verify <domain>` | what `fips-pubdom verify` prints, as JSON |
+| `forget <domain>` | drop the domain's pins (admin) |
+| `flush` | flush caches (admin) |
+| `log [n]` | ring buffer |
 
-Not in the UI: the firewall drop-in (one `cp`, documented), the unit,
-the key.
+The CLI grows `--socket` to use them where a daemon or server runs, so
+`fips-pubdom verify` on a daemon host stops needing `sudo` for the pin
+file.
 
-## How it is built
+## What fips-ui shows
 
-- **Rust, in the server crate**, behind a `ui` cargo feature on by
-  default: `axum` on the server's existing tokio runtime, routes under
-  `/api/…` returning JSON, static files embedded at build time. One
-  more dependency family (`axum`, `tower-http` for static files and
-  compression); `rust-embed` or `include_str!` for the assets.
-- **The page is one HTML file and one script, no framework, no build
-  step, no CDN** — fips-ui's rule ("no external fonts or CDNs") and the
-  phone's: the UI must work on a node with no Internet, which is the
-  point of the whole project. Vanilla DOM, `fetch`, and an `EventSource`
-  on `/api/events` for live state (the same server-sent-events shape
-  fips-ui uses, so a reader of one is at home in the other). Dark and
-  light, following the browser.
-- **The API is the UI's only door**, and the CLI could use it later:
-  `GET /api/status`, `GET/PUT /api/zones/<domain>`, `POST
-  /api/zones/<domain>/check-dns`, `POST /api/publish`, `GET/PUT
-  /api/publishing`, `GET /api/attestations/<domain>`, `GET /api/log`,
-  `GET /api/events`. Every PUT is whole-document, validated with the
-  same code the server loads with; a rejected document returns the
-  error and changes nothing on disk.
-- **Validation lives in `pubdom-core`** where it belongs: the zone file
-  parser the server uses is what the API calls, so the UI cannot write
-  a file the server will not load. The TXT check is `pubdom-resolve`'s
-  verifier; the publish is the server's own publisher.
-- **State the UI reads is state the server already keeps**, held in a
-  `watch` channel the serve loop updates (zone loaded/broken, last
-  publish per relay, proof expiry, next schedule). The UI never reaches
-  into the serve loop; it reads a snapshot and asks for actions through
-  channels. That is also what makes the ring-buffer log and SSE cheap.
+Under **Public domains**, present only when something is found:
+
+- **Server** (when the server's socket or `server.yaml` exists). This
+  node: npub, address, port, listening. Relays with their last outcome,
+  **Publish now**. One card per domain: zone loaded or broken, TXT
+  state with **Check DNS**, the record to add with a copy button, claim
+  and zone record published at, proof valid until. **Edit** opens the
+  zone as a table — label, target (*this node* / an npub, shown with its
+  hosts-file name / *legacy*), the wildcard row with operators.md's
+  warning — and **Save** goes stdin → `validate zone` → atomic write by
+  the helper, after which the server picks the file up and republishes.
+  **Add domain** is the same with an empty table. **Publishing**: the
+  relay list (validated as `mesh_relays` is), proof switch, resolvers;
+  saved to `server.yaml` the same way, with a restart where needed.
+  **Attestations**: read-only, on request.
+- **Resolver** (when the daemon's socket or `config.yaml` exists).
+  Status, the pins table (**Forget** per domain), **Verify** a domain
+  with the full input list, the configuration (`witnesses` with hosts
+  names, threshold, `mesh_relays`, `dnssec`, `plain_probe`,
+  `allow_unverified_offline`) edited through the helper, **Flush
+  caches**.
+- **Log** tabs on both, from the ring buffers.
+
+Viewers see all of it; admins get the buttons. Over the mesh, that is
+fips-ui's existing access list.
 
 ## Phases
 
-1. **`server.yaml`, the zones directory watched, `init`** — no UI yet;
-   the unit switches to `serve --config`, `install.md` and
-   `operators.md` follow, the flags stay. Shippable on its own: a new
-   zone no longer needs a restart.
-2. **The read-only UI**: Overview, Domain (view), Publishing (view),
-   Log; loopback only. Everything an operator checks today with `dig`
-   and the journal, on one page.
-3. **Editing**: zone table, Save, Check DNS, Publish now, relay list.
-4. **Over the mesh**: `admins`/`viewers`, the fips-address listener,
-   Host and Origin checks, a line in fips-ui's docs on how to find it.
-5. **Attestations** page.
+1. **This repository: `server.yaml`, the zones directory watched,
+   `init`, the `validate` commands** — the unit switches to `serve
+   --config`, `install.md` and `operators.md` follow, the flags stay. A
+   new zone no longer needs a restart.
+2. **This repository: the two control sockets** and `--socket` in the
+   CLI; `RuntimeDirectory` in the units; a testing.md level that drives
+   both from `socat`.
+3. **fips-ui: detection and the read-only pages** (Server, Resolver,
+   Log), with mesh viewers.
+4. **fips-ui: editing** through the helper (new verbs `pubdom-zone-apply
+   <domain>`, `pubdom-zone-delete`, `pubdom-config-apply <server|
+   daemon>`, `service` extended to the two units), **Publish now**,
+   **Check DNS**, **Forget**, **Flush**.
+5. **Attestations** on the Server page.
 
-Each phase is one PR with its review; live tests on the serving node
-go into [testing.md](testing.md) as a new level.
+Phases 1 and 2 are PRs here, each with its review; 3 to 5 are PRs in
+fips-ui, where that repository's rules apply. Phases 1 and 2 are useful
+without 3: the sockets serve the CLI too.
 
 ## Open questions for the maintainer
 
-- **Port.** 5357 is proposed (5355 the server, 5356 the daemon, 8321 is
-  fips-ui). Any other?
-- **Mesh access from the start or later?** Phase 4 is where the
-  address-as-identity rule and the header checks come in; until then
-  loopback only, reached over `ssh -L` from elsewhere.
-- **Should the UI also edit the daemon's `config.yaml`** on a node that
-  runs both (witnesses, mesh relays, `plain_probe`)? Proposed: no — the
-  daemon is the client side and fips-ui's territory is the node; a
-  second page for it is easy to add later if wanted.
-- **Names for npubs**: show fips-ui's hosts-file names next to npubs in
-  the zone table (read `/etc/fips/hosts` if present)? Proposed: yes,
-  read-only, since operators think in `home.fips`, not in npubs.
-- **The `init` migration**: write `server.yaml` from `server.env` and
-  the zones directory once, keep `server.env` working forever, or drop
-  it after one release? Proposed: keep both working; `init` is a
-  convenience, not a requirement.
+- **Socket protocol**: fips's own line-JSON shape, so fips-ui's client
+  code is reused? Proposed: yes; the exact framing is read from fips's
+  `control.rs` before phase 2.
+- **Who runs `init`**: the install guide (once, by hand) or the unit at
+  start when `server.yaml` is missing and `zones/` is not? Proposed:
+  the guide; the unit falls back to the old flags while there is no
+  `server.yaml`, so nothing breaks on upgrade.
+- **The daemon's configuration on the Resolver page from the start, or
+  pins and verify only first?** Proposed: pins and verify in phase 3,
+  the configuration editor in phase 4 with the rest of the editing.
+- **Names for npubs** in the zone table from `/etc/fips/hosts`:
+  fips-ui does this everywhere already, so it is a given there;
+  nothing for this repository to decide.

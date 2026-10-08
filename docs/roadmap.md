@@ -99,15 +99,15 @@ Grouped by component. Each item says what, why, and where it stands.
 
 ### Domain server
 
-- **A web UI to configure the server** — wanted by the maintainer
-  (2026-10-06): zone files, the TXT record to set, publishing the claim,
-  relays, from a browser instead of hand-written YAML, `server.env` and
-  systemd. Designed in [webui.md](webui.md) (2026-10-08): inside
-  `fips-pubdom-server`, a `server.yaml` the UI edits and the server
-  reloads, loopback and the node's fips address only, admins and
-  viewers by npub as fips-ui does it, five phases from the config file
-  to mesh access. Open questions (port, when mesh access comes, names
-  for npubs) wait on the maintainer; nothing is built.
+- **Public domains in fips-ui** — wanted by the maintainer (2026-10-06,
+  shaped 2026-10-08): the server and the resolver configured and
+  watched from fips-ui, which shows a "Public domains" section when it
+  finds either on the node, and manages them from another node through
+  its mesh access. Designed in [webui.md](webui.md): this repository
+  provides `server.yaml`, a watched zones directory, `validate`
+  commands and a control socket per binary; fips-ui provides the
+  pages. Phases 1–2 here, 3–5 in fips-ui. Open questions (socket
+  framing, who runs `init`) wait on the maintainer; nothing is built.
 
 ### Phone (fips2go)
 

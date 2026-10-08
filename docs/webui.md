@@ -141,9 +141,9 @@ Daemon (`fips-pubdomd`):
 | `flush` | flush caches (admin) |
 | `log {n?}` | ring buffer |
 
-`verify` as a socket command waits for the pages that need it (phase
-3): the CLI's verify is inline there and becomes a library report
-first.
+`verify` as a socket command waits for a page that needs it (none of
+the planned ones does): the CLI's verify is inline there and becomes a
+library report first.
 
 `fips-pubdom ctl [--socket PATH] COMMAND [PARAMS-JSON]` sends one
 command and prints the reply — the test tool, and a script's way in.
@@ -187,8 +187,8 @@ fips-ui's existing access list.
 2. Done (fips-pub-domains #25): **the two control sockets**, the
    `pubdom-control` crate (protocol, log ring, client), `fips-pubdom
    ctl`; `RuntimeDirectory` in the units; testing.md level 3f drives
-   both. `verify` and `attestations` as socket commands are left for
-   the phases that need them.
+   both. `attestations` followed for phase 5 (fips-pub-domains #26);
+   `verify` as a socket command is left for a page that needs it.
 3. Done (fips-ui #43): **detection and the read-only pages** — a
    "Public domains" entry in fips-ui's navigation where a server or
    resolver is found (its control socket, or its files when it is not

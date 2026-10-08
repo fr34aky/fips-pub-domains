@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub listen: Vec<SocketAddr>,
@@ -103,8 +103,8 @@ impl Config {
 
     /// The configuration as YAML, every key written out — what `validate
     /// config` prints so a tool sees the defaults it did not set.
-    pub fn render(&self) -> String {
-        serde_yaml::to_string(self).unwrap_or_default()
+    pub fn render(&self) -> Result<String, String> {
+        serde_yaml::to_string(self).map_err(|e| e.to_string())
     }
 
     /// Load if present, defaults otherwise.
@@ -443,8 +443,19 @@ mod tests {
         assert_eq!(c.listen.len(), 1);
         assert!(serde_yaml::from_str::<Config>("nonsense: 1\n").is_err());
         assert!(Config::parse("nonsense: 1\n").is_err());
-        let round: Config = Config::parse(&Config::default().render()).unwrap();
-        assert_eq!(round.listen, Config::default().listen);
+        // What `validate config` prints is a file `run` loads to the same
+        // configuration, with every field set, not only the defaults.
+        let full: Config = Config::parse(
+            "listen: ['[::1]:5399']\nupstreams: [9.9.9.9]\nupstreams_from: /etc/resolv.conf\n\
+             witnesses: [npub1k3aerhf3f4ed9mrlu2zcusx3yruvzqyeut0kz5we5xd023jfgl0s8wcl6n]\n\
+             mesh_bind: 'fd00::1'\nattestation_threshold: 1\ncontrol: null\nplain_probe: false\n",
+        )
+        .unwrap();
+        assert_eq!(Config::parse(&full.render().unwrap()).unwrap(), full);
+        assert_eq!(
+            Config::parse(&Config::default().render().unwrap()).unwrap(),
+            Config::default()
+        );
         let w = Npub::from_bytes([7; 32]);
         let y = format!("witnesses: [\"{w}\"]\nattestation_threshold: 1\n");
         let c: Config = serde_yaml::from_str(&y).unwrap();

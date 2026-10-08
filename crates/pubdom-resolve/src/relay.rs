@@ -85,9 +85,21 @@ impl RelayClient {
     /// relay heard out: the serving node's own view of who vouches for it
     /// (the server's `attestations` command). A resolver never uses this —
     /// it reads its configured witnesses and nobody else.
+    ///
+    /// Without an author list the per-relay limit is the only bound, so
+    /// it is wide: a resolver's fetch may take the newest 32 of its
+    /// witnesses', but here 32 strangers' events must not push a real
+    /// witness's out. Once a relay has answered, the rest get a grace
+    /// period rather than the whole timeout: a dead relay in the list
+    /// must not make every listing wait it out.
     pub async fn fetch_attestations_by_anyone(&self, domain: &str) -> Vec<CoreEvent> {
-        self.fetch(KIND_ATTESTATION, domain, &[], RelayScope::Full)
+        let filter = Self::filter(KIND_ATTESTATION, domain, &[]).limit(500);
+        let relays: Vec<Relay> = relays_of(self.public.as_ref())
             .await
+            .into_iter()
+            .chain(relays_of(self.mesh.as_ref()).await)
+            .collect();
+        fetch_from(relays, &filter, self.timeout, Some(GRACE)).await
     }
 
     fn filter(kind: u16, domain: &str, authors: &[Npub]) -> Filter {

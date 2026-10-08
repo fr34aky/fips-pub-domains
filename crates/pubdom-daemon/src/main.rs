@@ -452,9 +452,9 @@ async fn main() -> Result<()> {
         } => {
             let mut text = String::new();
             std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
-            match Config::parse(&text) {
-                Ok(c) => {
-                    print!("{}", c.render());
+            match Config::parse(&text).and_then(|c| c.render()) {
+                Ok(out) => {
+                    print!("{out}");
                     Ok(())
                 }
                 Err(e) => {

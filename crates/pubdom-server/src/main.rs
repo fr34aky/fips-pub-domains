@@ -369,7 +369,7 @@ async fn attestations(relays: &[String], domain: &str, author: Npub) -> pubdom_c
     if relays.is_empty() {
         return Response::error("no relays configured");
     }
-    let client = RelayClient::new(relays, &[], Duration::from_secs(5)).await;
+    let client = RelayClient::new(relays, &[], Duration::from_secs(4)).await;
     let events = client.fetch_attestations_by_anyone(domain).await;
     client.shutdown().await;
     let parsed = events
@@ -394,8 +394,13 @@ async fn attestations(relays: &[String], domain: &str, author: Npub) -> pubdom_c
 }
 
 /// One attestation per witness, the newest by `created_at`, newest first.
+/// Ties (a witness re-attesting within the second, each relay keeping a
+/// different one) go by the witness's own `verified_at`, then the server
+/// list, so two calls answering from different relays agree.
 fn newest_per_witness(mut all: Vec<Attestation>) -> Vec<Attestation> {
-    all.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    all.sort_by(|a, b| {
+        (b.created_at, b.verified_at, &b.servers).cmp(&(a.created_at, a.verified_at, &a.servers))
+    });
     let mut out: Vec<Attestation> = Vec::new();
     for a in all {
         if !out.iter().any(|o| o.witness == a.witness) {
@@ -1931,5 +1936,15 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!((out[0].witness, out[0].created_at), (w2, 30));
         assert_eq!((out[1].witness, out[1].created_at), (w1, 20));
+        // A tie on created_at is settled by verified_at, whatever order the relays answered in.
+        let mut a = att(w1, 40);
+        a.verified_at = 39;
+        let mut b = att(w1, 40);
+        b.verified_at = 38;
+        assert_eq!(
+            newest_per_witness(vec![b.clone(), a.clone()]),
+            vec![a.clone()]
+        );
+        assert_eq!(newest_per_witness(vec![a.clone(), b]), vec![a]);
     }
 }

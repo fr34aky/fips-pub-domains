@@ -39,7 +39,7 @@ archive per platform with all three binaries, the systemd units and the
 firewall drop-in (`packaging/`), and a `SHA256SUMS` file:
 
 ```sh
-V=0.2.7; T=x86_64-unknown-linux-gnu        # or aarch64-unknown-linux-gnu, …-apple-darwin
+V=0.2.8; T=x86_64-unknown-linux-gnu        # or aarch64-unknown-linux-gnu, …-apple-darwin
 curl -LO https://github.com/fr34aky/fips-pub-domains/releases/download/v$V/fips-pub-domains-$V-$T.tar.gz
 curl -LO https://github.com/fr34aky/fips-pub-domains/releases/download/v$V/SHA256SUMS
 sha256sum --ignore-missing -c SHA256SUMS    # macOS: shasum -a 256 -c SHA256SUMS, ignore the lines about missing files

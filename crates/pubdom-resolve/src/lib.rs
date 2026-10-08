@@ -18,6 +18,10 @@ pub mod proof;
 pub mod relay;
 pub mod resolver;
 pub mod txt;
+/// Following files and directories as they change (daemon, server);
+/// off for hosts that have no filesystem to follow (the phone).
+#[cfg(feature = "watch")]
+pub mod watch;
 
 pub use config::{Config, ProdResolver};
 pub use mesh::{KernelMeshDns, MeshDns};

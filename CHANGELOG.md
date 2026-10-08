@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `fips-pubdom-server serve --config /etc/fips-pubdom/server.yaml`: the
+  server's configuration as a file (key, zones directory, port, TTL,
+  publishing with relays, DNSSEC proof and resolvers), and the zones
+  directory followed as files come, change and go — a zone added is
+  served within a second, one removed is dropped, without a restart.
+  The unit uses the file when it exists and the old flags otherwise;
+  `fips-pubdom-server init` writes one from an existing `zones/` and
+  `server.env`. `validate zone` and `validate config` check a file from
+  stdin as the server would load it, for tooling that writes them
+  (fips-ui, docs/webui.md). First phase of the fips-ui integration.
+
+### Changed
+
+- The file watcher moved from the daemon into `pubdom-resolve` behind
+  the `watch` cargo feature (off by default; the daemon and the server
+  enable it, the phone does not).
+
 ## [0.2.6] - 2026-10-07
 
 ### Changed

@@ -116,6 +116,17 @@ TTL; the lookup carries on and caches what all upstreams said.
 
 ### pubdom-server
 
+`serve --config /etc/fips-pubdom/server.yaml` (`ServerConfig`) or the
+older flags; with the file, the zones directory is followed
+(`pubdom_resolve::watch::watch_dir`, plus a 30 s rescan) so zones come
+and go with their files — `Zones::rescan` loads new files, drops gone
+ones, skips a broken or duplicate one with a log line, and the per-query
+mtime check reloads edits as before. `validate zone|config` reads stdin
+and runs the same parsers the server loads with, for tooling that writes
+those files; `init` writes a `server.yaml` from a flag-era install. The
+watcher lives in `pubdom-resolve` behind the `watch` feature, which the
+daemon and the server enable and the phone does not.
+
 A UDP+TCP DNS server bound to the node's own fips address (default port
 5355; 53 needs privileges and the port travels in the claim anyway),
 answering from YAML zone files that are re-read on mtime like fips's hosts

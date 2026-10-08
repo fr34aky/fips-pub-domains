@@ -16,6 +16,8 @@ rand = "0.8"
 futures = "0.3"
 hickory-resolver = { version = "0.26", default-features = false, features = ["tokio", "system-config", "dnssec-ring"] }
 nostr-sdk = { version = "0.44", default-features = false }
+notify = { version = "8", optional = true }
+notify-debouncer-mini = { version = "0.7", optional = true }
 serde.workspace = true
 socket2 = "0.6"
 serde_yaml = "0.9"
@@ -24,6 +26,12 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio = { version = "1", features = ["rt", "sync", "time", "net", "macros", "fs"] }
 tracing.workspace = true
+
+[features]
+default = []
+# The daemon follows its upstreams file, the server its zones directory.
+# Not for the phone: nothing to follow there, and one dependency less.
+watch = ["dep:notify", "dep:notify-debouncer-mini"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

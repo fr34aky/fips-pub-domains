@@ -31,15 +31,21 @@ names:
 
 Rules: labels follow hostname syntax (≤ 63 characters, letters, digits,
 hyphens), `@` is the apex, `*` the wildcard, and a label may not look like
-an npub. **Use the wildcard only if everything under the domain really is
+an npub. `fips-pubdom-server validate zone < example.org.yaml` checks a
+file as the server would load it and prints what it made of it. **Use the wildcard only if everything under the domain really is
 on the mesh**: it makes the server claim every name, including
 `cloud.example.org` that lives only on the public Internet, and clients
 will then send that name to your node and fail. A site with a few mesh
 services lists them and leaves the wildcard out; a site that wants the
 wildcard carves the Internet-only names out with `legacy`. `legacy` is how a site keeps `www` on the public Internet while
 putting `git` on the mesh: the server answers NXDOMAIN, and the client
-turns that into an ordinary legacy lookup. (A new file under the unit needs a restart.) The file is re-read whenever its
-mtime changes; a broken edit keeps the last good zone.
+turns that into an ordinary legacy lookup. With a configuration file
+(step 4) the zones directory is followed: a file added is served within
+a second, one removed is dropped, one edited is re-read; a broken edit
+keeps the last good zone, a broken new file is reported and skipped.
+Two files for one domain: the first in name order wins, the other is
+reported. (Without a configuration file, zones are named one by one on
+the command line and a new file needs a restart.)
 
 ## 2. The DNS record
 
@@ -114,10 +120,33 @@ is scheduled on its own. `publish --dry-run` collects the chain but never
 contacts a relay, so while DNS fails it shows the claim without the proof
 a real run would restore.
 
-`packaging/systemd/fips-pubdom-server.service` runs one `serve` for all the
-zones in `/etc/fips-pubdom/zones/` (same port for all) as group `fips`;
-`--publish --relay …` go into `/etc/fips-pubdom/server.env` as
-`PUBDOM_SERVER_ARGS=…` ([install.md](install.md)).
+**The configuration file.** Everything `serve` takes as flags, as a
+file the unit reads and tooling (fips-ui, [webui.md](webui.md)) can
+edit:
+
+```yaml
+# /etc/fips-pubdom/server.yaml
+key: /etc/fips/fips.key
+zones: /etc/fips-pubdom/zones         # every *.yaml in it, followed as files come, change and go
+port: 5355                            # for zones that name none; a zone naming another is refused
+ttl: 300
+publish:
+  relays: ["wss://relay.example", "ws://npub1….fips:80"]   # empty: nothing is published
+  dnssec_proof: true
+  dns: []                             # resolvers for the proof; empty: the system's, then 9.9.9.9 and 1.1.1.1
+```
+
+`fips-pubdom-server serve --config /etc/fips-pubdom/server.yaml` is what
+`packaging/systemd/fips-pubdom-server.service` runs when the file
+exists; a flag given alongside overrides the file. Publishing is on
+when `relays` is not empty. `fips-pubdom-server validate config <
+server.yaml` checks a file. A server set up before there was a
+configuration file keeps working as it is — the unit falls back to one
+`--zone` per file and `PUBDOM_SERVER_ARGS` from
+`/etc/fips-pubdom/server.env` — and `sudo fips-pubdom-server init`
+writes the file from both, after which the environment file is no
+longer read. The file is read at start; a change to it takes a
+restart.
 
 ## Redundant servers
 

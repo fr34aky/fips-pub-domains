@@ -1,14 +1,14 @@
-//! Following the upstreams file as the OS rewrites it: systemd-resolved and
-//! NetworkManager both rewrite their resolv.conf when a network comes or
-//! goes, so a change there *is* the network-change signal on those two
-//! backends, without netlink. (The dnsmasq and plain-resolv.conf backends
-//! point the daemon at a static snapshot, which nothing rewrites.) The
-//! 30 s poll stays as the fallback, and re-tries the watch while it is
-//! missing — the directory may not exist yet when the daemon starts.
+//! Following files as something else rewrites them, debounced: the
+//! daemon's upstreams file (systemd-resolved and NetworkManager rewrite
+//! their resolv.conf when a network comes or goes, so a change there *is*
+//! the network-change signal, without netlink) and the server's zones
+//! directory (a zone added, edited or removed by an operator, or by the
+//! fips-ui helper). The caller keeps a poll as the fallback and re-tries
+//! the watch while it is missing — a directory may not exist yet at start.
 //!
-//! The directory is watched, not the file: both resolvers write a new file
-//! and rename it into place, which would leave a watch on the old inode
-//! deaf.
+//! For a file, its directory is watched, not the file: resolvers write a
+//! new file and rename it into place, which would leave a watch on the old
+//! inode deaf.
 
 use notify::RecursiveMode;
 use notify_debouncer_mini::{DebouncedEvent, Debouncer, new_debouncer};
@@ -41,15 +41,41 @@ pub fn watch<F: Fn() + Send + 'static>(
     }) {
         Ok(d) => d,
         Err(e) => {
-            tracing::warn!(error = %e, "cannot watch for upstream changes; polling only");
+            tracing::warn!(error = %e, "cannot watch for file changes; polling only");
             return None;
         }
     };
     if let Err(e) = debouncer.watcher().watch(&dir, RecursiveMode::NonRecursive) {
-        tracing::warn!(dir = %dir.display(), error = %e, "cannot watch the upstreams directory; polling only");
+        tracing::warn!(dir = %dir.display(), error = %e, "cannot watch the file's directory; polling only");
         return None;
     }
-    tracing::info!(file = %target.display(), "following the upstreams file for changes");
+    tracing::info!(file = %target.display(), "following the file for changes");
+    Some(debouncer)
+}
+
+/// Call `on_change` whenever anything in `dir` (not below it) is created,
+/// written, renamed or removed, debounced. Same contract as [`watch`].
+pub fn watch_dir<F: Fn() + Send + 'static>(
+    dir: &Path,
+    on_change: F,
+) -> Option<Debouncer<notify::RecommendedWatcher>> {
+    let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let mut debouncer = match new_debouncer(SETTLE, move |res: Result<Vec<DebouncedEvent>, _>| {
+        if res.is_ok_and(|events| !events.is_empty()) {
+            on_change();
+        }
+    }) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot watch for directory changes; polling only");
+            return None;
+        }
+    };
+    if let Err(e) = debouncer.watcher().watch(&dir, RecursiveMode::NonRecursive) {
+        tracing::warn!(dir = %dir.display(), error = %e, "cannot watch the directory; polling only");
+        return None;
+    }
+    tracing::info!(dir = %dir.display(), "following the directory for changes");
     Some(debouncer)
 }
 
@@ -135,5 +161,31 @@ mod tests {
     #[test]
     fn a_path_without_a_directory_cannot_be_watched() {
         assert!(watch(Path::new("/"), || {}).is_none());
+    }
+
+    #[test]
+    fn a_directory_watch_sees_a_file_added_and_removed() {
+        let dir = TempDir(std::env::temp_dir().join(format!(
+            "pubdom-watchdir-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )));
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        let _w = watch_dir(&dir.0, move || {
+            h.fetch_add(1, Ordering::SeqCst);
+        })
+        .expect("a watcher on a temporary directory");
+        std::thread::sleep(SETTLE * 3);
+        hits.store(0, Ordering::SeqCst);
+        std::fs::write(dir.0.join("example.org.yaml"), "domain: example.org\n").unwrap();
+        assert!(settled(&hits) >= 1, "the new file was seen");
+        hits.store(0, Ordering::SeqCst);
+        std::fs::remove_file(dir.0.join("example.org.yaml")).unwrap();
+        assert!(settled(&hits) >= 1, "the removal was seen");
     }
 }

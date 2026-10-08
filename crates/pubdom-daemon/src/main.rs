@@ -9,7 +9,6 @@
 
 mod backend;
 mod forward;
-mod watch;
 
 use anyhow::{Context, Result};
 use backend::Backend;
@@ -301,7 +300,7 @@ async fn run(cfg: Config) -> Result<()> {
         let start_watch = |st: &Arc<State>| {
             st.cfg.upstreams_from.as_deref().and_then(|p| {
                 let st = st.clone();
-                watch::watch(p, move || st.refresh_upstreams())
+                pubdom_resolve::watch::watch(p, move || st.refresh_upstreams())
             })
         };
         let mut watcher = start_watch(&st);

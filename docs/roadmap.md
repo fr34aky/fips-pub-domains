@@ -106,8 +106,9 @@ Grouped by component. Each item says what, why, and where it stands.
   its mesh access. Designed in [webui.md](webui.md): this repository
   provides `server.yaml`, a watched zones directory, `validate`
   commands and a control socket per binary; fips-ui provides the
-  pages. Phases 1–2 here, 3–5 in fips-ui. Open questions (socket
-  framing, who runs `init`) wait on the maintainer; nothing is built.
+  pages. Phases 1–2 here, 3–5 in fips-ui. Phase 1 (the configuration
+  file, the watched zones directory, `init`, `validate`) is done (#24,
+  unreleased); the control sockets are next.
 
 ### Phone (fips2go)
 

@@ -10,14 +10,19 @@ Type=simple
 # listens on the node's fips address (port 5355, no privilege needed).
 DynamicUser=yes
 SupplementaryGroups=fips
-# Optional extra flags for `serve`, e.g. PUBDOM_SERVER_ARGS=--publish --relay wss://…
-# (docs/install.md). The file is optional; the unit runs without it.
+# With /etc/fips-pubdom/server.yaml (docs/operators.md; `fips-pubdom-server
+# init` writes one from an older install) the server takes everything from
+# the file and follows its zones directory, so a zone added or removed later
+# is served or dropped without a restart.
+#
+# Without the file, the older arrangement: optional extra flags for `serve`
+# in PUBDOM_SERVER_ARGS (e.g. --publish --relay wss://…), one --zone per
+# file, built as positional arguments so paths keep their spaces; globbing
+# off before the extra flags (a relay URL may hold ? or *). systemd expands
+# % and $ itself: every one meant for the shell is doubled. A zone file added
+# later needs a restart there; edits to a loaded one do not.
 EnvironmentFile=-/etc/fips-pubdom/server.env
-# One --zone per file, built as positional arguments so paths keep their
-# spaces; globbing off before the extra flags (a relay URL may hold ? or *).
-# systemd expands % and $ itself: every one meant for the shell is doubled.
-# A zone file added later needs a restart; edits to a loaded one do not.
-ExecStart=/bin/sh -c 'set --; for z in /etc/fips-pubdom/zones/*.yaml; do [ -e "$$z" ] || { echo "no zone files in /etc/fips-pubdom/zones" >&2; exit 78; }; set -- "$$@" --zone "$$z"; done; set -f; exec /usr/bin/fips-pubdom-server --key /etc/fips/fips.key serve "$$@" $$PUBDOM_SERVER_ARGS'
+ExecStart=/bin/sh -c 'if [ -f /etc/fips-pubdom/server.yaml ]; then exec /usr/bin/fips-pubdom-server serve --config /etc/fips-pubdom/server.yaml; fi; set --; for z in /etc/fips-pubdom/zones/*.yaml; do [ -e "$$z" ] || { echo "no zone files in /etc/fips-pubdom/zones" >&2; exit 78; }; set -- "$$@" --zone "$$z"; done; set -f; exec /usr/bin/fips-pubdom-server --key /etc/fips/fips.key serve "$$@" $$PUBDOM_SERVER_ARGS'
 Restart=on-failure
 RestartSec=5
 # 78 (EX_CONFIG): no zone to serve — retrying will not help.

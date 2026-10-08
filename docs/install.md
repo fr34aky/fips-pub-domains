@@ -85,17 +85,16 @@ sudo cp packaging/common/fips-pubdom.nft /etc/fips/fips.d/fips-pubdom.nft
 sudo systemctl try-reload-or-restart fips-firewall
 ```
 
-Then write the zone file, add the TXT record and start the unit — the
-whole procedure is in [operators.md](operators.md). To publish the claim
-automatically, give the unit the extra flags through its environment file
-(it is read if present, so the unit runs without it too):
+Then write the configuration file — the relays to publish to go in it —
+the zone file, add the TXT record and start the unit; the whole
+procedure is in [operators.md](operators.md):
 
 ```sh
-echo "PUBDOM_SERVER_ARGS=--publish --relay wss://relay.example --relay ws://npub1….fips:80" \
-    | sudo tee /etc/fips-pubdom/server.env
-```
-
-```sh
+sudo tee /etc/fips-pubdom/server.yaml <<'EOF'
+zones: /etc/fips-pubdom/zones
+publish:
+  relays: ["wss://relay.example", "ws://npub1….fips:80"]
+EOF
 sudo systemctl daemon-reload
 sudo systemctl enable --now fips-pubdom-server
 systemctl status fips-pubdom-server
@@ -104,11 +103,10 @@ systemctl status fips-pubdom-server
 The unit runs as an unprivileged throwaway user in group `fips` (to read
 the key): **one process serving every** `/etc/fips-pubdom/zones/*.yaml`,
 all on the same port — the node's fips address, 5355 by default, UDP and
-TCP. Zones that name different `port:` values need separate processes. A
-zone file added to the directory is picked up at the next `systemctl
-restart fips-pubdom-server`; edits to a loaded one are re-read on their
-own. With no zone file the unit stops with "no zone files in
-/etc/fips-pubdom/zones" instead of retrying.
+TCP — and following that directory: a zone file added is served within
+a second, one removed is dropped, one edited is re-read. With no zone
+file yet the server waits for one. Zones that name a different `port:`
+need their own process.
 
 ### Upgrade
 
@@ -121,9 +119,13 @@ sudo systemctl daemon-reload
 sudo systemctl restart fips-pubdom-server
 ```
 
-Zone files, `server.env` and the firewall drop-in survive; the
+Zone files, the configuration and the firewall drop-in survive; the
 [CHANGELOG](../CHANGELOG.md) says when a release changes something an
-operator must act on.
+operator must act on. A server installed before 0.2.7 keeps running
+from its `server.env` and the zones directory as before; `sudo
+fips-pubdom-server init` writes `/etc/fips-pubdom/server.yaml` from
+both, and the next restart uses it (new zone files then need no
+restart).
 
 ### Uninstall
 
@@ -133,7 +135,7 @@ sudo rm -f /usr/bin/fips-pubdom-server /etc/systemd/system/fips-pubdom-server.se
 sudo rm -f /etc/fips/fips.d/fips-pubdom.nft
 sudo systemctl daemon-reload
 sudo systemctl try-reload-or-restart fips-firewall
-sudo rm -rf /etc/fips-pubdom/zones /etc/fips-pubdom/server.env   # or all of /etc/fips-pubdom if nothing else uses it
+sudo rm -rf /etc/fips-pubdom/zones /etc/fips-pubdom/server.yaml /etc/fips-pubdom/server.env   # or all of /etc/fips-pubdom if nothing else uses it
 ```
 
 The domain's claim stays on the relays until the TXT record is removed

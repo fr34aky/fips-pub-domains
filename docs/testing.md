@@ -126,6 +126,35 @@ Installed as 0.2.4 on the reference machine and rebooted (2026-10-05):
 names resolve directly after the boot, where 0.2.2 gave "site not
 available" for the first half minute.
 
+## Level 3e — the server's configuration file and zones directory (2026-10-08)
+
+A scratch instance of `fips-pubdom-server` with a throwaway key,
+`bind: "::1"`, `port: 5398` and an empty zones directory:
+
+```
+$ fips-pubdom-server validate config < server.yaml      # prints the file normalised, exit 0
+$ printf 'domain: example.org\nnames:\n  "bad label!": self\n' | fips-pubdom-server validate zone
+stdin: invalid label "bad label!"                        # exit 1
+$ fips-pubdom-server init --zones zones --env server.env --out init.yaml
+wrote init.yaml                                          # relays from PUBDOM_SERVER_ARGS; a second run refuses without --force
+$ fips-pubdom-server serve --config server.yaml
+WARN no zone files yet; serving nothing until one appears
+INFO following the directory for changes
+$ cp example.org.yaml zones/                              # ~300 ms later:
+INFO zone loaded domain=example.org names=2
+$ dig -p 5398 @::1 AAAA www.example.org +short           # npub1….fips.
+$ dig -p 5398 @::1 AAAA mail.example.org                 # NXDOMAIN (legacy)
+$ rm zones/example.org.yaml                              # ~300 ms later:
+INFO zone file removed; no longer served domain=example.org
+```
+
+Unit-tested beside it: the file's defaults and checks, `init` from an
+environment file, a zone's text parsed and printed back, and a rescan
+with a broken file, a file naming another port, a duplicate domain and a
+`.txt` file in the directory (all skipped with a log line), an edit, a
+removal. Not yet run: the unit's fallback to the flags when the file is
+absent, on an installed server.
+
 ## Level 4 — offline
 
 On the client node, with legacy DNS blocked but the mesh intact

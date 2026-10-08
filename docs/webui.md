@@ -166,10 +166,12 @@ fips-ui's existing access list.
 
 ## Phases
 
-1. **This repository: `server.yaml`, the zones directory watched,
-   `init`, the `validate` commands** — the unit switches to `serve
-   --config`, `install.md` and `operators.md` follow, the flags stay. A
-   new zone no longer needs a restart.
+1. Done (fips-pub-domains #24): **`server.yaml`, the zones directory
+   watched, `init`, the `validate` commands** — the unit uses `serve
+   --config` when the file exists, the flags stay. A new zone no longer
+   needs a restart. One difference from the draft: `server.yaml` is read
+   at start, a change to it takes a restart (the helper restarts the
+   unit after writing it anyway).
 2. **This repository: the two control sockets** and `--socket` in the
    CLI; `RuntimeDirectory` in the units; a testing.md level that drives
    both from `socat`.

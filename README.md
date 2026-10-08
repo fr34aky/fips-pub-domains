@@ -124,6 +124,7 @@ offline discovery. [docs/android.md](docs/android.md).
 | [docs/daemon.md](docs/daemon.md) | the desktop resolver: install, config, troubleshooting |
 | [docs/android.md](docs/android.md) | the fips2go integration and its limits |
 | [docs/platforms.md](docs/platforms.md) | one resolver on every OS: what is platform-specific and where |
+| [docs/webui.md](docs/webui.md) | the domain server's web UI: design, phases, open questions (not built yet) |
 | [docs/testing.md](docs/testing.md) | the test ladder, with commands and expected output |
 | [docs/roadmap.md](docs/roadmap.md) | done, next (per component), behaviour by design, open questions |
 | [docs/design-history.md](docs/design-history.md) | how the design got here and what was rejected |

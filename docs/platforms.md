@@ -89,6 +89,8 @@ Pins are one JSON file with the same schema everywhere.
   the port travels in the claim and the TXT record anyway).
 - Daemon: **5356** on loopback where the OS can route to a port; 53 on
   macOS and Windows, which cannot.
+- The server's web UI (designed, [webui.md](webui.md)): **5357**
+  proposed, on loopback and the node's fips address.
 
 ## Build matrix
 

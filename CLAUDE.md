@@ -53,7 +53,7 @@ the Android-specific parts that already live there (`shim/src/names.rs`,
 
 ```
 crates/pubdom-{core,resolve,server,daemon,cli}   see docs/architecture.md
-docs/           install, spec, nip, architecture, operators, daemon, android, platforms, testing, roadmap, design-history
+docs/           install, spec, nip, architecture, operators, daemon, android, platforms, webui (design), testing, roadmap, design-history
 packaging/      systemd units, the fips firewall drop-in
 ```
 

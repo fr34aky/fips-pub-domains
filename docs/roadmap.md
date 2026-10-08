@@ -101,11 +101,13 @@ Grouped by component. Each item says what, why, and where it stands.
 
 - **A web UI to configure the server** — wanted by the maintainer
   (2026-10-06): zone files, the TXT record to set, publishing the claim,
-  relays and witnesses, from a browser instead of hand-written YAML,
-  `server.env` and systemd. Scope to settle first: served on the node's
-  fips address only or on the LAN too, and how it authenticates. Until
-  then, keep the server's configuration in files it can read back and
-  rewrite (`/etc/fips-pubdom/`), not in unit files or flags.
+  relays, from a browser instead of hand-written YAML, `server.env` and
+  systemd. Designed in [webui.md](webui.md) (2026-10-08): inside
+  `fips-pubdom-server`, a `server.yaml` the UI edits and the server
+  reloads, loopback and the node's fips address only, admins and
+  viewers by npub as fips-ui does it, five phases from the config file
+  to mesh access. Open questions (port, when mesh access comes, names
+  for npubs) wait on the maintainer; nothing is built.
 
 ### Phone (fips2go)
 

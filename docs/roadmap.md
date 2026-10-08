@@ -119,9 +119,11 @@ Grouped by component. Each item says what, why, and where it stands.
   pages. Phases 1–2 here, 3–5 in fips-ui. Phase 1 (the configuration
   file, the watched zones directory, `init`, `validate`; #24) and
   phase 2 (the control sockets, `fips-pubdom ctl`; #25) are released
-  in 0.2.7; phase 3 (the read-only pages, fips-ui #43) is done. Next:
-  phase 4, editing and the actions through fips-ui's admin helper, then
-  phase 5, attestations.
+  in 0.2.7; phase 3 (the read-only pages, fips-ui #43), phase 4
+  (editing through fips-ui's helper, the actions; fips-ui #44) and
+  phase 5 (attestations; #26 here, fips-ui #44) are done; the
+  attestations listing and `fips-pubdomd validate config` are released
+  in 0.2.8, which fips-ui 0.10.0's editors need on the node.
 
 ### Phone (fips2go)
 

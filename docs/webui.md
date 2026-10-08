@@ -2,10 +2,9 @@
 
 Status: design, 2026-10-08, revised the same day after the maintainer's
 proposal. Phases 1 and 2 — this repository's share — are built (#24,
-#25); phase 3, the read-only pages, is built in fips-ui (#43); phases
-4–5 are fips-ui's. The decisions are proposals until the
-open questions at the end are answered; the phases are ordered so that
-each ships on its own.
+#25); phases 3–5 are built in fips-ui (#43, #44). The decisions are
+settled as built; the open questions at the end record what was
+decided.
 
 ## What it is for
 
@@ -195,12 +194,14 @@ fips-ui's existing access list.
    running), a tab per side, each with its log; `/api/pubdom/<side>/
    <command>` proxies only the read commands, for viewers over the mesh
    too. Needs fips-pub-domains 0.2.7 (the sockets).
-4. **fips-ui: editing** through the helper (new verbs `pubdom-zone-apply
-   <domain>`, `pubdom-zone-delete`, `pubdom-config-apply <server|
-   daemon>`, `service` extended to the two units), **Publish now**,
-   **Check DNS**, **Forget**, **Flush**.
-5. **Attestations** on the Server page, from the server's
-   `attestations` command (fips-pub-domains, after 0.2.7).
+4. Done (fips-ui #44): **editing** through the helper (v11: verbs
+   `pubdom-zone-apply <file>`, `pubdom-zone-delete <file>`,
+   `pubdom-config-apply <server|resolver>`, `service` extended to the
+   two units), each file checked with the binary's own `validate`
+   before it is written; **Publish now**, **Check DNS**, **Forget**,
+   **Flush**, **Start** over the sockets and the service verb.
+5. Done (fips-ui #44): **Attestations** on the Server page, from the
+   server's `attestations` command (fips-pub-domains #26, 0.2.8).
 
 Phases 1 and 2 are PRs here, each with its review; 3 to 5 are PRs in
 fips-ui, where that repository's rules apply. Phases 1 and 2 are useful

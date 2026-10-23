@@ -311,7 +311,7 @@ pub struct Resolver<T: TxtSource, C: ClaimSource> {
     /// The claim fetches running behind a decision from the pins. Every
     /// decision write and every clear of `decisions` holds this lock.
     behind: Arc<Mutex<Behinds>>,
-    step3: TtlCache<String, CachedStep3>,
+    step3: Arc<TtlCache<String, CachedStep3>>,
     /// Whether the local node could register a target's identity; a
     /// failure is remembered for `UNREACHABLE_TTL`, like a failed echo, so
     /// an application asking again within seconds does not wait out the
@@ -324,7 +324,7 @@ pub struct Resolver<T: TxtSource, C: ClaimSource> {
     /// Servers that answered step 3 for themselves in the last
     /// REACHABLE_TTL: proof of reachability without an echo. Separate from
     /// `reachable` so an echo never passes for a step 3 answer.
-    answered: TtlCache<Npub, ()>,
+    answered: Arc<TtlCache<Npub, ()>>,
     /// Domains whose dispute was logged within the hour.
     disputes_logged: TtlCache<String, ()>,
     /// Zone records by domain, for names asked while the domain's servers
@@ -334,7 +334,10 @@ pub struct Resolver<T: TxtSource, C: ClaimSource> {
     /// backoff that grows with the failures in a row), then tried again —
     /// the periodic re-check of a failed server. The entry outlives its
     /// window so the next failure knows the streak; an answer clears it.
-    down: TtlCache<Npub, Down>,
+    down: Arc<TtlCache<Npub, Down>>,
+    /// Servers being asked again in the background during their first
+    /// backoff window (see [`Recover`]); at most one task per server.
+    recovering: Arc<Mutex<std::collections::HashSet<Npub>>>,
     /// Domains for which a probe's first answer was "no record", for the
     /// few seconds their lookup may still run; `denial` wakes whoever
     /// waits on them ([`Resolver::denied_by_an_upstream`]).
@@ -376,13 +379,14 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             online: AtomicBool::new(true),
             decisions: Arc::new(TtlCache::new(4096)),
             behind: Arc::new(Mutex::new(Behinds::default())),
-            step3: TtlCache::new(4096),
+            step3: Arc::new(TtlCache::new(4096)),
             registered: TtlCache::new(1024),
             reachable: TtlCache::new(1024),
-            answered: TtlCache::new(1024),
+            answered: Arc::new(TtlCache::new(1024)),
             disputes_logged: TtlCache::new(256),
             zones: TtlCache::new(1024),
-            down: TtlCache::new(1024),
+            down: Arc::new(TtlCache::new(1024)),
+            recovering: Arc::new(Mutex::new(std::collections::HashSet::new())),
             denied: TtlCache::new(1024),
             denial: tokio::sync::Notify::new(),
             inflight: Mutex::new(HashMap::new()),
@@ -899,10 +903,12 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
                 Ok(other) => {
                     tracing::info!(name = %q.name, npub = %server.npub, ?other, "domain server failed; {then}");
                     self.mark_down(server.npub, crate::now());
+                    self.recover_behind(q, server);
                 }
                 Err(e) => {
                     tracing::info!(name = %q.name, npub = %server.npub, error = %e, "domain server did not answer; {then}");
                     self.mark_down(server.npub, crate::now());
+                    self.recover_behind(q, server);
                 }
             }
         }
@@ -932,32 +938,79 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         server: &Binding,
         now: u64,
     ) -> Result<Step3Outcome, String> {
-        let msg = synth::build_query(query_id(&q.name, now), &q.name, synth::QTYPE_AAAA)
-            .ok_or_else(|| "unbuildable query".to_string())?;
-        let id = u16::from_be_bytes([msg[0], msg[1]]);
-        let addr = server.server_addr();
-        let mesh = self.mesh.clone();
-        let (t_udp, t_tcp) = (self.cfg.step3_timeout, self.cfg.tcp_timeout);
-        tokio::task::spawn_blocking(move || {
-            let reply = match mesh.query_udp(addr, &msg, t_udp) {
-                Ok(r) => r,
-                // One retry: a mesh path may still be settling.
-                Err(_) => mesh
-                    .query_udp(addr, &msg, t_udp)
-                    .map_err(|e| e.to_string())?,
-            };
-            let mut out = synth::parse_step3_reply(&reply, id);
-            if out == Step3Outcome::Truncated {
-                let reply = mesh
-                    .query_tcp(addr, &msg, t_tcp)
-                    .map_err(|e| e.to_string())?;
-                out = synth::parse_step3_reply(&reply, id);
-            }
-            Ok::<_, String>(out)
-        })
+        ask_step3(
+            self.mesh.clone(),
+            &q.name,
+            server,
+            now,
+            self.cfg.step3_timeout,
+            self.cfg.tcp_timeout,
+        )
         .await
-        .map_err(|e| e.to_string())
-        .and_then(|r| r)
+    }
+
+    /// After a server's first failure, keep asking it for `q` in the
+    /// background until its first backoff window ends ([`Recover`]).
+    fn recover_behind(&self, q: &Query, server: &Binding) {
+        let now = crate::now();
+        let Some(down) = self.down.get(&server.npub, now) else {
+            return;
+        };
+        if down.failures != 1 || !self.recovering.lock().unwrap().insert(server.npub) {
+            return;
+        }
+        tokio::spawn(
+            Recover {
+                mesh: self.mesh.clone(),
+                step3: self.step3.clone(),
+                answered: self.answered.clone(),
+                down: self.down.clone(),
+                recovering: self.recovering.clone(),
+                name: q.name.clone(),
+                server: server.clone(),
+                until: down.retry_at,
+                step3_timeout: self.cfg.step3_timeout,
+                tcp_timeout: self.cfg.tcp_timeout,
+            }
+            .run(),
+        );
+    }
+
+    /// Start the mesh path to every pinned server now, so a lookup made
+    /// soon after does not wait for it: right after a node starts or
+    /// changes network, finding a server a few hops away took 14 s on a
+    /// phone, past any lookup's budget. Each server's identity is
+    /// registered with the local node and sent one echo, which sets off
+    /// discovery and the session; a reply also counts as proof of
+    /// reachability, and no reply counts for nothing (servers may filter
+    /// echo). Asks nothing of DNS or the relays; the pins are what this
+    /// node verified before. At most `WARM_MAX` servers, all at once.
+    pub async fn warm(&self) {
+        let mut npubs: Vec<Npub> = self.pins.list().into_iter().map(|b| b.npub).collect();
+        npubs.sort();
+        npubs.dedup();
+        npubs.truncate(WARM_MAX);
+        if npubs.is_empty() {
+            return;
+        }
+        tracing::debug!(
+            servers = npubs.len(),
+            "warming the mesh path to the pinned servers"
+        );
+        let warm_one = |npub: Npub| async move {
+            if !self.ensure_registered(npub).await {
+                return;
+            }
+            let mesh = self.mesh.clone();
+            let t = WARM_ECHO_TIMEOUT;
+            let ok = tokio::task::spawn_blocking(move || mesh.reachable(npub, t))
+                .await
+                .unwrap_or(false);
+            if ok {
+                self.reachable.put(npub, true, REACHABLE_TTL, crate::now());
+            }
+        };
+        futures::future::join_all(npubs.into_iter().map(warm_one)).await;
     }
 
     /// Remember a failed server with a growing backoff.
@@ -994,8 +1047,24 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
     /// Every target has to be proven reachable — by an echo, or by having
     /// answered step 3 for itself moments ago — since the zone record says
     /// nothing about which nodes are up.
-    /// When the first of `servers` leaves its backoff window.
+    /// When the first of `servers` leaves its backoff window — or, while one
+    /// of them is being asked again in the background, about when that task
+    /// asks next, so the legacy answer meanwhile expires in time to be
+    /// replaced by the server's.
     fn retry_in(&self, servers: &[Binding], now: u64) -> Duration {
+        let recovering = self.recovering.lock().unwrap();
+        let asked_again = servers.iter().any(|s| {
+            recovering.contains(&s.npub)
+                && self.down.get(&s.npub, now).is_some_and(|d| {
+                    d.failures == 1
+                        && now < d.retry_at
+                        && d.retry_at - now <= self.cfg.server_backoff.as_secs()
+                })
+        });
+        drop(recovering);
+        if asked_again {
+            return RECOVER_PAUSE;
+        }
         servers
             .iter()
             .filter_map(|s| self.down.get(&s.npub, now))
@@ -1273,6 +1342,126 @@ impl<C: ClaimSource> Behind<C> {
             );
         }
         drop(behind);
+    }
+}
+
+/// How long [`Recover`] waits between asking a server again.
+const RECOVER_PAUSE: Duration = Duration::from_secs(3);
+/// The most servers [`Resolver::warm`] starts a path to.
+const WARM_MAX: usize = 16;
+/// How long a warming echo may take: it waits out discovery and the
+/// session, which is the point.
+const WARM_ECHO_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// One step 3 exchange with `server` for `name`: UDP with one retry, TCP on
+/// truncation.
+async fn ask_step3(
+    mesh: Arc<dyn MeshDns>,
+    name: &str,
+    server: &Binding,
+    now: u64,
+    t_udp: Duration,
+    t_tcp: Duration,
+) -> Result<Step3Outcome, String> {
+    let msg = synth::build_query(query_id(name, now), name, synth::QTYPE_AAAA)
+        .ok_or_else(|| "unbuildable query".to_string())?;
+    let id = u16::from_be_bytes([msg[0], msg[1]]);
+    let addr = server.server_addr();
+    tokio::task::spawn_blocking(move || {
+        let reply = match mesh.query_udp(addr, &msg, t_udp) {
+            Ok(r) => r,
+            // One retry: a mesh path may still be settling.
+            Err(_) => mesh
+                .query_udp(addr, &msg, t_udp)
+                .map_err(|e| e.to_string())?,
+        };
+        let mut out = synth::parse_step3_reply(&reply, id);
+        if out == Step3Outcome::Truncated {
+            let reply = mesh
+                .query_tcp(addr, &msg, t_tcp)
+                .map_err(|e| e.to_string())?;
+            out = synth::parse_step3_reply(&reply, id);
+        }
+        Ok::<_, String>(out)
+    })
+    .await
+    .map_err(|e| e.to_string())
+    .and_then(|r| r)
+}
+
+/// A server that just missed its first step 3 is asked again for the same
+/// name every `RECOVER_PAUSE` until its first backoff window ends (spec
+/// §5.3). That first failure is most often the mesh path still settling,
+/// and the path often settles within the window: on a phone, the session
+/// to a server three hops away came up 12 s after a lookup gave up on it.
+/// Waiting out the window then kept handing out the legacy answer with a
+/// working path. An answer is cached as the foreground's would be and ends
+/// the window, so the next lookup is served at once. Later, longer windows
+/// are left alone: a server that keeps failing is not asked more often.
+struct Recover {
+    mesh: Arc<dyn MeshDns>,
+    step3: Arc<TtlCache<String, CachedStep3>>,
+    answered: Arc<TtlCache<Npub, ()>>,
+    down: Arc<TtlCache<Npub, Down>>,
+    recovering: Arc<Mutex<std::collections::HashSet<Npub>>>,
+    name: String,
+    server: Binding,
+    /// The end of the window it was started for: it stops there, and as
+    /// soon as the server's entry is another outage's.
+    until: u64,
+    step3_timeout: Duration,
+    tcp_timeout: Duration,
+}
+
+impl Recover {
+    async fn run(self) {
+        let npub = self.server.npub;
+        loop {
+            tokio::time::sleep(RECOVER_PAUSE).await;
+            let now = crate::now();
+            // Gone: answered in the foreground, or the caches were cleared.
+            // Past its window, or a further failure: the ordinary backoff.
+            match self.down.get(&npub, now) {
+                Some(d) if d.retry_at == self.until && now < self.until => {}
+                _ => break,
+            }
+            let asked = ask_step3(
+                self.mesh.clone(),
+                &self.name,
+                &self.server,
+                now,
+                self.step3_timeout,
+                self.tcp_timeout,
+            )
+            .await;
+            let now = crate::now();
+            match asked {
+                Ok(Step3Outcome::Node { npub: node, ttl }) => {
+                    let ttl = Duration::from_secs(ttl.into()).min(cache::STEP3_MAX_TTL);
+                    let proven = node == npub;
+                    if proven {
+                        self.answered.put(node, (), REACHABLE_TTL, now);
+                    }
+                    self.step3
+                        .put(self.name.clone(), CachedStep3::Node(node, proven), ttl, now);
+                    self.down.remove(&npub);
+                    tracing::info!(name = %self.name, %npub, "domain server answers again; backoff ended");
+                    break;
+                }
+                Ok(Step3Outcome::NotOverFips) => {
+                    self.step3.put(
+                        self.name.clone(),
+                        CachedStep3::NotOverFips,
+                        Duration::from_secs(300),
+                        now,
+                    );
+                    self.down.remove(&npub);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        self.recovering.lock().unwrap().remove(&npub);
     }
 }
 
@@ -2535,6 +2724,140 @@ mod tests {
         );
     }
 
+    /// A mesh whose server misses the first `fails` exchanges, then answers:
+    /// a path that settles after a lookup gave up on it.
+    struct Settling {
+        inner: FakeMesh,
+        fails: std::sync::atomic::AtomicUsize,
+    }
+    impl MeshDns for Settling {
+        fn query_udp(
+            &self,
+            server: SocketAddrV6,
+            msg: &[u8],
+            t: Duration,
+        ) -> std::io::Result<Vec<u8>> {
+            use std::sync::atomic::Ordering::SeqCst;
+            if self
+                .fails
+                .fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                self.inner.queries.lock().unwrap().push(server);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "settling",
+                ));
+            }
+            self.inner.query_udp(server, msg, t)
+        }
+        fn query_tcp(&self, s: SocketAddrV6, m: &[u8], t: Duration) -> std::io::Result<Vec<u8>> {
+            self.inner.query_tcp(s, m, t)
+        }
+        fn register(&self, npub: Npub, t: Duration) -> bool {
+            self.inner.register(npub, t)
+        }
+        fn reachable(&self, npub: Npub, t: Duration) -> bool {
+            self.inner.reachable(npub, t)
+        }
+    }
+
+    fn fake_mesh(unreachable: Vec<Npub>) -> FakeMesh {
+        FakeMesh {
+            queries: Mutex::new(vec![]),
+            registered: Mutex::new(vec![]),
+            echoes: Mutex::new(vec![]),
+            unreachable,
+            down: vec![],
+        }
+    }
+
+    /// A server that misses its first step 3 (both tries) and answers once
+    /// its path settles is asked again in the background: its backoff ends
+    /// and the answer is cached, so the next lookup is served over fips at
+    /// once instead of after the 20 s window.
+    #[tokio::test]
+    async fn a_server_that_answers_again_ends_its_first_backoff_window() {
+        let pins: Arc<MemoryPinStore> = Arc::new(MemoryPinStore::new());
+        pins.put(Binding {
+            domain: "example.org".into(),
+            npub: npub(1),
+            port: 5355,
+            method: Method::Dnssec,
+            verified_at: 1,
+        });
+        let mesh = Arc::new(Settling {
+            inner: fake_mesh(vec![]),
+            fails: std::sync::atomic::AtomicUsize::new(2),
+        });
+        let r = Resolver::new(
+            ResolverConfig::default(),
+            pins,
+            FakeTxt(Mutex::new(HashMap::new())),
+            FakeClaims(vec![], Mutex::new(vec![])),
+            mesh.clone(),
+        );
+        r.set_online(false);
+        let q = build_query(1, "www.example.org", QTYPE_AAAA).unwrap();
+        let LookupResult::Unavailable { retry_in } = r.lookup(&q).await else {
+            panic!("the server missed step 3");
+        };
+        assert_eq!(retry_in, RECOVER_PAUSE);
+
+        let deadline = std::time::Instant::now() + RECOVER_PAUSE * 3;
+        while r.down.get(&npub(1), crate::now()).is_some() {
+            assert!(std::time::Instant::now() < deadline, "backoff never ended");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let queries = mesh.inner.queries.lock().unwrap().len();
+        assert!(matches!(r.lookup(&q).await, LookupResult::Answer(_)));
+        assert_eq!(
+            mesh.inner.queries.lock().unwrap().len(),
+            queries,
+            "answered from the cache the background filled"
+        );
+        assert!(r.recovering.lock().unwrap().is_empty());
+    }
+
+    /// Warming registers and echoes each pinned server once, however many
+    /// domains it serves, and only an answered echo counts as reachable.
+    #[tokio::test]
+    async fn warm_starts_the_path_to_each_pinned_server_once() {
+        let pins: Arc<MemoryPinStore> = Arc::new(MemoryPinStore::new());
+        for (domain, n) in [("example.org", 1), ("example.net", 1), ("example.com", 2)] {
+            pins.put(Binding {
+                domain: domain.into(),
+                npub: npub(n),
+                port: 5355,
+                method: Method::Dnssec,
+                verified_at: 1,
+            });
+        }
+        let mesh = Arc::new(fake_mesh(vec![npub(2)]));
+        let r = Resolver::new(
+            ResolverConfig::default(),
+            pins,
+            FakeTxt(Mutex::new(HashMap::new())),
+            FakeClaims(vec![], Mutex::new(vec![])),
+            mesh.clone(),
+        );
+        r.warm().await;
+        let mut registered = mesh.registered.lock().unwrap().clone();
+        registered.sort();
+        assert_eq!(registered, vec![npub(1), npub(2)]);
+        let mut echoes = mesh.echoes.lock().unwrap().clone();
+        echoes.sort();
+        assert_eq!(echoes, vec![npub(1), npub(2)]);
+        let now = crate::now();
+        assert_eq!(r.reachable.get(&npub(1), now), Some(true));
+        assert_eq!(
+            r.reachable.get(&npub(2), now),
+            None,
+            "no reply proves nothing"
+        );
+        assert!(mesh.queries.lock().unwrap().is_empty(), "no step 3");
+    }
+
     /// The case a node that just joined the mesh is in: the server does
     /// not answer, no zone record was ever published. Legacy, but only
     /// until the server is retried — and once the server has been down for
@@ -2569,13 +2892,12 @@ mod tests {
             panic!("no server, no zone record: unavailable, not settled");
         };
         assert_eq!(
-            retry_in,
-            Duration::from_secs(20),
-            "the first backoff window"
+            retry_in, RECOVER_PAUSE,
+            "first window: asked again in the background, soon"
         );
         assert_eq!(mesh.queries.lock().unwrap().len(), 2, "udp and its retry");
-        // Within the window the server is not asked again, and the answer
-        // says how long is left.
+        // Within the window the server is not asked again in the
+        // foreground, and the answer says how soon to ask.
         let LookupResult::Unavailable { retry_in } = r.lookup(&q).await else {
             panic!("still unavailable");
         };

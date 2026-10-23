@@ -671,6 +671,49 @@ mod tests {
     }
 
     #[test]
+    fn a_record_naming_only_pinned_servers_binds_them_with_or_without_claims() {
+        // What lets the resolver answer before the claims arrive: for a
+        // record that names only pinned servers at their pinned port, the
+        // claims change whom step 3 asks (npub, port) not at all — at most
+        // the method a pin rests on, which they may raise.
+        let servers = |o: &Outcome| -> Vec<(Npub, u16)> {
+            bound(o).iter().map(|b| (b.npub, b.port)).collect()
+        };
+        for (pin_method, record_method) in [
+            (Method::Dns, Method::Dns),
+            (Method::Dns, Method::Dnssec),
+            (Method::Dnssec, Method::Dns),
+        ] {
+            let pins = vec![pin(1, pin_method), pin(2, pin_method)];
+            let without = run(pins.clone(), txt(&[1, 2], record_method), &[], false);
+            let with = run(
+                pins,
+                txt(&[1, 2], record_method),
+                &[claim(1, 5), claim(2, 6)],
+                false,
+            );
+            assert_eq!(
+                servers(&without),
+                servers(&with),
+                "{pin_method:?}/{record_method:?}"
+            );
+            assert!(without.changes.is_empty());
+        }
+        // A record weaker than the pin keeps it whatever the claim says, a
+        // moved port included: the resolver fetches no claims there.
+        let mut moved = claim(1, 5);
+        moved.port = 5400;
+        let o = run(
+            vec![pin(1, Method::Dnssec)],
+            txt(&[1], Method::Dns),
+            &[moved],
+            false,
+        );
+        assert_eq!(servers(&o), vec![(npub(1), 5355)]);
+        assert!(o.changes.is_empty());
+    }
+
+    #[test]
     fn disputed_record_keeps_pins_and_never_goes_offline() {
         // Resolvers disagree: pins resolve unchanged, and without one the
         // domain is legacy — never the unverified offline path, even opted in.

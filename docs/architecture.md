@@ -98,11 +98,13 @@ relay on its own subscription and, after a TXT hit, returns 750 ms after
 the first one that delivered a claim, so one quiet relay no longer costs
 the whole 2 s; offline, where the claims alone decide and a conflict is
 only visible with every relay heard, it still waits for all of them.
-When the record names only servers already pinned, at the port it gives,
+When the record names only servers already pinned, at the port it states,
 the lookup does not wait for the relays at all: it decides from the pins,
 as the policy does when no claim reaches it, and the claims are fetched
-behind the answer — what they change (a stronger method, a new pin) lands
-when they arrive, and nothing lands if the caches were flushed meanwhile.
+behind the answer, one fetch per domain at a time — what they change (a
+stronger method, a new pin) lands when they arrive with the decision's
+original expiry, and nothing lands once a newer decision for the domain
+has been taken or the caches were flushed.
 That is a node whose relay connections are still opening after a start or
 a network change, which spent ~2 s of the phone's 3.5 s on the fetch. A
 lookup that overruns the whole-lookup budget (3.5 s on the phone, the

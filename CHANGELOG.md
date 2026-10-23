@@ -10,14 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - A domain whose TXT record names only servers already pinned, at the
-  port the record gives, is answered without waiting for its claims: the
+  port the record states, is answered without waiting for its claims: the
   resolver decides from the pins and fetches the claims behind the
   answer, applying what they change when they arrive. Right after a node
   starts or changes network its relay connections are still opening, and
   on a phone that fetch took about 2 s of the 3.5 s lookup budget, often
   enough for the first lookup to fall back to the legacy answer. A new
-  server or a changed port still waits for the claim. `ClaimSource` now
-  requires `'static`.
+  server, a changed port or a record that states no port still waits for
+  the claim, and a record verified more weakly than its pins, which the
+  claims cannot change, fetches none. `ClaimSource` now requires
+  `'static`.
 
 ## [0.2.8] - 2026-10-08
 

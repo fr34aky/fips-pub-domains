@@ -84,7 +84,7 @@ pub enum Probe {
 
 /// Where claims and zone records come from — relays in production, a
 /// table in tests.
-pub trait ClaimSource: Send + Sync {
+pub trait ClaimSource: Send + Sync + 'static {
     fn fetch_claims(
         &self,
         domain: &str,
@@ -299,12 +299,18 @@ pub struct Resolver<T: TxtSource, C: ClaimSource> {
     cfg: ResolverConfig,
     pins: Arc<dyn PinStore>,
     txt: T,
-    claims: C,
+    /// Shared with the claim fetch a decision taken from the pins leaves
+    /// behind it (see `decide_uncached`), as are `pins`, `proofs`,
+    /// `decisions` and `behind`.
+    claims: Arc<C>,
     mesh: Arc<dyn MeshDns>,
     /// DNSSEC proofs in claims (spec §5.5); `NoProofs` with `dnssec: false`.
-    proofs: Box<dyn ProofVerifier + Send + Sync>,
+    proofs: Arc<dyn ProofVerifier + Send + Sync>,
     online: AtomicBool,
-    decisions: TtlCache<String, CachedDecision>,
+    decisions: Arc<TtlCache<String, CachedDecision>>,
+    /// The claim fetches running behind a decision from the pins. Every
+    /// decision write and every clear of `decisions` holds this lock.
+    behind: Arc<Mutex<Behinds>>,
     step3: TtlCache<String, CachedStep3>,
     /// Whether the local node could register a target's identity; a
     /// failure is remembered for `UNREACHABLE_TTL`, like a failed echo, so
@@ -355,20 +361,21 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
                 "attestation_threshold exceeds the number of witnesses: attestations can never count"
             );
         }
-        let proofs: Box<dyn ProofVerifier + Send + Sync> = if cfg.dnssec {
-            Box::new(crate::proof::DnssecProofs::default())
+        let proofs: Arc<dyn ProofVerifier + Send + Sync> = if cfg.dnssec {
+            Arc::new(crate::proof::DnssecProofs::default())
         } else {
-            Box::new(NoProofs)
+            Arc::new(NoProofs)
         };
         Self {
             cfg,
             pins,
             txt,
-            claims,
+            claims: Arc::new(claims),
             mesh,
             proofs,
             online: AtomicBool::new(true),
-            decisions: TtlCache::new(4096),
+            decisions: Arc::new(TtlCache::new(4096)),
+            behind: Arc::new(Mutex::new(Behinds::default())),
             step3: TtlCache::new(4096),
             registered: TtlCache::new(1024),
             reachable: TtlCache::new(1024),
@@ -393,6 +400,8 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
     pub fn set_online(&self, online: bool) {
         if self.online.swap(online, Ordering::Relaxed) != online {
             tracing::info!(online, "network state changed");
+            let mut behind = self.behind.lock().unwrap();
+            behind.running.clear();
             self.decisions.clear();
         }
     }
@@ -457,7 +466,11 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
     }
 
     pub fn flush_caches(&self) {
-        self.decisions.clear();
+        {
+            let mut behind = self.behind.lock().unwrap();
+            behind.running.clear();
+            self.decisions.clear();
+        }
         self.step3.clear();
         self.registered.clear();
         self.reachable.clear();
@@ -613,7 +626,27 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             // A record outranks whatever denial was released on.
             self.denied.remove(&d.to_string());
         }
+        // A record that names only servers already pinned, at the port it
+        // gives: the pins answer — the policy binds the named pins without a
+        // claim, their claims verified when they were pinned (spec §5.1
+        // step 2) — and the claims are fetched behind the answer instead of
+        // ahead of it. Ahead, a node whose relay connections were just
+        // (re)opening spent ~2 s of a 3.5 s budget waiting for a claim that
+        // could change nothing it was about to do. A new server or a moved
+        // port still waits: there the claim decides.
+        let from_pins = online && pins_cover(&pins, &txt);
+        // A record weaker than every pin it names leaves those pins as they
+        // are whatever the claims say (spec §5.4): nothing to fetch for.
+        let fetch_behind = from_pins && claims_can_change(&pins, &txt);
+        if from_pins {
+            tracing::debug!(
+                domain = d,
+                fetch_behind,
+                "pinned servers named by the record: deciding from the pins"
+            );
+        }
         let (events, att_events) = match &txt {
+            TxtLookup::Hit { .. } if from_pins => (Vec::new(), Vec::new()),
             // The privacy gate (spec §8): relays only after a TXT hit …
             TxtLookup::Hit { .. } => (
                 self.claims.fetch_claims(d, RelayScope::AfterHit).await,
@@ -654,6 +687,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
         }
         let is_unreachable = matches!(txt, TxtLookup::Unreachable);
         let disputed = matches!(txt, TxtLookup::Disputed);
+        let behind_txt = fetch_behind.then(|| txt.clone());
         let outcome = policy::decide(Input {
             domain: d,
             pins,
@@ -665,19 +699,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
             allow_unverified_offline: self.cfg.allow_unverified_offline,
             proofs: self.proofs.as_ref(),
         });
-        for change in &outcome.changes {
-            match change {
-                PinChange::Put(b) => {
-                    if self.pins.put(b.clone()) {
-                        tracing::info!(domain = d, npub = %b.npub, method = ?b.method, "binding verified and pinned");
-                    }
-                }
-                PinChange::Forget(npub) => {
-                    tracing::info!(domain = d, %npub, "no longer named by the TXT record: server unpinned");
-                    self.pins.forget_server(d, *npub);
-                }
-            }
-        }
+        apply_pin_changes(self.pins.as_ref(), d, &outcome.changes);
         // Once an hour per domain and outcome: a lasting dispute is
         // re-decided every TXT_DISPUTED_TTL.
         if disputed {
@@ -701,9 +723,7 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
                 let ttl = if disputed {
                     cache::TXT_DISPUTED_TTL
                 } else {
-                    txt_ttl
-                        .map(|t| Duration::from_secs(t.into()).min(cache::TXT_HIT_MAX_TTL))
-                        .unwrap_or(cache::CLAIM_TTL)
+                    hit_ttl(txt_ttl)
                 };
                 (CachedDecision::Use(b, false), ttl)
             }
@@ -719,7 +739,45 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
                 (CachedDecision::NotOverFips, ttl)
             }
         };
-        self.decisions.put(d.to_string(), cached.clone(), ttl, now);
+        // Written under the lock a fetch behind an earlier decision checks:
+        // that fetch then sees this newer decision and writes nothing. At
+        // most one fetch runs per domain; a decision taken while one runs is
+        // served by the next expiry instead of a second fetch.
+        let started = {
+            let mut behind = self.behind.lock().unwrap();
+            self.decisions.put(d.to_string(), cached.clone(), ttl, now);
+            behind.seq += 1;
+            let seq = behind.seq;
+            if let Some(running) = behind.running.get_mut(d) {
+                running.current = seq;
+                None
+            } else if let Some(txt) = behind_txt {
+                behind
+                    .running
+                    .insert(d.to_string(), Running { current: seq });
+                Some((seq, txt))
+            } else {
+                None
+            }
+        };
+        if let Some((served, txt)) = started {
+            tokio::spawn(
+                Behind {
+                    claims: self.claims.clone(),
+                    pins: self.pins.clone(),
+                    decisions: self.decisions.clone(),
+                    proofs: self.proofs.clone(),
+                    behind: self.behind.clone(),
+                    served,
+                    expires: now.saturating_add(ttl.as_secs()),
+                    domain: d.to_string(),
+                    txt,
+                    attestation_threshold: self.cfg.attestation_threshold,
+                    allow_unverified_offline: self.cfg.allow_unverified_offline,
+                }
+                .run(),
+            );
+        }
         cached
     }
 
@@ -976,6 +1034,11 @@ impl<T: TxtSource, C: ClaimSource> Resolver<T, C> {
                 }
                 let ttl = if best.is_some() {
                     cache::CLAIM_TTL
+                } else if self.behind.lock().unwrap().running.contains_key(dom) {
+                    // The domain's claims are still being fetched behind a
+                    // decision from the pins: the relays are most likely
+                    // still connecting, and their silence says nothing yet.
+                    self.cfg.server_backoff
                 } else {
                     cache::RELAY_MISS_TTL
                 };
@@ -1066,6 +1129,151 @@ fn query_id(name: &str, now: u64) -> u16 {
         h = h.wrapping_mul(31).wrapping_add(b as u32);
     }
     (h ^ (h >> 16)) as u16
+}
+
+/// Whether every server a TXT hit names is pinned at the port the record
+/// states. A record that states no port leaves the port to the claim, so
+/// it is not covered: a server that moved would otherwise be asked at its
+/// old port until the claim arrived, and be backed off for it. Only when
+/// covered can the claims change nothing about whom step 3 asks — see
+/// `decide_uncached`.
+fn pins_cover(pins: &[Binding], txt: &TxtLookup) -> bool {
+    let TxtLookup::Hit { records, .. } = txt else {
+        return false;
+    };
+    !records.is_empty()
+        && records.iter().all(|r| {
+            pins.iter()
+                .any(|p| p.npub == r.npub && r.port == Some(p.port))
+        })
+}
+
+/// Whether the claims could change a pin the record names: not when the
+/// record was verified more weakly than every such pin, which the policy
+/// then keeps unchanged whatever the claim says (spec §5.4).
+fn claims_can_change(pins: &[Binding], txt: &TxtLookup) -> bool {
+    let TxtLookup::Hit { records, method } = txt else {
+        return false;
+    };
+    pins.iter()
+        .filter(|p| records.iter().any(|r| r.npub == p.npub))
+        .any(|p| *method >= p.method)
+}
+
+/// How long a decision bound by a TXT hit is kept (spec §5.6).
+fn hit_ttl(txt_ttl: Option<u32>) -> Duration {
+    txt_ttl
+        .map(|t| Duration::from_secs(t.into()).min(cache::TXT_HIT_MAX_TTL))
+        .unwrap_or(cache::CLAIM_TTL)
+}
+
+fn apply_pin_changes(pins: &dyn PinStore, d: &str, changes: &[PinChange]) {
+    for change in changes {
+        match change {
+            PinChange::Put(b) => {
+                if pins.put(b.clone()) {
+                    tracing::info!(domain = d, npub = %b.npub, method = ?b.method, "binding verified and pinned");
+                }
+            }
+            PinChange::Forget(npub) => {
+                tracing::info!(domain = d, %npub, "no longer named by the TXT record: server unpinned");
+                pins.forget_server(d, *npub);
+            }
+        }
+    }
+}
+
+/// Decisions are numbered as they are written; `running` holds a domain
+/// only while a claim fetch runs behind one of its decisions, so it stays
+/// as small as the fetches in flight.
+#[derive(Default)]
+struct Behinds {
+    seq: u64,
+    running: HashMap<String, Running>,
+}
+
+struct Running {
+    /// The domain's latest decision; the fetch writes only while it is the
+    /// one the fetch was started behind.
+    current: u64,
+}
+
+/// The claim fetch a decision taken from the pins leaves behind it. What
+/// the claims change — a stronger method, a port the claim moved — is
+/// pinned and replaces the cached decision, as the same claims would have
+/// done ahead of it, keeping that decision's expiry. It writes nothing when
+/// the claims change nothing, when a newer decision for the domain has been
+/// taken since (its TXT lookup may have unpinned what this one would pin
+/// again), or when the caches were cleared (a network change).
+struct Behind<C> {
+    claims: Arc<C>,
+    pins: Arc<dyn PinStore>,
+    decisions: Arc<TtlCache<String, CachedDecision>>,
+    proofs: Arc<dyn ProofVerifier + Send + Sync>,
+    behind: Arc<Mutex<Behinds>>,
+    served: u64,
+    /// When the decision it was started behind expires (unix seconds).
+    expires: u64,
+    domain: String,
+    txt: TxtLookup,
+    attestation_threshold: usize,
+    allow_unverified_offline: bool,
+}
+
+impl<C: ClaimSource> Behind<C> {
+    async fn run(self) {
+        let Behind {
+            claims,
+            pins,
+            decisions,
+            proofs,
+            behind,
+            served,
+            expires,
+            domain,
+            txt,
+            attestation_threshold,
+            allow_unverified_offline,
+        } = self;
+        let d = domain.as_str();
+        let events = claims.fetch_claims(d, RelayScope::AfterHit).await;
+        let now = crate::now();
+        let claims = policy::ingest_claims(pins.as_ref(), d, &events, now);
+        // One lock from the check to the last write: no newer decision and
+        // no clear can land in between.
+        let mut behind = behind.lock().unwrap();
+        let current = behind
+            .running
+            .remove(d)
+            .is_some_and(|r| r.current == served);
+        if !current {
+            return;
+        }
+        let outcome = policy::decide(Input {
+            domain: d,
+            pins: pins.get(d),
+            txt,
+            claims: &claims,
+            attestations: &[],
+            attestation_threshold,
+            now,
+            allow_unverified_offline,
+            proofs: proofs.as_ref(),
+        });
+        if outcome.changes.is_empty() {
+            return;
+        }
+        apply_pin_changes(pins.as_ref(), d, &outcome.changes);
+        if let Decision::Bound(servers) = outcome.decision {
+            decisions.put(
+                domain.clone(),
+                CachedDecision::Use(servers, false),
+                Duration::from_secs(expires.saturating_sub(now)),
+                now,
+            );
+        }
+        drop(behind);
+    }
 }
 
 #[cfg(test)]
@@ -1614,6 +1822,266 @@ mod tests {
         assert_eq!(
             r.claims.1.lock().unwrap().as_slice(),
             &[("example.org".to_string(), RelayScope::AfterHit)]
+        );
+    }
+
+    /// Claims held back until the test lets them through: what a relay
+    /// pool that is still connecting looks like to the resolver.
+    struct GatedClaims {
+        events: Vec<Event>,
+        gate: tokio::sync::Semaphore,
+        asked: Mutex<Vec<String>>,
+    }
+    impl GatedClaims {
+        fn new(events: Vec<Event>) -> Self {
+            Self {
+                events,
+                gate: tokio::sync::Semaphore::new(0),
+                asked: Mutex::new(vec![]),
+            }
+        }
+        fn open(&self) {
+            self.gate.add_permits(64);
+        }
+    }
+    impl ClaimSource for GatedClaims {
+        async fn fetch_claims(&self, domain: &str, _: RelayScope) -> Vec<Event> {
+            self.asked.lock().unwrap().push(domain.to_string());
+            let _permit = self.gate.acquire().await.unwrap();
+            self.events
+                .iter()
+                .filter(|e| e.kind == KIND_CLAIM && e.tags[0][1] == domain)
+                .cloned()
+                .collect()
+        }
+        async fn fetch_zone(&self, _: &str, _: Npub, _: RelayScope) -> Vec<Event> {
+            Vec::new()
+        }
+        async fn fetch_attestations(&self, _: &str, _: &[Npub], _: RelayScope) -> Vec<Event> {
+            Vec::new()
+        }
+    }
+
+    fn gated(
+        txt: TxtLookup,
+        pins: Arc<MemoryPinStore>,
+        claims: Vec<Event>,
+    ) -> Resolver<FakeTxt, GatedClaims> {
+        let mesh = Arc::new(FakeMesh {
+            queries: Mutex::new(vec![]),
+            registered: Mutex::new(vec![]),
+            echoes: Mutex::new(vec![]),
+            unreachable: vec![],
+            down: vec![],
+        });
+        Resolver::new(
+            ResolverConfig::default(),
+            pins,
+            FakeTxt(Mutex::new(HashMap::from([(
+                "example.org".to_string(),
+                txt,
+            )]))),
+            GatedClaims::new(claims),
+            mesh,
+        )
+    }
+
+    fn pinned(n: Npub, port: u16, method: Method) -> Arc<MemoryPinStore> {
+        let pins = Arc::new(MemoryPinStore::new());
+        pins.put(Binding {
+            domain: "example.org".into(),
+            npub: n,
+            port,
+            method,
+            verified_at: 1,
+        });
+        pins
+    }
+
+    /// Until `cond` holds, letting the claim fetch left behind run.
+    async fn eventually(cond: impl Fn() -> bool) -> bool {
+        for _ in 0..200 {
+            if cond() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        cond()
+    }
+
+    /// A record naming only the pinned server at its pinned port is answered
+    /// from the pin while the claims are still on their way; once they
+    /// arrive, what they change (here the stronger method of a DNSSEC
+    /// record) is pinned as it would have been had they been awaited.
+    #[tokio::test]
+    async fn a_pinned_domain_is_answered_without_waiting_for_its_claims() {
+        let pins = pinned(npub(1), 5355, Method::Dns);
+        let r = gated(
+            hit(npub(1)),
+            pins.clone(),
+            vec![claim_event(npub(1), "example.org")],
+        );
+        let q = build_query(1, "www.example.org", QTYPE_AAAA).unwrap();
+        let answered = tokio::time::timeout(Duration::from_secs(1), r.lookup(&q))
+            .await
+            .expect("answered while the claims are held back");
+        assert!(matches!(answered, LookupResult::Answer(_)));
+        assert_eq!(pins.get("example.org")[0].method, Method::Dns);
+
+        r.claims.open();
+        assert!(
+            eventually(|| pins.get("example.org")[0].method == Method::Dnssec).await,
+            "the claims fetched behind the answer are applied"
+        );
+        assert_eq!(r.claims.asked.lock().unwrap().as_slice(), ["example.org"]);
+        // The decision the claims made replaced the one from the pins.
+        let q = build_query(2, "www.example.org", QTYPE_A).unwrap();
+        assert!(matches!(r.lookup(&q).await, LookupResult::Answer(_)));
+        assert_eq!(r.claims.asked.lock().unwrap().len(), 1, "decided once");
+    }
+
+    /// Where the claim decides — a server the record names that is not
+    /// pinned yet, or a pinned server the record gives another port — the
+    /// lookup still waits for it.
+    #[tokio::test]
+    async fn a_new_server_or_a_moved_port_still_waits_for_the_claim() {
+        let two = TxtLookup::Hit {
+            records: vec![
+                TxtRecord {
+                    npub: npub(1),
+                    port: Some(5355),
+                },
+                TxtRecord {
+                    npub: npub(2),
+                    port: Some(5355),
+                },
+            ],
+            method: Method::Dnssec,
+        };
+        let moved = TxtLookup::Hit {
+            records: vec![TxtRecord {
+                npub: npub(1),
+                port: Some(5400),
+            }],
+            method: Method::Dnssec,
+        };
+        // No port in the record: the claim carries it, and may have moved it.
+        let portless = TxtLookup::Hit {
+            records: vec![TxtRecord {
+                npub: npub(1),
+                port: None,
+            }],
+            method: Method::Dnssec,
+        };
+        for txt in [two, moved, portless] {
+            let r = gated(txt, pinned(npub(1), 5355, Method::Dnssec), vec![]);
+            let q = build_query(1, "www.example.org", QTYPE_AAAA).unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), r.lookup(&q))
+                    .await
+                    .is_err(),
+                "waits for the claims"
+            );
+            r.claims.open();
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), r.lookup(&q))
+                    .await
+                    .is_ok()
+            );
+        }
+    }
+
+    /// A decision taken while the claims are on their way wins: here the
+    /// record was withdrawn meanwhile (a validated denial unpins the server),
+    /// and the late claims must not pin it again. The newer decision starts
+    /// no second fetch while the first runs.
+    #[tokio::test]
+    async fn a_newer_decision_outranks_the_claims_fetched_behind_an_older_one() {
+        let pins = pinned(npub(1), 5355, Method::Dns);
+        let r = gated(
+            hit(npub(1)),
+            pins.clone(),
+            vec![claim_event(npub(1), "example.org")],
+        );
+        let q = build_query(1, "www.example.org", QTYPE_AAAA).unwrap();
+        assert!(matches!(r.lookup(&q).await, LookupResult::Answer(_)));
+
+        // The decision expires and is taken again, from the same record: no
+        // second fetch while the first runs.
+        r.decisions.remove(&"example.org".to_string());
+        assert!(matches!(r.lookup(&q).await, LookupResult::Answer(_)));
+        assert_eq!(
+            r.claims.asked.lock().unwrap().len(),
+            1,
+            "one fetch at a time"
+        );
+
+        // Then the record is withdrawn: the next decision unpins the server.
+        r.decisions.remove(&"example.org".to_string());
+        r.txt.0.lock().unwrap().insert(
+            "example.org".to_string(),
+            TxtLookup::Miss {
+                method: Method::Dnssec,
+            },
+        );
+        assert_eq!(r.lookup(&q).await, LookupResult::Passthrough);
+        assert!(pins.get("example.org").is_empty(), "unpinned by the denial");
+
+        r.claims.open();
+        assert!(eventually(|| r.behind.lock().unwrap().running.is_empty()).await);
+        assert!(
+            pins.get("example.org").is_empty(),
+            "the late claims pinned nothing"
+        );
+        assert_eq!(r.lookup(&q).await, LookupResult::Passthrough);
+    }
+
+    /// A record verified more weakly than the pin leaves the pin as it is
+    /// whatever the claim says: answered from the pin, and no relay asked.
+    #[tokio::test]
+    async fn a_record_weaker_than_the_pin_fetches_no_claims() {
+        let weaker = TxtLookup::Hit {
+            records: vec![TxtRecord {
+                npub: npub(1),
+                port: Some(5355),
+            }],
+            method: Method::Dns,
+        };
+        let r = gated(weaker, pinned(npub(1), 5355, Method::Dnssec), vec![]);
+        let q = build_query(1, "www.example.org", QTYPE_AAAA).unwrap();
+        let answered = tokio::time::timeout(Duration::from_secs(1), r.lookup(&q))
+            .await
+            .expect("answered from the pin");
+        assert!(matches!(answered, LookupResult::Answer(_)));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(r.claims.asked.lock().unwrap().is_empty());
+    }
+
+    /// Caches cleared while the claims are on their way (a network change):
+    /// the fetch writes neither a pin nor a decision.
+    #[tokio::test]
+    async fn claims_fetched_behind_a_flush_are_dropped() {
+        let pins = pinned(npub(1), 5355, Method::Dns);
+        let r = gated(
+            hit(npub(1)),
+            pins.clone(),
+            vec![claim_event(npub(1), "example.org")],
+        );
+        let q = build_query(1, "www.example.org", QTYPE_AAAA).unwrap();
+        assert!(matches!(r.lookup(&q).await, LookupResult::Answer(_)));
+        r.flush_caches();
+        r.claims.open();
+        assert!(eventually(|| r.claims.gate.available_permits() < 64).await);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            pins.get("example.org")[0].method,
+            Method::Dns,
+            "nothing pinned"
+        );
+        assert!(
+            r.decisions
+                .get(&"example.org".to_string(), crate::now())
+                .is_none()
         );
     }
 

@@ -17,7 +17,11 @@ parsing, DNS synthesis, the TXT combiner, the resolver over fake sources
 and a fake mesh, the zone file, the pin file, and DNSSEC proofs over a
 synthetic signed hierarchy (root → org → example.org with a split KSK/ZSK,
 a test trust anchor): valid, expired, not yet valid, unanchored root,
-missing DS, forged TXT, a DS signed by the child, garbage.
+missing DS, forged TXT, a DS signed by the child, garbage. The resolver
+tests also cover a pinned domain decided before its claims arrive, and a
+server asked again in the background during its first backoff window
+(answering ends it; a flush hands it to the next window) — those take a
+few seconds of real time — and warming the path to the pinned servers.
 `PUBDOM_LIVE_DOMAIN=example.org cargo test -p pubdom-resolve live --
 --ignored` builds and verifies the chain of a real signed domain. fips2go's host suite adds the
 smoltcp UDP exchange against a userspace server and the proxy with a fake

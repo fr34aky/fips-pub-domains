@@ -462,6 +462,12 @@ Known holes:
 
 - **Squatting:** anyone can publish a claim for any domain. Only §5.1 steps
   1–4 resolve; unverified claims are refused.
+- **Warming (§5.3):** a resolver that starts the path to its pinned
+  servers ahead of a query tells each of them, and the mesh nodes its
+  discovery passes, that this node is online — whenever it starts or
+  changes network, not only when a name under that domain is asked. It
+  discloses no name, but the pins are the domains the user has resolved,
+  so a resolver should warm only servers it expects to need.
 - **Transport:** fips authenticates the far npub end to end, so the security
   of a lookup equals the security of the binding. Without TLS a wrong binding
   means talking securely to the wrong party — hence strict precedence.

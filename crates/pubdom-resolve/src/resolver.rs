@@ -2811,7 +2811,7 @@ mod tests {
     /// a path that settles after a lookup gave up on it.
     struct Settling {
         inner: FakeMesh,
-        fails: std::sync::atomic::AtomicUsize,
+        fails: Mutex<usize>,
     }
     impl MeshDns for Settling {
         fn query_udp(
@@ -2820,12 +2820,13 @@ mod tests {
             msg: &[u8],
             t: Duration,
         ) -> std::io::Result<Vec<u8>> {
-            use std::sync::atomic::Ordering::SeqCst;
-            if self
-                .fails
-                .fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1))
-                .is_ok()
-            {
+            let missed = {
+                let mut fails = self.fails.lock().unwrap();
+                let missed = *fails > 0;
+                *fails = fails.saturating_sub(1);
+                missed
+            };
+            if missed {
                 self.inner.queries.lock().unwrap().push(server);
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
@@ -2871,7 +2872,7 @@ mod tests {
         });
         let mesh = Arc::new(Settling {
             inner: fake_mesh(vec![]),
-            fails: std::sync::atomic::AtomicUsize::new(2),
+            fails: Mutex::new(2),
         });
         let r = Resolver::new(
             ResolverConfig::default(),
@@ -2918,7 +2919,7 @@ mod tests {
         });
         let mesh = Arc::new(Settling {
             inner: fake_mesh(vec![]),
-            fails: std::sync::atomic::AtomicUsize::new(4),
+            fails: Mutex::new(4),
         });
         let r = Resolver::new(
             ResolverConfig::default(),

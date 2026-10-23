@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Resolver::warm`: starts the mesh path to every pinned server ahead of
+  any lookup (registers its identity with the local node and sends one
+  echo, which sets off discovery and the session). For the embedder to
+  call when its node starts or changes network: right after a phone
+  connected, finding a server three hops away took 14 s, past the lookup
+  budget, so its first lookup got the legacy answer. The desktop daemon
+  warms at start and after every network change.
+
+### Changed
+
+- A server that misses its first step 3 is asked again for the same name
+  in the background until its first backoff window ends, and the window
+  ends as soon as it answers. The answer is cached, so the next lookup is
+  served over fips at once; while that runs, `retry_in` is the pause
+  between attempts (3 s) rather than the window (20 s), so the legacy
+  answer lives about 5 s (hosts floor it at `OVERRUN_TTL_SECS`) and the
+  next query finds the server's answer. Later, longer windows are waited
+  out as before.
+
 ## [0.2.9] - 2026-10-23
 
 ### Changed

@@ -246,7 +246,14 @@ claim for a public suffix (`ch`, `co.uk`) — use a bundled Public Suffix List.
   consecutive failure, at most 3 hours) and tried again when it expires.
   The first window is short because a first failure is most often the
   mesh path still settling — a node that just joined has no session to
-  the server yet.
+  the server yet. During that first window a resolver MAY keep asking the
+  server for the same name in the background, and end the window as soon
+  as it answers; it then has the answer for the next query, and the
+  legacy answer given meanwhile SHOULD expire about when it asks next.
+  Later windows are only waited out, so a server that keeps failing is
+  not asked more often. A resolver MAY also start the mesh path to its
+  pinned servers ahead of any query (register the identity, send one
+  echo) when its node starts or changes network.
   Zone records (§3.3) from any of the servers are accepted, newest first.
 - Claims whose author the record does *not* name are ignored (online).
   Offline: the pinned servers; otherwise the claim with a valid DNSSEC
@@ -455,6 +462,12 @@ Known holes:
 
 - **Squatting:** anyone can publish a claim for any domain. Only §5.1 steps
   1–4 resolve; unverified claims are refused.
+- **Warming (§5.3):** a resolver that starts the path to its pinned
+  servers ahead of a query tells each of them, and the mesh nodes its
+  discovery passes, that this node is online — whenever it starts or
+  changes network, not only when a name under that domain is asked. It
+  discloses no name, but the pins are the domains the user has resolved,
+  so a resolver should warm only servers it expects to need.
 - **Transport:** fips authenticates the far npub end to end, so the security
   of a lookup equals the security of the binding. Without TLS a wrong binding
   means talking securely to the wrong party — hence strict precedence.

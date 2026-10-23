@@ -70,6 +70,9 @@ struct State {
     upstreams: RwLock<Vec<IpAddr>>,
     /// When a query last re-read the upstreams for want of any (seconds).
     looked: std::sync::atomic::AtomicU64,
+    /// Rung when the network changes; a task warms the mesh path to the
+    /// pinned servers on each ring (and once at start).
+    warm: tokio::sync::Notify,
 }
 
 impl State {
@@ -87,6 +90,9 @@ impl State {
             *g = now;
             self.resolver.set_online(!g.is_empty());
             self.resolver.flush_caches();
+            // A new network: the mesh path to the pinned servers is worth
+            // starting before the first lookup needs it.
+            self.warm.notify_one();
         }
     }
 }
@@ -295,7 +301,20 @@ async fn run(cfg: Config, log: pubdom_control::LogRing) -> Result<()> {
         resolver,
         upstreams: RwLock::new(upstreams),
         looked: Default::default(),
+        warm: tokio::sync::Notify::new(),
     });
+    // Warm at start (the permit is stored), then after every network
+    // change; rings during a warm coalesce into one more.
+    state.warm.notify_one();
+    {
+        let st = state.clone();
+        tokio::spawn(async move {
+            loop {
+                st.warm.notified().await;
+                st.resolver.warm().await;
+            }
+        });
+    }
 
     let mut tasks = Vec::new();
     // The control socket, where its directory exists (the unit's

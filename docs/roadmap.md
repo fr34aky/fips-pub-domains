@@ -143,7 +143,16 @@ and the other platforms after that, each once decided.
   pins the tag, shipped in fips2go 0.9.4 on 2026-10-06). Checked on the phone 2026-10-06 with a fresh connect and
   a bound name right away and 35 s later: both answered over fips, so
   the unreachable-server path itself was not exercised and stays
-  verified by tests only.
+  verified by tests only. Seen again on the phone 2026-10-24 with
+  fips2go 0.9.7: discovery of the server lost its first three requests
+  (14 s), the lookup got the legacy answer, and the server's 20 s
+  window kept the legacy answer coming after its session was up. Since
+  then the resolver warms the path to the pinned servers
+  (`Resolver::warm`, the daemon at start and on a network change; the
+  phone from fips2go's next repin) and asks a server again in the
+  background during its first window, ending it when it answers. Open:
+  warm only servers in recent use — the pin file records no use, so
+  today every pinned server (up to 16) is warmed.
 - Done, by reading the code rather than changing it: the shim's debug
   lines *are* available on a release build — Settings → Advanced → Log
   level `debug` sets the whole tracing filter (`init_logging`), the

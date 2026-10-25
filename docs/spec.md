@@ -86,10 +86,12 @@ Published by the server that serves a domain.
   the DNS server of §6, with the port it listens on (absent: 5355); or
   `fips-ca`, the certificate issuer of fips-pub-pki, which has no port. A
   claim may carry one `service` tag per role. Each role has its own
-  verifier record, `_<service>.<domain>` (§4), and its own chain; the
-  resolver verifies `fips-dns` and ignores the rest, the issuer tooling
-  verifies `fips-ca` with the same code (`ServiceClaim`,
-  `verify_chain_for`). An issuer key is not a server: a `fips-ca` claim
+  verifier record, `_<service>.<domain>` (§4), and its own chain, in its
+  own `dnssec` tag whose optional third element names the role
+  (`["dnssec", "<chain>", "fips-ca"]`; absent, `fips-dns`, so claims
+  published before roles existed read as before); the resolver verifies
+  the `fips-dns` tag and ignores the rest, the issuer tooling verifies the
+  `fips-ca` one with the same code (`ServiceClaim`, `verify_chain_for`). An issuer key is not a server: a `fips-ca` claim
   without a `fips-dns` tag is no DNS claim, and the other way round.
 - Clients query `{"kinds":[37197], "#d":["example.org"]}` and may receive
   claims from several authors (§5.3).

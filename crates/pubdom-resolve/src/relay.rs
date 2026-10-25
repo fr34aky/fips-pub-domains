@@ -87,6 +87,25 @@ impl RelayClient {
         )
     }
 
+    /// One author's attestation for `domain` from the relays `scope`
+    /// allows: a witness reading back its own before re-publishing, from
+    /// every relay it publishes to (`Full`). Not for a resolver, which
+    /// reads its witnesses' from the mesh only ([`Self::fetch_attestations`]).
+    pub async fn fetch_attestations_of(
+        &self,
+        domain: &str,
+        author: &Npub,
+        scope: RelayScope,
+    ) -> Vec<CoreEvent> {
+        self.fetch(
+            KIND_ATTESTATION,
+            domain,
+            std::slice::from_ref(author),
+            scope,
+        )
+        .await
+    }
+
     /// Every attestation for `domain`, whoever published it, from every
     /// relay heard out: the serving node's own view of who vouches for it
     /// (the server's `attestations` command). A resolver never uses this —

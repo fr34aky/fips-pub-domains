@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 use pubdom_core::policy::{
     self, Decision, Input, NoProofs, ProofVerifier, ProvenRecord, TxtLookup,
 };
-use pubdom_core::{Claim, Method, Npub, PinStore, synth};
+use pubdom_core::{Attestation, Claim, Method, Npub, PinStore, synth};
 use pubdom_resolve::relay::{
     RelayScope, attestation_event_json_with, load_keys, publish_attestation_with,
 };
@@ -343,9 +343,17 @@ async fn main() -> Result<()> {
             let relays =
                 RelayClient::new(&cfg.public_relays, &cfg.mesh_relays, Duration::from_secs(3))
                     .await;
+            let own = Npub::from_hex(&keys.public_key().to_hex()).map_err(|e| anyhow!("{e}"))?;
             // Every relay heard out: an attestation names the whole server
-            // set, and a partial one would replace the witness's last.
-            let events = relays.fetch_claims(&domain, RelayScope::Full).await;
+            // set, and a partial one would replace the witness's last. The
+            // witness's own previous attestation is read at the same time,
+            // from the same relays it publishes to: it has one per domain,
+            // and what it said about keys in other roles (`fips-ca`, the
+            // issuer of fips-pub-pki) must be carried along or is erased.
+            let (events, previous) = tokio::join!(
+                relays.fetch_claims(&domain, RelayScope::Full),
+                relays.fetch_attestations_of(&domain, &own, RelayScope::Full)
+            );
             // A witness keeps no pins of its own: the record and the claims
             // of the moment decide, as they would for a first visit.
             let pins = pubdom_core::MemoryPinStore::new();
@@ -372,29 +380,54 @@ async fn main() -> Result<()> {
             // A witness is a third party: a key that claims the domain is
             // no witness for it, so attesting from a server would publish
             // an event no client counts.
-            let own = Npub::from_hex(&keys.public_key().to_hex()).map_err(|e| anyhow!("{e}"))?;
             if claims.iter().any(|c| c.author == own) {
                 relays.shutdown().await;
                 return Err(anyhow!(
                     "{domain}: this key claims the domain itself; a witness must be another node"
                 ));
             }
-            // A witness has one attestation per domain. Whatever it said
-            // about keys in other roles (`fips-ca`, the issuer of
-            // fips-pub-pki) is carried along, or this publication would
-            // erase it.
-            let others = policy::ingest_attestations(
-                &pins,
-                &domain,
-                std::slice::from_ref(&own),
-                &relays
-                    .fetch_attestations(&domain, std::slice::from_ref(&own), RelayScope::Full)
-                    .await,
-                now,
-            )
-            .pop()
-            .map(|a| a.others)
-            .unwrap_or_default();
+            // The other roles' entries of the previous attestation, newest
+            // first and whatever its age (an old entry is re-verified, not
+            // trusted). Each is carried only if its own record, verified
+            // now, still names the key: the event says `verified_at` now
+            // and one `method` for everything in it, so nothing goes in
+            // that was not verified now, and the method is the weakest of
+            // the lot.
+            let mut method = method;
+            let mut others: Vec<(String, Npub)> = Vec::new();
+            let previous = previous
+                .iter()
+                .filter_map(|e| Attestation::parse(e).ok())
+                .max_by_key(|a| a.created_at);
+            if let Some(prev) = previous {
+                let mut roles: Vec<&String> = prev.others.iter().map(|(s, _)| s).collect();
+                roles.sort();
+                roles.dedup();
+                for role in roles {
+                    let (lookup, _) = v.lookup_service(role, &domain).await;
+                    let (records, m) = match lookup {
+                        TxtLookup::Hit { records, method } if method >= Method::Dns => {
+                            (records, method)
+                        }
+                        other => {
+                            println!(
+                                "{domain}: the {role} record is not verified now ({other:?}); its entries are withdrawn"
+                            );
+                            continue;
+                        }
+                    };
+                    for (_, key) in prev.others.iter().filter(|(s, _)| s == role) {
+                        if records.iter().any(|r| r.npub == *key) {
+                            others.push((role.clone(), *key));
+                            method = method.min(m);
+                        } else {
+                            println!(
+                                "{domain}: {key} is no longer in the {role} record; withdrawn"
+                            );
+                        }
+                    }
+                }
+            }
             let all: Vec<String> = cfg
                 .public_relays
                 .iter()
@@ -435,7 +468,10 @@ async fn main() -> Result<()> {
             let kept = if others.is_empty() {
                 String::new()
             } else {
-                format!(", {} entry(ies) for other services kept", others.len())
+                format!(
+                    ", {} entry(ies) for other roles re-verified and kept",
+                    others.len()
+                )
             };
             println!(
                 "{domain}: attested {} server(s) by {method:?}{kept}, accepted by {}",

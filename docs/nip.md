@@ -55,10 +55,11 @@ in lowercase, without trailing dot, ASCII (IDNs in A-label form).
   client verify the binding without querying DNS, against the root trust
   anchor. Clients MUST refuse signatures outside their validity window, so
   authors SHOULD re-publish the claim with a fresh chain well before the
-  earliest RRSIG expiration. A chain proves one name: a claim carrying
-  several `service` tags needs a chain per record it wants proven, one
-  `dnssec` tag each, and a client verifies the one at `_<service>` for the
-  role it is checking.
+  earliest RRSIG expiration. A chain proves one name, so a claim carries
+  one `dnssec` tag per role it wants proven; the tag's optional third
+  element names that role (`["dnssec", "<chain>", "fips-ca"]`), absent
+  meaning `fips-dns`. A client verifies the tag of the role it is
+  checking and ignores the others.
 
 **A claim proves only that the author agreed to serve the domain.** It does
 not prove the author controls the domain. Any key can publish a claim for

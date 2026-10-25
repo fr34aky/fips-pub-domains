@@ -63,8 +63,11 @@ pub struct ServiceClaim {
     pub service: String,
     pub port: Option<u16>,
     pub created_at: u64,
-    /// The `dnssec` tag verbatim (base64 RFC 9102 chain for the
-    /// `_<service>.<domain>` TXT RRset), verified in phase 2.
+    /// The `dnssec` tag for this role, verbatim (base64 RFC 9102 chain for
+    /// the `_<service>.<domain>` TXT RRset), verified in phase 2. A chain
+    /// proves one record, so a claim carries one tag per role it wants
+    /// proven; the tag's third element names the role, absent meaning
+    /// `fips-dns`.
     pub dnssec: Option<String>,
 }
 
@@ -73,6 +76,8 @@ impl ServiceClaim {
     /// when the event carries none for it (a claim may carry several, one
     /// per role the author plays). A port given but unusable (`0`, not a
     /// number) is the same error: a broken tag must not pass as "no port".
+    /// The `dnssec` tag taken is the one for this role; another role's
+    /// chain could only fail to verify, so it is not offered.
     pub fn parse(ev: &Event, service: &str) -> Result<Self, ClaimError> {
         if ev.kind != KIND_CLAIM {
             return Err(ClaimError::Kind(ev.kind));
@@ -104,7 +109,12 @@ impl ServiceClaim {
             ),
             None => None,
         };
-        let dnssec = tag_value(&ev.tags, "dnssec")
+        let dnssec = ev
+            .tags
+            .iter()
+            .filter(|t| t.len() >= 2 && t[0] == "dnssec")
+            .find(|t| role_of(t) == service)
+            .map(|t| t[1].as_str())
             .filter(|s| !s.is_empty() && s.len() <= MAX_DNSSEC_B64)
             .map(str::to_owned);
         Ok(Self {
@@ -131,9 +141,22 @@ impl ServiceClaim {
         }
         let mut tags = vec![vec!["d".into(), domain.into()], service_tag];
         if let Some(chain) = dnssec {
-            tags.push(vec!["dnssec".into(), chain.into()]);
+            let mut tag = vec!["dnssec".to_string(), chain.to_string()];
+            if service != SERVICE_DNS {
+                tag.push(service.to_string());
+            }
+            tags.push(tag);
         }
         tags
+    }
+}
+
+/// The role a `p` or `dnssec` tag's optional third element names; absent
+/// or empty, `fips-dns` — the tags as published before roles existed.
+fn role_of(tag: &[String]) -> &str {
+    match tag.get(2).map(String::as_str) {
+        Some("") | None => SERVICE_DNS,
+        Some(role) => role,
     }
 }
 
@@ -305,13 +328,13 @@ impl Attestation {
         let mut others: Vec<(String, Npub)> = Vec::new();
         for t in ev.tags.iter().filter(|t| t.len() >= 2 && t[0] == "p") {
             let npub = Npub::from_hex(&t[1]).map_err(|_| ClaimError::Server)?;
-            match t.get(2).map(String::as_str).filter(|s| !s.is_empty()) {
-                None | Some(SERVICE_DNS) => {
+            match role_of(t) {
+                SERVICE_DNS => {
                     if !servers.contains(&npub) {
                         servers.push(npub);
                     }
                 }
-                Some(service) => {
+                service => {
                     let entry = (service.to_string(), npub);
                     if !others.contains(&entry) {
                         others.push(entry);
@@ -355,7 +378,9 @@ impl Attestation {
 
     /// [`Attestation::tags`] carrying `others` — the (service, key) entries
     /// of other services, kept from the witness's previous attestation so
-    /// re-attesting the servers does not erase them.
+    /// re-attesting the servers does not erase them. An entry whose
+    /// service is `fips-dns` or empty *is* a server entry (that is how
+    /// the parser reads it back) and is written as one, once.
     pub fn tags_with(
         domain: &str,
         servers: &[Npub],
@@ -363,11 +388,21 @@ impl Attestation {
         method: Method,
         verified_at: u64,
     ) -> Vec<Vec<String>> {
+        let is_dns = |service: &String| service.is_empty() || service == SERVICE_DNS;
         let mut tags = vec![vec!["d".into(), domain.into()]];
-        for s in servers {
-            tags.push(vec!["p".into(), s.to_hex()]);
+        let mut written: Vec<Npub> = Vec::new();
+        for s in servers.iter().chain(
+            others
+                .iter()
+                .filter(|(service, _)| is_dns(service))
+                .map(|(_, key)| key),
+        ) {
+            if !written.contains(s) {
+                written.push(*s);
+                tags.push(vec!["p".into(), s.to_hex()]);
+            }
         }
-        for (service, key) in others {
+        for (service, key) in others.iter().filter(|(service, _)| !is_dns(service)) {
             tags.push(vec!["p".into(), key.to_hex(), service.clone()]);
         }
         let method = match method {
@@ -465,19 +500,38 @@ mod tests {
 
     #[test]
     fn a_role_without_a_port_parses_and_a_claim_may_carry_several() {
-        // The issuer of fips-pub-pki: `service` with no port.
+        // The issuer of fips-pub-pki: `service` with no port, and a
+        // chain per role — each proves one record.
         let mut e = claim_event("example.org", "5355");
         e.tags
             .push(vec!["service".into(), crate::SERVICE_CA.into()]);
         e.tags.push(vec!["dnssec".into(), "AAAA".into()]);
+        e.tags
+            .push(vec!["dnssec".into(), "BBBB".into(), "fips-ca".into()]);
         let ca = ServiceClaim::parse(&e, crate::SERVICE_CA).unwrap();
         assert_eq!(
             (ca.service.as_str(), ca.port, ca.dnssec.as_deref()),
-            ("fips-ca", None, Some("AAAA"))
+            ("fips-ca", None, Some("BBBB"))
         );
         assert_eq!(ca.author.to_hex(), DEMO_HEX);
-        // The same event still is the DNS claim it was.
-        assert_eq!(Claim::parse(&e).unwrap().port, 5355);
+        // The same event still is the DNS claim it was, with its own chain.
+        let dns = Claim::parse(&e).unwrap();
+        assert_eq!((dns.port, dns.dnssec.as_deref()), (5355, Some("AAAA")));
+        // Tag order does not matter, and an explicit `fips-dns` third
+        // element is the plain tag.
+        e.tags.swap(3, 4);
+        e.tags[4].push("fips-dns".into());
+        assert_eq!(Claim::parse(&e).unwrap().dnssec.as_deref(), Some("AAAA"));
+        assert_eq!(
+            ServiceClaim::parse(&e, "fips-ca")
+                .unwrap()
+                .dnssec
+                .as_deref(),
+            Some("BBBB")
+        );
+        // A chain for the wrong role is no chain: it could only fail.
+        e.tags.retain(|t| t[0] != "dnssec" || t[1] != "BBBB");
+        assert_eq!(ServiceClaim::parse(&e, "fips-ca").unwrap().dnssec, None);
         // A role the event does not carry.
         assert_eq!(
             ServiceClaim::parse(&e, "fips-http").unwrap_err(),
@@ -491,9 +545,11 @@ mod tests {
             ServiceClaim::parse(&bad, "fips-ca").unwrap_err(),
             ClaimError::Service
         );
-        // The builder round-trips, with and without a port.
-        let tags = ServiceClaim::tags("example.org", "fips-ca", None, Some("AAAA"));
+        // The builder round-trips, with and without a port, and writes
+        // the role on the chain of every role but `fips-dns`.
+        let tags = ServiceClaim::tags("example.org", "fips-ca", None, Some("BBBB"));
         assert_eq!(tags[1], vec!["service".to_string(), "fips-ca".to_string()]);
+        assert_eq!(tags[2], vec!["dnssec", "BBBB", "fips-ca"]);
         let again = ServiceClaim::parse(
             &Event {
                 tags,
@@ -504,8 +560,13 @@ mod tests {
         .unwrap();
         assert_eq!(again, ca);
         assert_eq!(
-            ServiceClaim::tags("example.org", "fips-dns", Some(5355), None),
-            Claim::tags("example.org", 5355, None)
+            ServiceClaim::tags("example.org", "fips-dns", Some(5355), Some("AAAA")),
+            Claim::tags("example.org", 5355, Some("AAAA"))
+        );
+        assert_eq!(
+            Claim::tags("example.org", 5355, Some("AAAA"))[2],
+            vec!["dnssec", "AAAA"],
+            "the DNS claim's tag is as it always was"
         );
     }
 
@@ -598,5 +659,24 @@ mod tests {
         let a = Attestation::parse(&ca_only).unwrap();
         assert!(a.servers.is_empty());
         assert_eq!(a.others.len(), 1);
+        // The builder mirrors the parser: an "other" entry for `fips-dns`
+        // or with an empty role is a server entry, written once.
+        let sneaky = vec![
+            ("".to_string(), server),
+            ("fips-dns".to_string(), issuer),
+            ("fips-ca".to_string(), issuer),
+        ];
+        let tags = Attestation::tags_with("example.org", &[server], &sneaky, Method::Dns, 40);
+        let p: Vec<&Vec<String>> = tags.iter().filter(|t| t[0] == "p").collect();
+        assert_eq!(p.len(), 3);
+        assert_eq!(p[0], &vec!["p".to_string(), server.to_hex()]);
+        assert_eq!(p[1], &vec!["p".to_string(), issuer.to_hex()]);
+        assert_eq!(
+            p[2],
+            &vec!["p".to_string(), issuer.to_hex(), "fips-ca".to_string()]
+        );
+        let a = Attestation::parse(&Event { tags, ..ca_only }).unwrap();
+        assert_eq!(a.servers, vec![server, issuer]);
+        assert_eq!(a.others, vec![("fips-ca".to_string(), issuer)]);
     }
 }

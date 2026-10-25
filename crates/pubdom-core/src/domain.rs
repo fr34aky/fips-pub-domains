@@ -85,9 +85,16 @@ pub fn candidates(name: &str) -> Vec<String> {
     out
 }
 
-/// The `_fips-dns.<domain>` name that carries the verifier TXT record.
+/// The `_fips-dns.<domain>` name that carries the verifier TXT record of
+/// the `fips-dns` service.
 pub fn txt_name(domain: &str) -> String {
-    format!("{}.{}", crate::TXT_LABEL, domain)
+    txt_name_for(crate::SERVICE_DNS, domain)
+}
+
+/// The `_<service>.<domain>` name that carries the verifier TXT record of
+/// `service` (spec §4): `_fips-dns.example.org`, `_fips-ca.example.org`.
+pub fn txt_name_for(service: &str, domain: &str) -> String {
+    format!("_{service}.{domain}")
 }
 
 /// The label of `name` relative to `domain`: `www` for
@@ -176,5 +183,9 @@ mod tests {
         assert_eq!(relative_label("example.org", "example.org"), Some("@"));
         assert_eq!(relative_label("evilexample.org", "example.org"), None);
         assert_eq!(txt_name("example.org"), "_fips-dns.example.org");
+        assert_eq!(
+            txt_name_for(crate::SERVICE_CA, "example.org"),
+            "_fips-ca.example.org"
+        );
     }
 }

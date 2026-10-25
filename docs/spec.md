@@ -28,6 +28,11 @@ Non-goals:
   addresses anyway.
 - Transport security for applications. fips encrypts end to end and
   authenticates the far npub; TLS is optional (see §8, HSTS).
+- Certificates for people and services under a domain (`alice@example.org`
+  → npub, sub-issuers, revocation, signing and encryption). That is the
+  sister project fips-pub-pki, built on this one: this specification only
+  binds an *issuer key* to a domain (the `fips-ca` role, §3.1) the way it
+  binds a server, with the same verification.
 
 ## 2. Flow overview
 
@@ -77,6 +82,17 @@ Published by the server that serves a domain.
 - `d` is the lowercase domain, no trailing dot. One claim per (domain, author).
 - The **author must be the server** the claim names. This proves the server
   agreed to serve the domain; it does **not** prove domain ownership.
+- `service` names a **role** the author plays for the domain: `fips-dns`,
+  the DNS server of §6, with the port it listens on (absent: 5355); or
+  `fips-ca`, the certificate issuer of fips-pub-pki, which has no port. A
+  claim may carry one `service` tag per role. Each role has its own
+  verifier record, `_<service>.<domain>` (§4), and its own chain, in its
+  own `dnssec` tag whose optional third element names the role
+  (`["dnssec", "<chain>", "fips-ca"]`; absent, `fips-dns`, so claims
+  published before roles existed read as before); the resolver verifies
+  the `fips-dns` tag and ignores the rest, the issuer tooling verifies the
+  `fips-ca` one with the same code (`ServiceClaim`, `verify_chain_for`). An issuer key is not a server: a `fips-ca` claim
+  without a `fips-dns` tag is no DNS claim, and the other way round.
 - Clients query `{"kinds":[37197], "#d":["example.org"]}` and may receive
   claims from several authors (§5.3).
 - `dnssec` (optional): the proof that the TXT record of §4 names the
@@ -109,6 +125,7 @@ Internet access.
   "tags": [
     ["d", "example.org"],
     ["p", "<npubxyz hex>"],        // one per server the witness verified
+    ["p", "<issuer hex>", "fips-ca"],   // a key verified in another role (optional)
     ["method", "dnssec"],          // or "dns" (unsigned DNS, several resolvers)
     ["verified_at", "<unix time>"]
   ],
@@ -118,6 +135,12 @@ Internet access.
 
 - One attestation per (witness, domain); it names every server the witness
   verified for the domain (§5.3), so a re-attestation replaces the whole set.
+- A `p` tag's optional third element is the role (§3.1 `service`) the key
+  was verified in; absent, `fips-dns`. The resolver counts `fips-dns`
+  entries only: a witness vouching for a domain's issuer key vouches for no
+  server. Because the event is one per (witness, domain), a witness that
+  re-attests the servers carries the other roles' entries along
+  (`fips-pubdom attest` does), or it withdraws them.
 - `method` is how the witness verified: `dnssec`, or `dns` from several
   agreeing resolvers. A single resolver's say is not worth attesting.
 - An attestation is only worth the trust the reader places in the witness.
@@ -165,8 +188,12 @@ characters, no label starting with `npub1`).
 
 ```
 _fips-dns.example.org.  TXT  "v=fips1 npub=npub1xyz… port=5355"
+_fips-ca.example.org.   TXT  "v=fips1 npub=npub1iss…"
 ```
 
+- One record name per role (§3.1): `_<service>.<domain>`. The resolver
+  reads `_fips-dns`; `_fips-ca` is read by the issuer tooling of
+  fips-pub-pki with the same verifier and the same strengths.
 - A **TXT** record, not SRV: an SRV target must be a hostname, and domain
   hosters validate it (in-zone, resolvable, known TLD) — `npub….fips.` is
   rejected by common control panels. TXT under a `_`-prefixed name is what
@@ -521,3 +548,7 @@ Known holes:
 - Relays: the node's own relay list, fetched by the resolver's own small
   relay client — fips exposes no generic event fetch; sharing its pool is a
   later optimisation.
+- Certificates (2026-10-25): a separate project, fips-pub-pki, on top of
+  this one; here only the `fips-ca` role, the `_<service>` record name and
+  the role-aware attestation `p` tag
+  ([design-history.md](design-history.md)).

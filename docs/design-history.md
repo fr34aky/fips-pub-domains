@@ -138,6 +138,32 @@ without the Internet.
   always), and skipping the probe for names seen before (a cache of
   everything the user resolves, on disk).
 
+- **Certificates are a separate project; the issuer key is bound here**
+  (2026-10-25). Asked for a decentralized PKI on top of public domains
+  (a domain owner announces signing keys, issues, verifies and revokes
+  certificates for `alice@example.org`, sub-issuers, signing and
+  encryption), the split chosen was: the question the two share — which
+  keys does `example.org` vouch for — is NIP-DB's already, so an issuer
+  key becomes one more *role* a claim can state (`service` `fips-ca`, no
+  port, its own `_fips-ca` record and chain, the same pins, proofs and
+  witnesses); everything about certificates goes to fips-pub-pki, which
+  takes `pubdom-core` and `pubdom-resolve` as pinned git dependencies the
+  way fips2go does. Rejected: making `policy::decide` service-generic (it
+  is welded to DNS serving — ports, fall-through to legacy, server order —
+  and the CA case wants the precedence, not the code; churning the crate
+  the phone pins for a consumer that did not exist yet); a parallel claim
+  kind for issuer keys (a second copy of the verification path); the DNS
+  server's node key as the issuer key (it would put the issuing key on
+  the serving node; a separate record lets the TXT name an offline root
+  and an online issuer); a new attestation kind per role (addressable
+  events are one per (kind, author, `d`), so a witness's roles must share
+  one event — hence the `p` tag's third element, and `attest` carrying
+  the other roles' entries along). The verifier of a certificate never
+  queries DNS itself: pins, the chain inside the issuer's claim, then
+  witnesses on mesh relays; an issuer may also be a bare npub
+  (`<npub>.fips`, the subdomain-under-a-trusted-anchor model above) with
+  no DNS anywhere.
+
 ## Facts from the fips codebase the design rests on
 
 - fips's Nostr key is the node identity key (`src/nostr/runtime.rs` builds

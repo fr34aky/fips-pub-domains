@@ -566,6 +566,7 @@ mod tests {
             witness: npub(witness),
             domain: "example.org".into(),
             servers: servers.iter().map(|s| npub(*s)).collect(),
+            others: Vec::new(),
             method: Method::Dns,
             verified_at: created_at,
             created_at,
@@ -1124,6 +1125,36 @@ mod tests {
             run_attested(vec![], TxtLookup::Unreachable, &claims, false, &two, 0).decision,
             Decision::NotOverFips(Reason::Unverified)
         );
+    }
+
+    /// A witness's one attestation per domain may vouch for keys in other
+    /// roles (`["p", key, "fips-ca"]`, the issuer of fips-pub-pki). Those
+    /// are not servers: an attestation naming only them counts no server,
+    /// and the issuer key never binds the domain's names.
+    #[test]
+    fn an_attestation_for_another_service_counts_no_server() {
+        let claims = [claim(1, 5)];
+        let issuer_only = |witness: u8, created_at: u64| Attestation {
+            servers: Vec::new(),
+            others: vec![("fips-ca".into(), npub(1))],
+            ..attestation(witness, &[], created_at)
+        };
+        let atts = [issuer_only(10, 7), issuer_only(11, 8)];
+        assert_eq!(
+            run_attested(vec![], TxtLookup::Unreachable, &claims, false, &atts, 2).decision,
+            Decision::NotOverFips(Reason::Unverified),
+            "two witnesses for the issuer role, none for the server"
+        );
+        // Carried alongside the servers, the entry changes nothing.
+        let mixed = [
+            Attestation {
+                others: vec![("fips-ca".into(), npub(2))],
+                ..attestation(10, &[1], 7)
+            },
+            attestation(11, &[1], 8),
+        ];
+        let o = run_attested(vec![], TxtLookup::Unreachable, &claims, false, &mixed, 2);
+        assert_eq!(bound(&o)[0].npub, npub(1));
     }
 
     /// Attestations vouch only for keys that claim the domain, witnesses

@@ -13,7 +13,7 @@ path = "src/main.rs"
 pubdom-core.workspace = true
 pubdom-resolve.workspace = true
 pubdom-control.workspace = true
-nostr-sdk = { version = "0.44", default-features = false }
+nostr-sdk.workspace = true
 simple-dns = "0.11"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

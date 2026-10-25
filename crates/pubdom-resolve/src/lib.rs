@@ -25,6 +25,10 @@ pub mod watch;
 
 pub use config::{Config, ProdResolver};
 pub use mesh::{KernelMeshDns, MeshDns};
+/// The nostr-sdk this crate is built with, for consumers that hand events
+/// and keys back and forth with it (`relay::sign_event`,
+/// `RelayClient::fetch_raw`): one version, one secp256k1.
+pub use nostr_sdk;
 pub use pins::FilePinStore;
 pub use relay::RelayClient;
 pub use resolver::{LookupResult, Resolver, ResolverConfig};

@@ -1,5 +1,7 @@
 //! The legacy DNS verifier (spec §4, §5.1): `_fips-dns.<domain> TXT` asked
 //! of each configured upstream separately, so that agreement can be counted.
+//! The `*_service` methods ask the same of another role's record,
+//! `_<service>.<domain>` (`_fips-ca` for fips-pub-pki's issuer).
 //!
 //! Strength of the result:
 //! - `Dnssec` when hickory validated the RRset itself (`validate = true`,
@@ -33,7 +35,8 @@ use hickory_resolver::proto::dnssec::rdata::DNSSECRData;
 use hickory_resolver::proto::rr::Record;
 use hickory_resolver::proto::rr::{RData, RecordType};
 use hickory_resolver::{Resolver, TokioResolver};
-use pubdom_core::domain::txt_name;
+use pubdom_core::SERVICE_DNS;
+use pubdom_core::domain::txt_name_for;
 use pubdom_core::policy::TxtLookup;
 use pubdom_core::txt::TxtRecord;
 use pubdom_core::{Method, Npub};
@@ -130,13 +133,23 @@ impl TxtVerifier {
         domain: &str,
         first_denial: &(dyn Fn() + Sync),
     ) -> crate::resolver::Probe {
+        self.probe_service(SERVICE_DNS, domain, first_denial).await
+    }
+
+    /// [`TxtVerifier::probe`] for the record of `service`.
+    pub async fn probe_service(
+        &self,
+        service: &str,
+        domain: &str,
+        first_denial: &(dyn Fn() + Sync),
+    ) -> crate::resolver::Probe {
         // With `dnssec` off the lookup's own resolvers are the plain ones.
         let plain = if self.plain.is_empty() {
             &self.resolvers
         } else {
             &self.plain
         };
-        let name = format!("{}.", txt_name(domain));
+        let name = format!("{}.", txt_name_for(service, domain));
         let futs = plain.iter().map(|(ip, r)| {
             let name = name.clone();
             async move {
@@ -194,6 +207,12 @@ impl TxtVerifier {
         self.lookup_with(domain, &|| {}).await
     }
 
+    /// [`TxtVerifier::lookup`] for the record of `service`
+    /// (`_<service>.<domain>`), same strengths and combination.
+    pub async fn lookup_service(&self, service: &str, domain: &str) -> (TxtLookup, Option<u32>) {
+        self.lookup_service_with(service, domain, &|| {}).await
+    }
+
     /// The validated lookup, calling `first_denial` when the first upstream
     /// to answer says "no record" before any has produced a record
     /// (`TxtSource::lookup_with`). Validated or not: for an unsigned zone —
@@ -205,7 +224,18 @@ impl TxtVerifier {
         domain: &str,
         first_denial: &(dyn Fn() + Sync),
     ) -> (TxtLookup, Option<u32>) {
-        let name = format!("{}.", txt_name(domain));
+        self.lookup_service_with(SERVICE_DNS, domain, first_denial)
+            .await
+    }
+
+    /// [`TxtVerifier::lookup_with`] for the record of `service`.
+    pub async fn lookup_service_with(
+        &self,
+        service: &str,
+        domain: &str,
+        first_denial: &(dyn Fn() + Sync),
+    ) -> (TxtLookup, Option<u32>) {
+        let name = format!("{}.", txt_name_for(service, domain));
         let futs = self.resolvers.iter().map(|(ip, r)| {
             let name = name.clone();
             async move {

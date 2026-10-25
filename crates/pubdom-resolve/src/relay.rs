@@ -6,6 +6,10 @@
 //! both sets are asked, but only after a TXT hit (the privacy gate, spec
 //! §8); offline, the mesh set first. fips exposes no generic event fetch,
 //! so this is our own small nostr-sdk client.
+//!
+//! The per-kind functions are this protocol's; [`sign_event`],
+//! [`publish_event`] and [`RelayClient::fetch_raw`] are the same client for
+//! any kind, for the consumers built on it (fips-pub-pki's certificates).
 
 use nostr_sdk::prelude::*;
 use pubdom_core::claim::{Attestation, Event as CoreEvent, Target, ZoneRecord};
@@ -72,13 +76,15 @@ impl RelayClient {
             return Vec::new();
         }
         let filter = Self::filter(KIND_ATTESTATION, domain, witnesses);
-        fetch_from(
-            relays_of(self.mesh.as_ref()).await,
-            &filter,
-            self.timeout,
-            None,
+        converted(
+            fetch_from(
+                relays_of(self.mesh.as_ref()).await,
+                &filter,
+                self.timeout,
+                None,
+            )
+            .await,
         )
-        .await
     }
 
     /// Every attestation for `domain`, whoever published it, from every
@@ -99,7 +105,7 @@ impl RelayClient {
             .into_iter()
             .chain(relays_of(self.mesh.as_ref()).await)
             .collect();
-        fetch_from(relays, &filter, self.timeout, Some(GRACE)).await
+        converted(fetch_from(relays, &filter, self.timeout, Some(GRACE)).await)
     }
 
     fn filter(kind: u16, domain: &str, authors: &[Npub]) -> Filter {
@@ -148,7 +154,19 @@ impl RelayClient {
         authors: &[Npub],
         scope: RelayScope,
     ) -> Vec<CoreEvent> {
-        let filter = Self::filter(kind, domain, authors);
+        converted(
+            self.fetch_raw(Self::filter(kind, domain, authors), scope)
+                .await,
+        )
+    }
+
+    /// Any filter, the full events: id, content and signature kept, every
+    /// signature verified by the pool. The relays asked follow `scope` as
+    /// for claims; the caller sets the filter's limit (the per-kind
+    /// fetches take 32). For consumers of this client with kinds of their
+    /// own — fips-pub-pki's certificates — and for tooling that needs the
+    /// event itself rather than this crate's reduced view.
+    pub async fn fetch_raw(&self, filter: Filter, scope: RelayScope) -> Vec<Event> {
         match scope {
             // Online, the TXT record names the server: a claim set short of
             // a slow relay's costs at most that relay's say until the next
@@ -224,7 +242,7 @@ async fn fetch_from(
     filter: &Filter,
     timeout: Duration,
     grace: Option<Duration>,
-) -> Vec<CoreEvent> {
+) -> Vec<Event> {
     use futures::StreamExt;
     let fetches = relays.into_iter().map(|relay| {
         let filter = filter.clone();
@@ -236,14 +254,14 @@ async fn fetch_from(
             let mut events = Vec::new();
             while let Some(item) = stream.next().await {
                 match item {
-                    Ok(ev) => events.push(convert(ev)),
+                    Ok(ev) => events.push(ev),
                     Err(e) => {
                         tracing::debug!(relay = %relay.url(), error = %e, "relay stream ended early");
                         break;
                     }
                 }
             }
-            Ok::<Vec<CoreEvent>, ()>(events)
+            Ok::<Vec<Event>, ()>(events)
         }
     });
     gather(futures::stream::FuturesUnordered::from_iter(fetches), grace).await
@@ -252,12 +270,13 @@ async fn fetch_from(
 /// The gathering rule, apart from nostr-sdk so it can be tested: results
 /// in completion order, an event seen on several relays kept once, and
 /// with `grace` the first non-empty result starts the clock.
-async fn gather<S, E>(mut results: S, grace: Option<Duration>) -> Vec<CoreEvent>
+async fn gather<T, S, E>(mut results: S, grace: Option<Duration>) -> Vec<T>
 where
-    S: futures::Stream<Item = Result<Vec<CoreEvent>, E>> + Unpin,
+    T: PartialEq,
+    S: futures::Stream<Item = Result<Vec<T>, E>> + Unpin,
 {
     use futures::StreamExt;
-    let mut out: Vec<CoreEvent> = Vec::new();
+    let mut out: Vec<T> = Vec::new();
     let mut deadline: Option<tokio::time::Instant> = None;
     loop {
         let next = results.next();
@@ -308,6 +327,8 @@ async fn make(urls: &[String]) -> Option<Client> {
     Some(client)
 }
 
+/// This crate's view of an event: what the policy looks at. Content and
+/// signature are dropped — the pool verified the signature on receipt.
 fn convert(ev: Event) -> CoreEvent {
     CoreEvent {
         kind: ev.kind.as_u16(),
@@ -315,6 +336,10 @@ fn convert(ev: Event) -> CoreEvent {
         created_at: ev.created_at.as_secs(),
         tags: ev.tags.iter().map(|t| t.clone().to_vec()).collect(),
     }
+}
+
+fn converted(events: Vec<Event>) -> Vec<CoreEvent> {
+    events.into_iter().map(convert).collect()
 }
 
 /// Publish a claim for `domain` signed with `keys` to `relays`. Addressable:
@@ -371,12 +396,40 @@ pub async fn publish_attestation(
     verified_at: u64,
     timeout: Duration,
 ) -> Result<Outcome, String> {
+    publish_attestation_with(
+        keys,
+        relays,
+        domain,
+        servers,
+        &[],
+        method,
+        verified_at,
+        timeout,
+    )
+    .await
+}
+
+/// [`publish_attestation`] carrying `others`, the (service, key) entries
+/// of other roles from the witness's previous attestation
+/// (`Attestation::others`): the event is one per (witness, domain), so
+/// publishing the servers alone would erase them.
+#[allow(clippy::too_many_arguments)]
+pub async fn publish_attestation_with(
+    keys: Keys,
+    relays: &[String],
+    domain: &str,
+    servers: &[Npub],
+    others: &[(String, Npub)],
+    method: Method,
+    verified_at: u64,
+    timeout: Duration,
+) -> Result<Outcome, String> {
     attestable(method)?;
     publish(
         keys,
         relays,
         KIND_ATTESTATION,
-        Attestation::tags(domain, servers, method, verified_at),
+        Attestation::tags_with(domain, servers, others, method, verified_at),
         timeout,
     )
     .await
@@ -432,6 +485,21 @@ async fn publish(
     tags: Vec<Vec<String>>,
     timeout: Duration,
 ) -> Result<Outcome, String> {
+    publish_event(keys, relays, kind, tags, "", timeout).await
+}
+
+/// Sign and publish an event of any `kind` with `tags` and `content` to
+/// `relays`, as the per-kind functions do for this protocol's events:
+/// connections awaited up to `timeout`, the outcome per relay. For the
+/// consumers built on this client (fips-pub-pki).
+pub async fn publish_event(
+    keys: Keys,
+    relays: &[String],
+    kind: u16,
+    tags: Vec<Vec<String>>,
+    content: &str,
+    timeout: Duration,
+) -> Result<Outcome, String> {
     let client = Client::builder().signer(keys).build();
     for u in relays {
         client.add_relay(u).await.map_err(|e| format!("{u}: {e}"))?;
@@ -452,7 +520,7 @@ async fn publish(
     // before the handshake is "relay not connected".
     client.connect().await;
     client.wait_for_connection(timeout).await;
-    let builder = EventBuilder::new(Kind::from(kind), "").tags(parse_tags(tags)?);
+    let builder = EventBuilder::new(Kind::from(kind), content).tags(parse_tags(tags)?);
     let out = tokio::time::timeout(timeout, client.send_event_builder(builder))
         .await
         .map_err(|_| "timed out publishing".to_string())?
@@ -502,11 +570,24 @@ pub fn attestation_event_json(
     method: Method,
     verified_at: u64,
 ) -> Result<String, String> {
+    attestation_event_json_with(keys, domain, servers, &[], method, verified_at)
+}
+
+/// [`attestation_event_json`] carrying `others` as
+/// [`publish_attestation_with`] does.
+pub fn attestation_event_json_with(
+    keys: &Keys,
+    domain: &str,
+    servers: &[Npub],
+    others: &[(String, Npub)],
+    method: Method,
+    verified_at: u64,
+) -> Result<String, String> {
     attestable(method)?;
     signed_json(
         keys,
         KIND_ATTESTATION,
-        Attestation::tags(domain, servers, method, verified_at),
+        Attestation::tags_with(domain, servers, others, method, verified_at),
     )
 }
 
@@ -530,11 +611,25 @@ pub fn zone_event_json(
 }
 
 fn signed_json(keys: &Keys, kind: u16, tags: Vec<Vec<String>>) -> Result<String, String> {
-    let ev = EventBuilder::new(Kind::from(kind), "")
+    sign_event(keys, kind, tags, "")?
+        .try_as_pretty_json()
+        .map_err(|e| e.to_string())
+}
+
+/// An event of any `kind` with `tags` and `content`, signed with `keys`
+/// and not sent: for dry runs, for bundles handed over out of band, and
+/// for the consumers built on this client (fips-pub-pki). Tags are
+/// `["name", "value", ...]` as in this crate's builders.
+pub fn sign_event(
+    keys: &Keys,
+    kind: u16,
+    tags: Vec<Vec<String>>,
+    content: &str,
+) -> Result<Event, String> {
+    EventBuilder::new(Kind::from(kind), content)
         .tags(parse_tags(tags)?)
         .sign_with_keys(keys)
-        .map_err(|e| e.to_string())?;
-    ev.try_as_pretty_json().map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -571,6 +666,30 @@ mod tests {
                 .is_err(),
             "a single resolver's verification is refused"
         );
+    }
+
+    #[test]
+    fn sign_event_keeps_content_and_verifies() {
+        let keys = Keys::generate();
+        let tags = vec![
+            vec!["d".to_string(), "alice@example.org".to_string()],
+            vec!["expiration".to_string(), "1800000000".to_string()],
+        ];
+        let ev = sign_event(&keys, 37200, tags.clone(), "{\"name\":\"Alice\"}").unwrap();
+        ev.verify().unwrap();
+        assert_eq!(ev.kind.as_u16(), 37200);
+        assert_eq!(ev.content, "{\"name\":\"Alice\"}");
+        assert_eq!(ev.pubkey, keys.public_key());
+        assert_eq!(convert(ev).tags, tags, "the reduced view keeps the tags");
+        assert!(
+            sign_event(&keys, 1, vec![vec![]], "").is_err(),
+            "an empty tag is refused"
+        );
+        // The dry-run JSON is the same signed event with empty content.
+        let json = claim_event_json(&keys, "example.org", 5355, None).unwrap();
+        let ev = Event::from_json(&json).unwrap();
+        assert_eq!(ev.content, "");
+        assert_eq!(ev.kind.as_u16(), KIND_CLAIM);
     }
 
     #[test]

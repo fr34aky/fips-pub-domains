@@ -73,6 +73,16 @@ and the other platforms after that, each once decided.
   (spec §3.2); adding it is the maintainer's call, the PR being outside
   this repository.
 
+- **The `fips-ca` role for fips-pub-pki** (2026-10-25): `ServiceClaim`,
+  `_<service>.<domain>` records, role-aware attestation `p` tags and the
+  generic `sign_event`/`publish_event`/`fetch_raw` are in; the NIP text
+  here says so. Open: the same wording in #2487 (the maintainer's PR,
+  the user's word); the live `_fips-ca` record for the demo domain once
+  the sister project can publish an issuer claim (needs a DNS change at
+  the hoster — the user's word). The certificates themselves — kinds,
+  `name@domain`, sub-issuers with name constraints, revocation, offline
+  bundles, NIP-44 — are fips-pub-pki's roadmap, not this one.
+
 ### Desktop resolver
 
 - Done (0.2.6; on the phone in fips2go 0.9.5, 2026-10-07): **the
@@ -220,3 +230,7 @@ By design, not on the list to change:
 - Whether a domain's server should be *required* to run a mesh relay
   carrying its own claim, making every bound domain discoverable offline
   by anyone who knows the server.
+- Whether the server should publish the domain's `fips-ca` claim on the
+  issuer's behalf (it already keeps the `fips-dns` chain fresh) or the
+  issuer tooling does it alone. Decided when fips-pub-pki has an issuer;
+  the signing key must be the issuer's either way.

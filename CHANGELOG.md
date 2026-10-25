@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The `fips-ca` role, for the certificate issuer of the sister project
+  fips-pub-pki: a claim's `service` tag names a role, with a port only
+  where the role listens; each role has its own verifier record,
+  `_<service>.<domain>`. `pubdom_core::ServiceClaim` parses any role
+  (`Claim` stays the `fips-dns` one), `domain::txt_name_for`,
+  `proof::verify_chain_for`/`build_chain_for`/`build_chain_any_for`,
+  `DnssecProofs::check_service` and `TxtVerifier::lookup_service`/
+  `probe_service` verify it with the same code as the DNS binding.
+- The generic layer of the relay client is public for consumers with
+  kinds of their own: `relay::sign_event`, `relay::publish_event`,
+  `RelayClient::fetch_raw` (full events, any filter), and
+  `pubdom_resolve::nostr_sdk` so they build on one nostr-sdk.
+
+### Changed
+
+- An attestation's `p` tag may carry a third element naming the role the
+  key was verified in; the resolver counts `fips-dns` entries only, so a
+  witness vouching for a domain's issuer key vouches for no server.
+  `Attestation::others` keeps the other roles' entries and `fips-pubdom
+  attest` carries them along: a witness has one attestation per domain,
+  and re-attesting the servers must not erase what it said about the
+  issuer.
+- `nostr-sdk` is a workspace dependency (one line for the four crates).
+
 ## [0.2.10] - 2026-10-23
 
 ### Added

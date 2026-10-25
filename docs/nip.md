@@ -40,10 +40,13 @@ in lowercase, without trailing dot, ASCII (IDNs in A-label form).
 }
 ```
 
-- `service`: the service the author offers for the domain and the port it
-  listens on, on the author's overlay address. `fips-dns` is a DNS server
-  answering names under the domain over the overlay (see "Resolution"). Other
-  services MAY be added; a claim MAY carry several `service` tags.
+- `service`: a role the author plays for the domain and, for a role that
+  listens somewhere, the port on the author's overlay address. `fips-dns`
+  is a DNS server answering names under the domain over the overlay (see
+  "Resolution"); `fips-ca` is an issuer of certificates for names under the
+  domain (defined by a companion NIP; it has no port). Other roles MAY be
+  added; a claim MAY carry several `service` tags, one per role. The
+  absence of a port where the role listens is the role's default port.
 - `dnssec` (optional): the `_<service>.<domain> TXT` RRset together with its
   RRSIG chain to the root, serialized as in RFC 9102 §3 (resource records in
   uncompressed wire format, concatenated in any order, base64): the TXT
@@ -52,7 +55,10 @@ in lowercase, without trailing dot, ASCII (IDNs in A-label form).
   client verify the binding without querying DNS, against the root trust
   anchor. Clients MUST refuse signatures outside their validity window, so
   authors SHOULD re-publish the claim with a fresh chain well before the
-  earliest RRSIG expiration.
+  earliest RRSIG expiration. A chain proves one name: a claim carrying
+  several `service` tags needs a chain per record it wants proven, one
+  `dnssec` tag each, and a client verifies the one at `_<service>` for the
+  role it is checking.
 
 **A claim proves only that the author agreed to serve the domain.** It does
 not prove the author controls the domain. Any key can publish a claim for
@@ -68,13 +74,21 @@ Published by a third party (a "witness") that verified a claim.
   "pubkey": "<witness pubkey>",
   "tags": [
     ["d", "example.org"],
-    ["p", "<server pubkey>"],
+    ["p", "<server pubkey>"],                  // a fips-dns server
+    ["p", "<issuer pubkey>", "fips-ca"],       // a key verified in another role
     ["method", "dnssec"],          // "dnssec" | "dns"
     ["verified_at", "<unix seconds>"]
   ],
   "content": ""
 }
 ```
+
+A `p` tag's optional third element is the role (`service`) the witness
+verified the key in; absent, it is `fips-dns`. A key verified in one role
+is not vouched for in another. A witness has one attestation per domain,
+so it names every key it verified, in every role; a witness re-attesting
+one role MUST carry the entries of the other roles along, or it withdraws
+them.
 
 An attestation is worth only the trust the reader places in the witness.
 Clients SHOULD require attestations from `k` witnesses they configured, and
@@ -110,16 +124,19 @@ legacy DNS:
 
 ```
 _fips-dns.example.org.  TXT  "v=fips1 npub=<npub> port=5355"
+_fips-ca.example.org.   TXT  "v=fips1 npub=<issuer npub>"
 ```
 
-The record is `TXT` rather than `SRV` because SRV targets are hostnames
+One record name per role: `_<service>.<domain>`. The record is `TXT`
+rather than `SRV` because SRV targets are hostnames
 that DNS hosters validate; a TXT record under an underscore-prefixed name
 (as in ACME DNS-01 and DKIM) can be set anywhere. Its content is
 space-separated `key=value` pairs: `v=fips1` first, `npub` (bech32 public
 key) required, `port` optional (the claim's `service` tag is
 authoritative), unknown keys ignored. Several records may name several
-servers. Signing the zone with DNSSEC makes the verification cryptographic
-and enables the `dnssec` tag.
+keys in the role (redundant servers; an offline root key and an online
+issuing key). Signing the zone with DNSSEC makes the verification
+cryptographic and enables the `dnssec` tag.
 
 ## Verification
 
@@ -177,7 +194,11 @@ overlay.
 ## Relationship to other NIPs
 
 - NIP-05 maps a `user@domain` identifier to a pubkey over HTTPS — the
-  opposite direction, and dependent on HTTPS and DNS.
+  opposite direction, and dependent on HTTPS and DNS. A companion NIP
+  (Domain Certificates) does that mapping with signed events: an issuer
+  key bound to the domain by a `fips-ca` claim of this NIP certifies
+  `user@domain` identifiers and sub-issuers for names under it, verifiable
+  offline from the claim's chain.
 - NIP-85 trusted assertions (kind 30384) could carry an attestation about a
   claim's address; this NIP keeps a dedicated kind so that witnesses need no
   NIP-85 vocabulary, but a future revision may fold 37198 into it.

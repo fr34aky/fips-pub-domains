@@ -1,7 +1,7 @@
 //! DNSSEC proofs carried in claims (spec §3.1 `dnssec` tag, §5.5): the
-//! `_fips-dns` TXT RRset and every record needed to validate it from the DNS
-//! root, so a node that cannot reach DNS can still verify a domain it has
-//! never seen.
+//! `_<service>.<domain>` TXT RRset (`_fips-dns` for the resolver) and every
+//! record needed to validate it from the DNS root, so a node that cannot
+//! reach DNS can still verify a domain it has never seen.
 //!
 //! The chain is RFC 9102 style: resource records in uncompressed wire
 //! format, one after the other, base64-encoded. Order does not matter. It
@@ -28,10 +28,11 @@ use hickory_resolver::proto::rr::{DNSClass, Name, RData, Record, RecordType};
 use hickory_resolver::proto::serialize::binary::{
     BinDecodable, BinDecoder, BinEncodable, BinEncoder, NameEncoding,
 };
-use pubdom_core::claim::Claim;
-use pubdom_core::domain::txt_name;
+use pubdom_core::claim::{Claim, ServiceClaim};
+use pubdom_core::domain::txt_name_for;
 use pubdom_core::policy::{ProofVerifier, ProvenRecord};
 use pubdom_core::txt::TxtRecord;
+use pubdom_core::{Npub, SERVICE_DNS};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -48,7 +49,7 @@ const MAX_ZONES: usize = 16;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProofError {
     Encoding(String),
-    /// No validated TXT RRset at `_fips-dns.<domain>`.
+    /// No validated TXT RRset at `_<service>.<domain>`.
     Unsigned(String),
     /// Validated, but no record names the claim's author.
     NotNamed,
@@ -113,8 +114,21 @@ pub fn verify_chain(
     now: u64,
     anchors: &TrustAnchors,
 ) -> Result<Proven, ProofError> {
+    verify_chain_for(SERVICE_DNS, chain, domain, now, anchors)
+}
+
+/// [`verify_chain`] for the TXT record of `service`: `_<service>.<domain>`.
+/// A chain proves one name; the `fips-ca` record's chain says nothing
+/// about `_fips-dns` and the other way round.
+pub fn verify_chain_for(
+    service: &str,
+    chain: &str,
+    domain: &str,
+    now: u64,
+    anchors: &TrustAnchors,
+) -> Result<Proven, ProofError> {
     let records = decode_chain(chain)?;
-    let owner = Name::from_str(&format!("{}.", txt_name(domain)))
+    let owner = Name::from_str(&format!("{}.", txt_name_for(service, domain)))
         .map_err(|e| ProofError::Encoding(e.to_string()))?;
     let v = Validator {
         records: &records,
@@ -353,12 +367,40 @@ pub struct DnssecProofs {
 
 impl DnssecProofs {
     pub fn check(&self, claim: &Claim, now: u64) -> Result<Proven, ProofError> {
-        let chain = claim
-            .dnssec
-            .as_deref()
-            .ok_or_else(|| ProofError::Unsigned("the claim carries no proof".into()))?;
-        let proven = verify_chain(chain, &claim.domain, now, &self.anchors)?;
-        if proven.records.iter().any(|r| r.npub == claim.author) {
+        self.check_named(
+            SERVICE_DNS,
+            &claim.domain,
+            claim.dnssec.as_deref(),
+            claim.author,
+            now,
+        )
+    }
+
+    /// [`DnssecProofs::check`] for a claim in any role: the chain must
+    /// prove the `_<service>.<domain>` record and that record must name
+    /// the author.
+    pub fn check_service(&self, claim: &ServiceClaim, now: u64) -> Result<Proven, ProofError> {
+        self.check_named(
+            &claim.service,
+            &claim.domain,
+            claim.dnssec.as_deref(),
+            claim.author,
+            now,
+        )
+    }
+
+    fn check_named(
+        &self,
+        service: &str,
+        domain: &str,
+        dnssec: Option<&str>,
+        author: Npub,
+        now: u64,
+    ) -> Result<Proven, ProofError> {
+        let chain =
+            dnssec.ok_or_else(|| ProofError::Unsigned("the claim carries no proof".into()))?;
+        let proven = verify_chain_for(service, chain, domain, now, &self.anchors)?;
+        if proven.records.iter().any(|r| r.npub == author) {
             Ok(proven)
         } else {
             Err(ProofError::NotNamed)
@@ -396,7 +438,18 @@ pub async fn build_chain(
     upstream: IpAddr,
     timeout: Duration,
 ) -> Result<(String, Proven), String> {
-    let owner = Name::from_str(&format!("{}.", txt_name(domain))).map_err(|e| e.to_string())?;
+    build_chain_for(SERVICE_DNS, domain, upstream, timeout).await
+}
+
+/// [`build_chain`] for the TXT record of `service` (`_<service>.<domain>`).
+pub async fn build_chain_for(
+    service: &str,
+    domain: &str,
+    upstream: IpAddr,
+    timeout: Duration,
+) -> Result<(String, Proven), String> {
+    let owner = Name::from_str(&format!("{}.", txt_name_for(service, domain)))
+        .map_err(|e| e.to_string())?;
     let mut out: Vec<Record> = Vec::new();
     // The TXT RRset; its RRSIG's signer is the zone to walk up from.
     let txt = ask(upstream, &owner, RecordType::TXT, timeout).await?;
@@ -416,8 +469,14 @@ pub async fn build_chain(
                 ));
             }
             // Never publish something we would refuse ourselves.
-            let proven = verify_chain(&chain, domain, crate::now(), &TrustAnchors::default())
-                .map_err(|e| format!("collected chain {e}"))?;
+            let proven = verify_chain_for(
+                service,
+                &chain,
+                domain,
+                crate::now(),
+                &TrustAnchors::default(),
+            )
+            .map_err(|e| format!("collected chain {e}"))?;
             return Ok((chain, proven));
         }
         let ds = ask(upstream, &zone, RecordType::DS, timeout).await?;
@@ -451,9 +510,19 @@ pub async fn build_chain_any(
     upstreams: &[IpAddr],
     timeout: Duration,
 ) -> Result<(String, Proven), String> {
+    build_chain_any_for(SERVICE_DNS, domain, upstreams, timeout).await
+}
+
+/// [`build_chain_for`] from the first of `upstreams` that yields a valid one.
+pub async fn build_chain_any_for(
+    service: &str,
+    domain: &str,
+    upstreams: &[IpAddr],
+    timeout: Duration,
+) -> Result<(String, Proven), String> {
     let mut errors = Vec::new();
     for ip in upstreams {
-        match build_chain(domain, *ip, timeout).await {
+        match build_chain_for(service, domain, *ip, timeout).await {
             Ok(c) => return Ok(c),
             Err(e) => errors.push(e),
         }
@@ -549,7 +618,6 @@ mod tests {
     use hickory_resolver::proto::dnssec::{Algorithm, DigestType, SigningKey, TBS};
     use hickory_resolver::proto::rr::SerialNumber;
     use hickory_resolver::proto::rr::rdata::TXT;
-    use pubdom_core::Npub;
 
     const NOW: u64 = 1_800_000_000;
 
@@ -650,9 +718,14 @@ mod tests {
     impl World {
         /// Every record of the chain; `window` is every signature's validity.
         fn records(&self, txt: &str, window: (u64, u64)) -> Vec<Record> {
+            self.records_at("_fips-dns.example.org.", txt, window)
+        }
+
+        /// [`World::records`] with the TXT record at `owner`.
+        fn records_at(&self, owner: &str, txt: &str, window: (u64, u64)) -> Vec<Record> {
             let (inc, exp) = window;
             let (root, org, ex) = (name("."), name("org."), name("example.org."));
-            let owner = name("_fips-dns.example.org.");
+            let owner = name(owner);
             let mut out = Vec::new();
             let set = vec![Record::from_rdata(
                 owner,
@@ -716,6 +789,46 @@ mod tests {
         let mut other = claim(chain, author());
         other.domain = "example.net".into();
         assert!(proofs.verify(&other, NOW).is_none());
+    }
+
+    #[test]
+    fn a_chain_proves_one_service_record_only() {
+        // The issuer record of fips-pub-pki, `_fips-ca`, verified by the
+        // same machinery; its chain says nothing about `_fips-dns`.
+        let w = world();
+        let txt = format!("v=fips1 npub={}", author());
+        let chain =
+            encode_chain(&w.records_at("_fips-ca.example.org.", &txt, (NOW - 3600, NOW + 86400)))
+                .unwrap();
+        let p = verify_chain_for("fips-ca", &chain, "example.org", NOW, &w.anchors).unwrap();
+        assert_eq!(p.records[0].npub, author());
+        assert!(matches!(
+            verify_chain(&chain, "example.org", NOW, &w.anchors),
+            Err(ProofError::Unsigned(_))
+        ));
+        let proofs = DnssecProofs {
+            anchors: w.anchors.clone(),
+        };
+        let issuer = ServiceClaim {
+            author: author(),
+            domain: "example.org".into(),
+            service: "fips-ca".into(),
+            port: None,
+            created_at: NOW,
+            dnssec: Some(chain.clone()),
+        };
+        assert_eq!(
+            proofs.check_service(&issuer, NOW).unwrap().signed_at,
+            NOW - 3600
+        );
+        let mut stranger = issuer.clone();
+        stranger.author = Npub::from_bytes([8; 32]);
+        assert_eq!(
+            proofs.check_service(&stranger, NOW),
+            Err(ProofError::NotNamed)
+        );
+        // The DNS claim must not borrow the issuer's proof.
+        assert!(proofs.verify(&claim(chain, author()), NOW).is_none());
     }
 
     #[test]

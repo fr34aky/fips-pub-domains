@@ -1928,6 +1928,7 @@ mod tests {
             witness: w,
             domain: "example.org".into(),
             servers: vec![Npub::from_bytes([9; 32])],
+            others: Vec::new(),
             method: Method::Dnssec,
             verified_at: created_at,
             created_at,

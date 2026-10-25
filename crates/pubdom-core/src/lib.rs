@@ -17,7 +17,7 @@ pub mod policy;
 pub mod synth;
 pub mod txt;
 
-pub use claim::{Attestation, Claim, Event, ZoneRecord};
+pub use claim::{Attestation, Claim, Event, ServiceClaim, ZoneRecord};
 pub use identity::Npub;
 pub use pins::{Binding, MemoryPinStore, Method, PinStore};
 pub use policy::{Decision, Outcome, PinChange, Reason, TxtLookup};
@@ -27,13 +27,21 @@ pub const KIND_CLAIM: u16 = 37197;
 pub const KIND_ATTESTATION: u16 = 37198;
 pub const KIND_ZONE: u16 = 37199;
 
-/// The DNS name under a domain that carries the verifier record (spec §4).
+/// The DNS name under a domain that carries the verifier record (spec §4)
+/// for the `fips-dns` service. Every service has one: `_<service>.<domain>`
+/// (`domain::txt_name_for`).
 pub const TXT_LABEL: &str = "_fips-dns";
 
 /// Service name in the claim's `service` tag and default port of the
 /// domain's fips DNS server (spec §6.1).
 pub const SERVICE_DNS: &str = "fips-dns";
 pub const DEFAULT_SERVER_PORT: u16 = 5355;
+
+/// The certificate issuer role (spec §3.1): the author issues certificates
+/// for names under the domain. No port — a role, not an endpoint. The
+/// certificates themselves are the sister project's (fips-pub-pki); this
+/// crate only binds the issuer key to the domain, as it binds a server.
+pub const SERVICE_CA: &str = "fips-ca";
 
 /// Events dated further in the future than this are ignored (spec §8).
 pub const MAX_FUTURE_SECS: u64 = 600;

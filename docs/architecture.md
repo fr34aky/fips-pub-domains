@@ -26,7 +26,7 @@ decisions live; the other crates move bytes.
 | `identity` | `Npub`: x-only key ↔ bech32 ↔ hex; the `fd…` address (`fd` + SHA-256(key)[0..15], the same arithmetic as fips's `FipsAddress`, without linking fips); the `<npub>.fips` name |
 | `domain` | hostname syntax, Public Suffix List (`psl`), the candidate walk `www.a.example.org → [example.org, a.example.org, www.a.example.org]`, zone label rules |
 | `txt` | the `v=fips1 npub=… port=…` verifier record |
-| `claim` | kind 37197 claims and kind 37199 zone records from a transport-neutral `Event`, with the size limits |
+| `claim` | kind 37197 claims (`Claim` for the `fips-dns` role, `ServiceClaim` for any role — `fips-ca` has no port), kind 37198 attestations (role-aware `p` tags, the other roles' entries kept in `others`) and kind 37199 zone records from a transport-neutral `Event`, with the size limits |
 | `pins` | `Binding`, `Method` (ordered by strength), the `PinStore` trait, the anti-rollback table, the JSON snapshot every platform shares |
 | `policy` | `decide()`: spec §5.1 precedence, §5.3 conflicts, §5.4 pin changes, §5.5 offline, §5.1 step 4 attestations by *k* trusted witnesses; `ingest_claims()` / `ingest_attestations()`: future-dated and rolled-back events, untrusted witnesses |
 | `synth` | DNS wire format via `simple-dns` (what fips uses): the application query, the step 3 exchange, the server's reply, the synthesized answer |
@@ -41,11 +41,11 @@ application (spec §7: a name is never made unreachable by this code).
 
 | module | what |
 |---|---|
-| `txt` | `TxtVerifier`: one hickory resolver **per upstream**, asked in parallel, so agreement can be counted: DNSSEC-validated (`Proof::Secure`) → `Dnssec`; two agreeing → `Dns`; one → `DnsSingle`; all failed → `Unreachable` (the offline path). When they disagree and anything validated, only validated answers count (a validated denial included), otherwise records outrank denials; the majority wins, a tie is `Disputed` (pins resolve, nothing else; re-asked after 60 s); bogus answers count as failed |
-| `relay` | `RelayClient`: nostr-sdk with two relay sets, public and mesh; online both are asked at once (after a TXT hit), offline the mesh set first; `publish_claim` for the server |
+| `txt` | `TxtVerifier` (`lookup`, `probe`; `lookup_service`/`probe_service` for another role's record): one hickory resolver **per upstream**, asked in parallel, so agreement can be counted: DNSSEC-validated (`Proof::Secure`) → `Dnssec`; two agreeing → `Dns`; one → `DnsSingle`; all failed → `Unreachable` (the offline path). When they disagree and anything validated, only validated answers count (a validated denial included), otherwise records outrank denials; the majority wins, a tie is `Disputed` (pins resolve, nothing else; re-asked after 60 s); bogus answers count as failed |
+| `relay` | `RelayClient`: nostr-sdk with two relay sets, public and mesh; online both are asked at once (after a TXT hit), offline the mesh set first; `publish_claim` for the server. The generic layer is public for consumers with kinds of their own (fips-pub-pki): `sign_event`, `publish_event`, `RelayClient::fetch_raw` (full events, any filter, the same scopes), and `pub use nostr_sdk` so they share one version |
 | `mesh` | the `MeshDns` trait — step 3 over UDP, TCP on truncation, identity registration through fips's responder — and `KernelMeshDns` for hosts with a TUN |
 | `pins` | `FilePinStore`: the JSON pin file, written atomically |
-| `proof` | DNSSEC proofs in claims: `build_chain` (the server collects the TXT RRset and the DNSKEY/DS chain to the root with the DO bit), `verify_chain` (RFC 4035 validation offline against hickory's built-in root anchors), `DnssecProofs`, the resolver's `ProofVerifier` |
+| `proof` | DNSSEC proofs in claims: `build_chain` (the server collects the TXT RRset and the DNSKEY/DS chain to the root with the DO bit), `verify_chain` (RFC 4035 validation offline against hickory's built-in root anchors), `DnssecProofs`, the resolver's `ProofVerifier`. The `*_for(service, …)` variants and `check_service` do the same for another role's record, `_<service>.<domain>` |
 | `config` | the YAML config shared by daemon and CLI; `build_resolver()` |
 | `resolver` | `Resolver::lookup(query) → Answer | Passthrough | Unavailable { retry_in }` |
 

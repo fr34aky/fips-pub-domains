@@ -8,7 +8,9 @@ use pubdom_core::policy::{
     self, Decision, Input, NoProofs, ProofVerifier, ProvenRecord, TxtLookup,
 };
 use pubdom_core::{Claim, Method, Npub, PinStore, synth};
-use pubdom_resolve::relay::{RelayScope, attestation_event_json, load_keys, publish_attestation};
+use pubdom_resolve::relay::{
+    RelayScope, attestation_event_json_with, load_keys, publish_attestation_with,
+};
 use pubdom_resolve::{Config, FilePinStore, LookupResult, RelayClient, TxtVerifier};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -377,6 +379,22 @@ async fn main() -> Result<()> {
                     "{domain}: this key claims the domain itself; a witness must be another node"
                 ));
             }
+            // A witness has one attestation per domain. Whatever it said
+            // about keys in other roles (`fips-ca`, the issuer of
+            // fips-pub-pki) is carried along, or this publication would
+            // erase it.
+            let others = policy::ingest_attestations(
+                &pins,
+                &domain,
+                std::slice::from_ref(&own),
+                &relays
+                    .fetch_attestations(&domain, std::slice::from_ref(&own), RelayScope::Full)
+                    .await,
+                now,
+            )
+            .pop()
+            .map(|a| a.others)
+            .unwrap_or_default();
             let all: Vec<String> = cfg
                 .public_relays
                 .iter()
@@ -387,16 +405,17 @@ async fn main() -> Result<()> {
             if dry_run {
                 println!(
                     "{}",
-                    attestation_event_json(&keys, &domain, &servers, method, now)
+                    attestation_event_json_with(&keys, &domain, &servers, &others, method, now)
                         .map_err(anyhow::Error::msg)?
                 );
                 return Ok(());
             }
-            let ok = publish_attestation(
+            let ok = publish_attestation_with(
                 keys,
                 &all,
                 &domain,
                 &servers,
+                &others,
                 method,
                 now,
                 Duration::from_secs(10),
@@ -413,8 +432,13 @@ async fn main() -> Result<()> {
                         .join("; ")
                 );
             }
+            let kept = if others.is_empty() {
+                String::new()
+            } else {
+                format!(", {} entry(ies) for other services kept", others.len())
+            };
             println!(
-                "{domain}: attested {} server(s) by {method:?}, accepted by {}",
+                "{domain}: attested {} server(s) by {method:?}{kept}, accepted by {}",
                 servers.len(),
                 ok.accepted.join(", ")
             );

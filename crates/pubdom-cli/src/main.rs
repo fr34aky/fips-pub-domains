@@ -2,7 +2,7 @@
 //! daemon would, show what the verifier and the relays say about a domain,
 //! and inspect the pins.
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand};
 use pubdom_core::policy::{
     self, Decision, Input, NoProofs, ProofVerifier, ProvenRecord, TxtLookup,
@@ -36,7 +36,14 @@ enum Cmd {
         qtype: String,
     },
     /// Show the TXT record, the claims and the decision for a domain.
-    Verify { domain: String },
+    Verify {
+        domain: String,
+        /// Ask the public relays even when DNS says the domain does not
+        /// participate (the resolver never does: a public relay would
+        /// learn of a domain DNS has not vouched for).
+        #[arg(long)]
+        all_relays: bool,
+    },
     /// Fetch and print the claims for a domain, as the relays return them.
     Claims { domain: String },
     /// Fetch and print the zone record the domain's pinned server published.
@@ -51,6 +58,11 @@ enum Cmd {
         /// Print the signed event instead of publishing it.
         #[arg(long)]
         dry_run: bool,
+        /// Refuse to publish when no previous attestation of this witness
+        /// was found: an outage of the relay holding it would otherwise
+        /// erase its entries for other roles (for unattended runs).
+        #[arg(long)]
+        require_previous: bool,
     },
     /// Fetch and print the attestations the configured witnesses published
     /// for a domain.
@@ -87,11 +99,57 @@ fn qtype(s: &str) -> Result<u16> {
         "AAAA" => synth::QTYPE_AAAA,
         "ANY" => synth::QTYPE_ANY,
         "CNAME" => synth::QTYPE_CNAME,
-        "HTTPS" => 65,
+        "SVCB" => synth::QTYPE_SVCB,
+        "HTTPS" => synth::QTYPE_HTTPS,
         other => other
             .parse()
             .map_err(|_| anyhow!("unknown qtype {other}"))?,
     })
+}
+
+/// The relays as every read-only command asks them.
+const RELAY_TIMEOUT: Duration = Duration::from_secs(3);
+
+async fn relays(cfg: &Config) -> RelayClient {
+    RelayClient::new(&cfg.public_relays, &cfg.mesh_relays, RELAY_TIMEOUT).await
+}
+
+/// Which relays a read-only command asks, with no TXT answer to go by.
+fn scope(offline: bool) -> RelayScope {
+    if offline {
+        RelayScope::Offline
+    } else {
+        RelayScope::AfterHit
+    }
+}
+
+/// The pin file as a read-only store: what the daemon has pinned, loaded
+/// once, never written back. `verify` and `zone` ingest events, which
+/// records rollback state; doing that into the daemon's live file would
+/// overwrite whatever it wrote since the load.
+fn pins_read_only(path: &std::path::Path) -> Result<pubdom_core::MemoryPinStore> {
+    let snap = match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice::<pubdom_core::pins::PinSnapshot>(&bytes)
+            .with_context(|| path.display().to_string())?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+        Err(e) => return Err(anyhow!("{}: {e}", path.display())),
+    };
+    Ok(pubdom_core::MemoryPinStore::from_snapshot(snap))
+}
+
+/// The witness's own newest attestation for `domain` among what the
+/// relays returned: the author filter is a request to the relay, not a
+/// guarantee, so another witness's event is never taken for this one's.
+fn newest_own_attestation(
+    events: &[pubdom_core::claim::Event],
+    own: Npub,
+    domain: &str,
+) -> Option<Attestation> {
+    events
+        .iter()
+        .filter_map(|e| Attestation::parse(e).ok())
+        .filter(|a| a.witness == own && a.domain == domain)
+        .max_by_key(|a| a.created_at)
 }
 
 #[tokio::main]
@@ -150,10 +208,10 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Verify { domain } => {
+        Cmd::Verify { domain, all_relays } => {
             let domain =
                 pubdom_core::domain::normalize(&domain).ok_or_else(|| anyhow!("bad domain"))?;
-            let pins = FilePinStore::open(&cfg.pins)?;
+            let pins = pins_read_only(&cfg.pins)?;
             let pinned = pins.get(&domain);
             match pinned.len() {
                 0 => println!("pins: none"),
@@ -181,21 +239,26 @@ async fn main() -> Result<()> {
             println!("txt: {txt:?} (ttl {ttl:?})");
             let scope = match txt {
                 TxtLookup::Hit { .. } => RelayScope::AfterHit,
-                // verify shows everything it can
-                TxtLookup::Miss { .. } | TxtLookup::Disputed => RelayScope::AfterHit,
+                // DNS said the domain does not participate: the resolver
+                // asks no public relay about it (spec §8), nor does verify
+                // unless told to.
+                TxtLookup::Miss { .. } | TxtLookup::Disputed if all_relays => RelayScope::AfterHit,
+                TxtLookup::Miss { .. } | TxtLookup::Disputed => RelayScope::MeshOnly,
                 TxtLookup::Unreachable if cli.offline => RelayScope::Offline,
                 TxtLookup::Unreachable => RelayScope::MeshOnly,
             };
-            let relays =
-                RelayClient::new(&cfg.public_relays, &cfg.mesh_relays, Duration::from_secs(3))
-                    .await;
+            if matches!(scope, RelayScope::MeshOnly) && !cfg.public_relays.is_empty() {
+                println!("relays: mesh only (--all-relays asks the public ones too)");
+            }
+            let relays = relays(&cfg).await;
             let events = relays.fetch_claims(&domain, scope).await;
             println!("claim events: {}", events.len());
             let claims = policy::ingest_claims(&pins, &domain, &events, pubdom_resolve::now());
             // As the resolver does: attestations matter offline only, and
             // ingesting them records rollback state, so none are fetched
             // while the record decides.
-            let att_events = if matches!(txt, TxtLookup::Unreachable) {
+            let fetched_attestations = matches!(txt, TxtLookup::Unreachable);
+            let att_events = if fetched_attestations {
                 relays
                     .fetch_attestations(&domain, &cfg.witnesses, scope)
                     .await
@@ -209,12 +272,20 @@ async fn main() -> Result<()> {
                 &att_events,
                 pubdom_resolve::now(),
             );
-            println!(
-                "attestations by trusted witnesses: {} (of {} configured, k = {})",
-                attestations.len(),
-                cfg.witnesses.len(),
-                cfg.attestation_threshold
-            );
+            if fetched_attestations {
+                println!(
+                    "attestations by trusted witnesses: {} (of {} configured, k = {})",
+                    attestations.len(),
+                    cfg.witnesses.len(),
+                    cfg.attestation_threshold
+                );
+            } else {
+                println!(
+                    "attestations: not fetched (the record decided; {} witness(es) configured, k = {})",
+                    cfg.witnesses.len(),
+                    cfg.attestation_threshold
+                );
+            }
             for a in &attestations {
                 let note = if claims.iter().any(|c| c.author == a.witness) {
                     " (a server of the domain itself: does not count)"
@@ -265,15 +336,10 @@ async fn main() -> Result<()> {
             relays.shutdown().await;
         }
         Cmd::Claims { domain } => {
-            let relays =
-                RelayClient::new(&cfg.public_relays, &cfg.mesh_relays, Duration::from_secs(3))
-                    .await;
-            let scope = if cli.offline {
-                RelayScope::Offline
-            } else {
-                RelayScope::AfterHit
-            };
-            for ev in relays.fetch_claims(&domain, scope).await {
+            let domain =
+                pubdom_core::domain::normalize(&domain).ok_or_else(|| anyhow!("bad domain"))?;
+            let relays = relays(&cfg).await;
+            for ev in relays.fetch_claims(&domain, scope(cli.offline)).await {
                 println!("{}", serde_json::to_string_pretty(&ev)?);
             }
             relays.shutdown().await;
@@ -281,7 +347,7 @@ async fn main() -> Result<()> {
         Cmd::Zone { domain } => {
             let domain =
                 pubdom_core::domain::normalize(&domain).ok_or_else(|| anyhow!("bad domain"))?;
-            let pins = FilePinStore::open(&cfg.pins)?;
+            let pins = pins_read_only(&cfg.pins)?;
             let pinned = pins.get(&domain);
             if pinned.is_empty() {
                 println!(
@@ -289,16 +355,11 @@ async fn main() -> Result<()> {
                 );
                 return Ok(());
             }
-            let relays =
-                RelayClient::new(&cfg.public_relays, &cfg.mesh_relays, Duration::from_secs(3))
-                    .await;
-            let scope = if cli.offline {
-                RelayScope::Offline
-            } else {
-                RelayScope::AfterHit
-            };
+            let relays = relays(&cfg).await;
             for pin in &pinned {
-                let events = relays.fetch_zone(&domain, &pin.npub, scope).await;
+                let events = relays
+                    .fetch_zone(&domain, &pin.npub, scope(cli.offline))
+                    .await;
                 match policy::ingest_zone(&pins, &domain, pin.npub, &events, pubdom_resolve::now())
                 {
                     Some(z) => {
@@ -319,17 +380,20 @@ async fn main() -> Result<()> {
             domain,
             key,
             dry_run,
+            require_previous,
         } => {
             let domain =
                 pubdom_core::domain::normalize(&domain).ok_or_else(|| anyhow!("bad domain"))?;
-            if upstreams.is_empty() {
+            if cli.offline {
                 return Err(anyhow!(
                     "attesting needs the legacy DNS: a witness vouches for what it verified online"
                 ));
             }
             let keys = load_keys(&key).map_err(anyhow::Error::msg)?;
+            // No upstreams configured means the system's resolvers, as the
+            // daemon's own default: a witness need not run the daemon.
             let v = TxtVerifier::new(&upstreams, cfg.dnssec, Duration::from_millis(1500))
-                .map_err(anyhow::Error::msg)?;
+                .map_err(|e| anyhow!("attesting needs the legacy DNS: {e}"))?;
             let (txt, _) = v.lookup(&domain).await;
             let method = match &txt {
                 TxtLookup::Hit { method, .. } if *method >= Method::Dns => *method,
@@ -340,9 +404,7 @@ async fn main() -> Result<()> {
                 }
                 other => return Err(anyhow!("{domain}: no verified record ({other:?})")),
             };
-            let relays =
-                RelayClient::new(&cfg.public_relays, &cfg.mesh_relays, Duration::from_secs(3))
-                    .await;
+            let relays = relays(&cfg).await;
             let own = Npub::from_hex(&keys.public_key().to_hex()).map_err(|e| anyhow!("{e}"))?;
             // Every relay heard out: an attestation names the whole server
             // set, and a partial one would replace the witness's last. The
@@ -395,10 +457,22 @@ async fn main() -> Result<()> {
             // the lot.
             let mut method = method;
             let mut others: Vec<(String, Npub)> = Vec::new();
-            let previous = previous
-                .iter()
-                .filter_map(|e| Attestation::parse(e).ok())
-                .max_by_key(|a| a.created_at);
+            let previous = newest_own_attestation(&previous, own, &domain);
+            if previous.is_none() {
+                // Nothing found is also what an outage of the relay holding
+                // it looks like, and a fetch reports no such difference; a
+                // new attestation then erases the other roles' entries on
+                // every relay that takes it.
+                if require_previous {
+                    relays.shutdown().await;
+                    return Err(anyhow!(
+                        "{domain}: no previous attestation of this witness found on any relay (--require-previous): if there was one, its entries for other roles would be erased; check the relays"
+                    ));
+                }
+                println!(
+                    "{domain}: no previous attestation of this witness found; if there was one on a relay that did not answer, its entries for other roles are erased by this one"
+                );
+            }
             if let Some(prev) = previous {
                 let mut roles: Vec<&String> = prev.others.iter().map(|(s, _)| s).collect();
                 roles.sort();
@@ -494,39 +568,55 @@ async fn main() -> Result<()> {
                 );
                 return Ok(());
             }
-            let relays =
-                RelayClient::new(&cfg.public_relays, &cfg.mesh_relays, Duration::from_secs(3))
-                    .await;
-            let scope = if cli.offline {
-                RelayScope::Offline
-            } else {
-                RelayScope::AfterHit
-            };
+            let relays = relays(&cfg).await;
             for ev in relays
-                .fetch_attestations(&domain, &cfg.witnesses, scope)
+                .fetch_attestations(&domain, &cfg.witnesses, scope(cli.offline))
                 .await
             {
                 println!("{}", serde_json::to_string_pretty(&ev)?);
             }
             relays.shutdown().await;
         }
-        Cmd::Pins { cmd } => {
-            let pins = FilePinStore::open(&cfg.pins)?;
-            match cmd {
-                PinsCmd::List => {
-                    for b in pins.list() {
-                        println!(
-                            "{}\t{}:{}\t{:?}\tverified_at {}",
-                            b.domain, b.npub, b.port, b.method, b.verified_at
-                        );
-                    }
-                }
-                PinsCmd::Forget { domain } => {
-                    pins.forget(&domain);
-                    println!("forgot {domain}");
+        Cmd::Pins { cmd } => match cmd {
+            PinsCmd::List => {
+                for b in pins_read_only(&cfg.pins)?.list() {
+                    println!(
+                        "{}\t{}:{}\t{:?}\tverified_at {}",
+                        b.domain, b.npub, b.port, b.method, b.verified_at
+                    );
                 }
             }
-        }
+            PinsCmd::Forget { domain } => {
+                let domain =
+                    pubdom_core::domain::normalize(&domain).ok_or_else(|| anyhow!("bad domain"))?;
+                // A running daemon keeps the pins in memory and writes the
+                // file itself: editing the file under it would be undone by
+                // its next save. Its control socket is the way in; the file
+                // is edited only when no daemon answers.
+                if let Some(sock) = cfg.control.as_ref().filter(|s| s.exists()) {
+                    match pubdom_control::query(
+                        sock,
+                        "forget",
+                        serde_json::json!({ "domain": domain }),
+                    ) {
+                        Ok(reply) => {
+                            println!("daemon: {}", serde_json::to_string(&reply)?);
+                            return Ok(());
+                        }
+                        Err(e) => println!(
+                            "daemon not answering on {} ({e}); editing the file",
+                            sock.display()
+                        ),
+                    }
+                }
+                let pins = FilePinStore::open(&cfg.pins)?;
+                if pins.forget(&domain) {
+                    println!("forgot {domain}");
+                } else {
+                    println!("{domain}: was not pinned");
+                }
+            }
+        },
     }
     Ok(())
 }
@@ -538,5 +628,55 @@ struct Checked(std::collections::HashMap<pubdom_core::Npub, Option<ProvenRecord>
 impl ProofVerifier for Checked {
     fn verify(&self, claim: &Claim, _now: u64) -> Option<ProvenRecord> {
         self.0.get(&claim.author).cloned().flatten()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pubdom_core::claim::Event;
+
+    #[test]
+    fn qtypes_by_name_and_number() {
+        assert_eq!(qtype("aaaa").unwrap(), synth::QTYPE_AAAA);
+        assert_eq!(qtype("SVCB").unwrap(), synth::QTYPE_SVCB);
+        assert_eq!(qtype("https").unwrap(), synth::QTYPE_HTTPS);
+        assert_eq!(qtype("64").unwrap(), 64);
+        assert!(qtype("MX?").is_err());
+    }
+
+    #[test]
+    fn the_previous_attestation_is_this_witness_s_own_newest_for_the_domain() {
+        let own = Npub::from_bytes([1; 32]);
+        let other = Npub::from_bytes([2; 32]);
+        let server = Npub::from_bytes([9; 32]);
+        let ev = |witness: Npub, domain: &str, created_at: u64| Event {
+            kind: pubdom_core::KIND_ATTESTATION,
+            pubkey: witness.to_hex(),
+            created_at,
+            tags: Attestation::tags(domain, &[server], Method::Dns, created_at),
+        };
+        let events = vec![
+            ev(own, "example.org", 100),
+            ev(own, "example.org", 200),
+            ev(other, "example.org", 300),
+            ev(own, "example.net", 400),
+        ];
+        let prev = newest_own_attestation(&events, own, "example.org").unwrap();
+        assert_eq!(
+            prev.created_at, 200,
+            "newest of this witness's for this domain"
+        );
+        assert!(
+            newest_own_attestation(&events, Npub::from_bytes([3; 32]), "example.org").is_none()
+        );
+    }
+
+    #[test]
+    fn scopes_and_a_missing_pin_file() {
+        assert!(matches!(scope(true), RelayScope::Offline));
+        assert!(matches!(scope(false), RelayScope::AfterHit));
+        let none = pins_read_only(std::path::Path::new("/nonexistent/pins.json")).unwrap();
+        assert!(none.list().is_empty());
     }
 }

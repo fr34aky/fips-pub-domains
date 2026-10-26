@@ -176,7 +176,12 @@ journalctl -u fips-pubdom | grep pinned
 
 `fips-pubdom zone <domain>` prints the zone record the pinned server
 published. `fips-pubdom verify <domain>` prints every input to the decision — pin, TXT
-result and method, claims — and the decision itself, without applying it.
+result and method, claims — and the decision itself, without applying it
+(it reads the pin file and never writes it; `--all-relays` asks the public
+relays even when DNS said the domain does not participate, which the
+resolver never does). `fips-pubdom pins forget <domain>` tells the running
+daemon through its control socket, since the daemon keeps the pins in
+memory; without a daemon it edits the file.
 `fips-pubdom --offline lookup <name>` runs a lookup as if no upstream
 existed.
 

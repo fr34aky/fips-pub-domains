@@ -24,16 +24,7 @@ impl FilePinStore {
     /// one is an error — better to stop than to silently drop every pin).
     pub fn open(path: impl Into<PathBuf>) -> io::Result<Self> {
         let path = path.into();
-        let snap = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice::<PinSnapshot>(&bytes).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("{}: {e}", path.display()),
-                )
-            })?,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => PinSnapshot::default(),
-            Err(e) => return Err(e),
-        };
+        let snap = load_snapshot(&path)?;
         Ok(Self {
             path,
             mem: MemoryPinStore::from_snapshot(snap),
@@ -67,6 +58,22 @@ impl FilePinStore {
             let _ = std::fs::remove_file(&tmp);
         }
         result
+    }
+}
+
+/// Read a pin file: a missing file is an empty store, a corrupt one an
+/// error. The one reader of the format, for the daemon's store and for
+/// the CLI's read-only view of it.
+pub fn load_snapshot(path: &Path) -> io::Result<PinSnapshot> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice::<PinSnapshot>(&bytes).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{}: {e}", path.display()),
+            )
+        }),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(PinSnapshot::default()),
+        Err(e) => Err(e),
     }
 }
 

@@ -2,7 +2,7 @@
 //! daemon would, show what the verifier and the relays say about a domain,
 //! and inspect the pins.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
 use pubdom_core::policy::{
     self, Decision, Input, NoProofs, ProofVerifier, ProvenRecord, TxtLookup,
@@ -45,7 +45,13 @@ enum Cmd {
         all_relays: bool,
     },
     /// Fetch and print the claims for a domain, as the relays return them.
-    Claims { domain: String },
+    Claims {
+        domain: String,
+        /// Ask the public relays too; by default only the mesh relays are
+        /// asked, since no DNS answer vouches for the domain here.
+        #[arg(long)]
+        all_relays: bool,
+    },
     /// Fetch and print the zone record the domain's pinned server published.
     Zone { domain: String },
     /// Be a witness: verify a domain online and publish an attestation
@@ -128,12 +134,7 @@ fn scope(offline: bool) -> RelayScope {
 /// records rollback state; doing that into the daemon's live file would
 /// overwrite whatever it wrote since the load.
 fn pins_read_only(path: &std::path::Path) -> Result<pubdom_core::MemoryPinStore> {
-    let snap = match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice::<pubdom_core::pins::PinSnapshot>(&bytes)
-            .with_context(|| path.display().to_string())?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
-        Err(e) => return Err(anyhow!("{}: {e}", path.display())),
-    };
+    let snap = pubdom_resolve::pins::load_snapshot(path)?;
     Ok(pubdom_core::MemoryPinStore::from_snapshot(snap))
 }
 
@@ -237,21 +238,37 @@ async fn main() -> Result<()> {
                 v.lookup(&domain).await
             };
             println!("txt: {txt:?} (ttl {ttl:?})");
+            // Which relays, as the resolver (spec §8): every one after a
+            // hit; none at all when DNS said the domain does not
+            // participate, unless told --all-relays; the mesh only when DNS
+            // did not answer.
             let scope = match txt {
-                TxtLookup::Hit { .. } => RelayScope::AfterHit,
-                // DNS said the domain does not participate: the resolver
-                // asks no public relay about it (spec §8), nor does verify
-                // unless told to.
-                TxtLookup::Miss { .. } | TxtLookup::Disputed if all_relays => RelayScope::AfterHit,
-                TxtLookup::Miss { .. } | TxtLookup::Disputed => RelayScope::MeshOnly,
-                TxtLookup::Unreachable if cli.offline => RelayScope::Offline,
-                TxtLookup::Unreachable => RelayScope::MeshOnly,
+                TxtLookup::Hit { .. } => Some(RelayScope::AfterHit),
+                TxtLookup::Miss { .. } | TxtLookup::Disputed if all_relays => {
+                    Some(RelayScope::AfterHit)
+                }
+                TxtLookup::Miss { .. } | TxtLookup::Disputed => None,
+                TxtLookup::Unreachable if cli.offline => Some(RelayScope::Offline),
+                TxtLookup::Unreachable => Some(RelayScope::MeshOnly),
             };
-            if matches!(scope, RelayScope::MeshOnly) && !cfg.public_relays.is_empty() {
-                println!("relays: mesh only (--all-relays asks the public ones too)");
+            match scope {
+                None => println!(
+                    "relays: not asked, DNS says the domain does not participate (--all-relays asks them anyway)"
+                ),
+                Some(RelayScope::MeshOnly) => {
+                    println!("relays: mesh only, DNS did not answer (as the resolver)")
+                }
+                _ => {}
             }
+            let scope = scope.unwrap_or(RelayScope::MeshOnly);
             let relays = relays(&cfg).await;
-            let events = relays.fetch_claims(&domain, scope).await;
+            let events = if scope == RelayScope::MeshOnly
+                && matches!(txt, TxtLookup::Miss { .. } | TxtLookup::Disputed)
+            {
+                Vec::new()
+            } else {
+                relays.fetch_claims(&domain, scope).await
+            };
             println!("claim events: {}", events.len());
             let claims = policy::ingest_claims(&pins, &domain, &events, pubdom_resolve::now());
             // As the resolver does: attestations matter offline only, and
@@ -335,11 +352,16 @@ async fn main() -> Result<()> {
             println!("pin changes: {:?} (not applied by `verify`)", out.changes);
             relays.shutdown().await;
         }
-        Cmd::Claims { domain } => {
+        Cmd::Claims { domain, all_relays } => {
             let domain =
                 pubdom_core::domain::normalize(&domain).ok_or_else(|| anyhow!("bad domain"))?;
             let relays = relays(&cfg).await;
-            for ev in relays.fetch_claims(&domain, scope(cli.offline)).await {
+            let scope = if all_relays {
+                scope(cli.offline)
+            } else {
+                RelayScope::MeshOnly
+            };
+            for ev in relays.fetch_claims(&domain, scope).await {
                 println!("{}", serde_json::to_string_pretty(&ev)?);
             }
             relays.shutdown().await;
@@ -390,8 +412,9 @@ async fn main() -> Result<()> {
                 ));
             }
             let keys = load_keys(&key).map_err(anyhow::Error::msg)?;
-            // No upstreams configured means the system's resolvers, as the
-            // daemon's own default: a witness need not run the daemon.
+            // No upstreams configured: the verifier takes the host's own
+            // resolvers. (The daemon treats an empty list as "no legacy
+            // DNS"; a witness wants DNS, and need not run the daemon.)
             let v = TxtVerifier::new(&upstreams, cfg.dnssec, Duration::from_millis(1500))
                 .map_err(|e| anyhow!("attesting needs the legacy DNS: {e}"))?;
             let (txt, _) = v.lookup(&domain).await;
@@ -469,7 +492,7 @@ async fn main() -> Result<()> {
                         "{domain}: no previous attestation of this witness found on any relay (--require-previous): if there was one, its entries for other roles would be erased; check the relays"
                     ));
                 }
-                println!(
+                eprintln!(
                     "{domain}: no previous attestation of this witness found; if there was one on a relay that did not answer, its entries for other roles are erased by this one"
                 );
             }
@@ -484,7 +507,7 @@ async fn main() -> Result<()> {
                             (records, method)
                         }
                         other => {
-                            println!(
+                            eprintln!(
                                 "{domain}: the {role} record is not verified now ({other:?}); its entries are withdrawn"
                             );
                             continue;
@@ -495,7 +518,7 @@ async fn main() -> Result<()> {
                             others.push((role.clone(), *key));
                             method = method.min(m);
                         } else {
-                            println!(
+                            eprintln!(
                                 "{domain}: {key} is no longer in the {role} record; withdrawn"
                             );
                         }
@@ -593,8 +616,8 @@ async fn main() -> Result<()> {
                 // file itself: editing the file under it would be undone by
                 // its next save. Its control socket is the way in; the file
                 // is edited only when no daemon answers.
-                if let Some(sock) = cfg.control.as_ref().filter(|s| s.exists()) {
-                    match pubdom_control::query(
+                match cfg.control.as_ref().filter(|s| s.exists()) {
+                    Some(sock) => match pubdom_control::query(
                         sock,
                         "forget",
                         serde_json::json!({ "domain": domain }),
@@ -604,10 +627,17 @@ async fn main() -> Result<()> {
                             return Ok(());
                         }
                         Err(e) => println!(
-                            "daemon not answering on {} ({e}); editing the file",
+                            "daemon not answering on {} ({e}); editing the file. A daemon that is running keeps its pins in memory: restart it.",
                             sock.display()
                         ),
-                    }
+                    },
+                    None => println!(
+                        "no daemon asked (no control socket at {}); editing the file. A daemon that is running keeps its pins in memory: restart it.",
+                        cfg.control
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "control: null".into())
+                    ),
                 }
                 let pins = FilePinStore::open(&cfg.pins)?;
                 if pins.forget(&domain) {

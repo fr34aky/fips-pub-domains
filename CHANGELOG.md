@@ -52,13 +52,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   found none (an outage of the relay holding it looks the same, and the
   new event then erases those entries), and `--require-previous` refuses
   in that case for unattended runs. It no longer refuses to run without
-  configured upstreams: the system's resolvers serve, as for the daemon.
-- `fips-pubdom verify` asks the public relays only when DNS vouched for
-  the domain, as the resolver does; `--all-relays` asks them anyway. It
-  says when attestations were not fetched instead of printing "0".
-  `claims` normalizes the domain before asking the relays. `lookup`
-  takes `SVCB` as a query type. The relay client and scope are built in
-  one place.
+  configured upstreams: the host's own resolvers serve (the daemon
+  treats an empty list as no legacy DNS; a witness wants DNS). Its
+  notices go to stderr, so `--dry-run` still prints one JSON document.
+- `fips-pubdom verify` asks relays as the resolver does: all after a
+  DNS hit, none when DNS says the domain does not participate
+  (`--all-relays` asks them anyway), the mesh only when DNS did not
+  answer; it says which. It says when attestations were not fetched
+  instead of printing "0". `claims` normalizes the domain and asks the
+  mesh relays only unless `--all-relays`. `lookup` takes `SVCB` as a
+  query type. The relay client and scope are built in one place;
+  `pubdom_resolve::pins::load_snapshot` is the one reader of the pin
+  file, for the daemon's store and the CLI's read-only view.
 
 ## [0.2.10] - 2026-10-23
 

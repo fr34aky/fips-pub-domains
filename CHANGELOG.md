@@ -36,6 +36,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-stamp as verified what it did not verify now.
 - `nostr-sdk` is a workspace dependency (one line for the four crates).
 
+### Fixed
+
+- `fips-pubdom verify` and `zone` no longer write the daemon's pin file:
+  they ingested events into the live file, whose rollback bookkeeping
+  then saved a stale snapshot over whatever the daemon had written
+  since. They load the file read-only. `pins forget` goes through a
+  running daemon's control socket (the daemon keeps the pins in memory
+  and would have undone a file edit at its next save), normalizes the
+  domain and says whether anything was forgotten; the file is edited
+  only when no daemon answers.
+- `fips-pubdom attest` takes the newest attestation *of this witness for
+  this domain* as the one to carry other roles' entries from (the relay's
+  author filter is a request, not a guarantee), says plainly when it
+  found none (an outage of the relay holding it looks the same, and the
+  new event then erases those entries), and `--require-previous` refuses
+  in that case for unattended runs. It no longer refuses to run without
+  configured upstreams: the host's own resolvers serve (the daemon
+  treats an empty list as no legacy DNS; a witness wants DNS). Its
+  notices go to stderr, so `--dry-run` still prints one JSON document.
+- `fips-pubdom verify` asks relays as the resolver does: all after a
+  DNS hit, none when DNS says the domain does not participate
+  (`--all-relays` asks them anyway), the mesh only when DNS did not
+  answer; it says which. It says when attestations were not fetched
+  instead of printing "0". `claims` normalizes the domain and asks the
+  mesh relays only unless `--all-relays`. `lookup` takes `SVCB` as a
+  query type. The relay client and scope are built in one place;
+  `pubdom_resolve::pins::load_snapshot` is the one reader of the pin
+  file, for the daemon's store and the CLI's read-only view.
+
 ## [0.2.10] - 2026-10-23
 
 ### Added

@@ -264,7 +264,12 @@ relays only** (their witness list is not for a public relay to see), so
 configure at least one `mesh_relays` entry the clients share. Run it
 again whenever the server set changes, and periodically (a daily timer
 is plenty): a client asks for the newest attestation per witness and
-ignores one verified more than 30 days ago. `fips-pubdom attestations example.org` shows
+ignores one verified more than 30 days ago. On a timer, pass
+`--require-previous`: a witness has one attestation per domain, and if
+the relay holding its previous one does not answer during a run, the new
+event would erase what it said about the domain's other roles (the
+`fips-ca` issuer key); with the flag the run refuses instead.
+`fips-pubdom attestations example.org` shows
 what the configured witnesses have published.
 
 ## Checking from another node
